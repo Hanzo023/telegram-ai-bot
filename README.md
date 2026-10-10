@@ -1,97 +1,126 @@
-# Telegram AI Assistant Bot
+# Telegram AI Bot
 
-A personal Telegram bot powered by Claude AI that provides intelligent conversational assistance.
+A personal Telegram bot powered by Claude 3.5 Sonnet for AI-assisted conversations.
 
 ## Features
 
-- 🔒 **Secure**: Only responds to authorized user (configurable user ID)
-- 💬 **Conversational**: Maintains conversation history for context-aware responses
-- ⌨️ **Typing indicators**: Shows realistic typing action while processing
-- 📝 **Markdown support**: Formats responses with Markdown for better readability
-- 🧹 **Clear command**: Reset conversation history anytime with `/clear`
-- 🤖 **Claude AI**: Powered by Claude Sonnet 5 for intelligent responses
+- Direct integration with Claude 3.5 Sonnet via Anthropic API
+- Conversation history management (maintains context across messages)
+- User authentication (only specified user can interact)
+- Simple command interface
+- Automatic conversation trimming to manage token usage
 
 ## Prerequisites
 
-- Node.js (v18 or higher)
-- A Telegram Bot Token (from [@BotFather](https://t.me/botfather))
-- An Anthropic API key (or compatible API endpoint)
-- Your Telegram User ID
+- Node.js (v18 or higher recommended)
+- A Telegram account
+- An Anthropic API key
 
-## Setup
+## Setup Instructions
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd telegram-ai-bot
-   ```
+### 1. Create a Telegram Bot
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
+1. Open Telegram and search for [@BotFather](https://t.me/botfather)
+2. Send `/newbot` command
+3. Follow the prompts to name your bot
+4. Save the bot token provided by BotFather
 
-3. **Configure environment variables**
-   
-   Copy `.env.example` to `.env`:
+### 2. Get Your Telegram User ID
+
+1. Search for [@userinfobot](https://t.me/userinfobot) on Telegram
+2. Start a conversation to get your user ID
+3. Save this ID (you'll need it for the ALLOWED_USER_ID)
+
+### 3. Get Anthropic API Key
+
+1. Sign up at [Anthropic](https://console.anthropic.com/)
+2. Navigate to API Keys section
+3. Create a new API key and save it
+
+### 4. Install Dependencies
+
+```bash
+npm install
+```
+
+### 5. Configure Environment Variables
+
+1. Copy `.env.example` to `.env`:
    ```bash
    cp .env.example .env
    ```
-   
-   Edit `.env` and fill in your credentials:
-   - `TELEGRAM_BOT_TOKEN`: Get from [@BotFather](https://t.me/botfather)
-   - `ANTHROPIC_API_KEY`: Your Anthropic API key
-   - `ANTHROPIC_BASE_URL`: API endpoint (default: https://api.anthropic.com)
-   - `ALLOWED_USER_ID`: Your Telegram user ID (numeric)
 
-   **Finding your Telegram User ID:**
-   - Message [@userinfobot](https://t.me/userinfobot) on Telegram
-   - It will reply with your numeric user ID
-
-4. **Start the bot**
-   ```bash
-   npm start
+2. Edit `.env` and fill in your credentials:
    ```
+   TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+   ANTHROPIC_API_KEY=your_anthropic_api_key_here
+   ANTHROPIC_BASE_URL=https://api.anthropic.com
+   ALLOWED_USER_ID=your_telegram_user_id_here
+   ```
+
+### 6. Run the Bot
+
+```bash
+npm start
+```
+
+The bot will start and log "Bot is running..." to the console.
 
 ## Usage
 
-Once the bot is running:
-
-1. Open Telegram and find your bot
-2. Send `/start` to see the welcome message
-3. Send any text message to chat with Claude
-4. Use `/clear` to reset the conversation history
-
-**Note:** The bot will only respond to messages from the authorized user ID configured in `.env`. All other users will be silently ignored.
-
-## Commands
+### Commands
 
 - `/start` - Display welcome message and available commands
-- `/clear` - Clear conversation history and start fresh
+- `/clear` - Clear conversation history
 
-## Project Structure
+### Chatting
 
-```
-telegram-ai-bot/
-├── bot.js           # Main bot application
-├── package.json     # Node.js dependencies and scripts
-├── .env            # Environment variables (not in git)
-├── .env.example    # Example environment variables
-├── .gitignore      # Git ignore rules
-└── README.md       # This file
-```
-
-## Technologies
-
-- [Grammy](https://grammy.dev/) - Telegram Bot framework
-- [@anthropic-ai/sdk](https://www.npmjs.com/package/@anthropic-ai/sdk) - Anthropic API client
-- [dotenv](https://www.npmjs.com/package/dotenv) - Environment variable management
+Simply send any text message to the bot, and it will respond using Claude 3.5 Sonnet. The bot maintains conversation context automatically.
 
 ## Security
 
-- The bot enforces strict user authentication via `ALLOWED_USER_ID`
-- API keys and tokens are stored in `.env` (excluded from git)
-- Unauthorized users cannot interact with the bot
+- Only the user specified in `ALLOWED_USER_ID` can interact with the bot
+- Unauthorized users are silently rejected
+- Never commit your `.env` file or share your API keys
+
+## Configuration
+
+### Conversation History
+
+The bot maintains up to 20 messages (10 exchanges) in history. Older messages are automatically removed. You can adjust this in `bot.js` by modifying the history length check:
+
+```javascript
+if (history.length > 20) {
+  history.splice(0, 2);
+}
+```
+
+### Model Selection
+
+The bot uses `claude-sonnet-5` by default. You can change the model in `bot.js`:
+
+```javascript
+model: 'claude-sonnet-5',
+```
+
+### Custom API Endpoint
+
+If you're using a custom Anthropic API endpoint or proxy, update the `ANTHROPIC_BASE_URL` in your `.env` file.
+
+## Troubleshooting
+
+### Bot doesn't respond
+
+- Verify your bot token is correct
+- Check that your user ID matches the one in `.env`
+- Ensure the bot is running in the console
+- Check console logs for errors
+
+### API errors
+
+- Verify your Anthropic API key is valid and has credits
+- Check the `ANTHROPIC_BASE_URL` is correct
+- Review console error logs for specific API error messages
 
 ## License
 
