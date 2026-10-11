@@ -581,7 +581,7 @@ bot.catch((err) => {
   console.error('Bot error:', err);
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -592,20 +592,40 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Health check server listening on port ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Health check server listening on 0.0.0.0:${PORT}`);
 });
 
-const shutdown = () => {
-  console.log('Shutting down bot gracefully...');
-  bot.stop();
+let isShuttingDown = false;
+const shutdown = (signal) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`Received ${signal}. Shutting down bot gracefully...`);
+
+  const forceExitTimeout = setTimeout(() => {
+    console.warn('Shutdown timed out, exiting process now.');
+    process.exit(0);
+  }, 4000);
+  forceExitTimeout.unref();
+
+  try {
+    bot.stop();
+  } catch (err) {
+    console.error('Error stopping bot:', err);
+  }
+
   server.close(() => {
+    console.log('Health check server closed');
     process.exit(0);
   });
+
+  if (typeof server.closeIdleConnections === 'function') {
+    server.closeIdleConnections();
+  }
 };
 
-process.once('SIGINT', shutdown);
-process.once('SIGTERM', shutdown);
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
 
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 try {
