@@ -458,36 +458,21 @@ async function generateQuizQuestions(contextText) {
     `4. "correct_option_id" must be an integer (0, 1, 2, or 3) indicating the correct choice index.\n` +
     `5. "explanation" must be informative and under 180 characters.`;
 
-  // First attempt: Gemini 3.8 Flash (fast, free, preserves Claude token balance!)
-  try {
-    const res = await callGeminiWithRetry(() =>
-      googleAI.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: quizPrompt,
-      })
-    );
-    const rawText = (res.text || '').replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-    const match = rawText.match(/\[\s*\{[\s\S]*\}\s*\]/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-    }
-  } catch (geminiErr) {
-    console.warn('Gemini quiz generation failed, falling back to Claude:', geminiErr.message);
-  }
+  // Gemini 3.8 Flash exclusively generates the quiz (preserving 100% of Claude balance)
+  const res = await callGeminiWithRetry(() =>
+    googleAI.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: quizPrompt,
+    })
+  );
 
-  // Fallback: Claude / OneProvider
-  const response = await anthropic.messages.create({
-    model: anthropicModel,
-    max_tokens: 1500,
-    messages: [{ role: 'user', content: quizPrompt }],
-  });
+  const rawText = (res.text || '')
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
 
-  const textBlocks = response.content?.filter((b) => b.type === 'text') || [];
-  const rawClaude = textBlocks.map((b) => b.text).join('\n').replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-  const match = rawClaude.match(/\[\s*\{[\s\S]*\}\s*\]/);
+  const match = rawText.match(/\[\s*\{[\s\S]*\}\s*\]/);
   if (match) {
     const parsed = JSON.parse(match[0]);
     if (Array.isArray(parsed) && parsed.length > 0) {
@@ -495,7 +480,7 @@ async function generateQuizQuestions(contextText) {
     }
   }
 
-  throw new Error('Failed to generate quiz questions array');
+  throw new Error('Gemini failed to format quiz questions array');
 }
 
 bot.command('quiz', async (ctx) => {
