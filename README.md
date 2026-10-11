@@ -1,6 +1,6 @@
 # Telegram AI Bot
 
-A personal Telegram bot powered by Claude 3.5 Sonnet for AI-assisted conversations.
+A personal Telegram bot powered by Claude 4.5 Haiku for AI-assisted conversations.
 
 ## Features
 
