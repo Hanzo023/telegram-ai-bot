@@ -3,7 +3,6 @@ import { Bot } from 'grammy';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenAI } from '@google/genai';
 import { createRequire } from 'module';
-import { readFile } from 'fs/promises';
 import path from 'path';
 import http from 'http';
 import os from 'os';
@@ -30,7 +29,12 @@ const googleAI = new GoogleGenAI({
 });
 
 const conversationHistory = new Map();
+const userLastDocument = new Map();
 const botStartTime = Date.now();
+
+const CODE_EXTENSIONS = ['py', 'java', 'cpp', 'cc', 'cxx', 'c', 'h', 'hpp', 'js', 'ts', 'cs', 'go', 'rs', 'html', 'css', 'sql'];
+const DOC_EXTENSIONS = ['pdf', 'txt', 'md'];
+const SUPPORTED_EXTENSIONS = [...CODE_EXTENSIONS, ...DOC_EXTENSIONS];
 
 bot.use(async (ctx, next) => {
   if (ctx.from?.id !== allowedUserId) {
@@ -42,14 +46,15 @@ bot.use(async (ctx, next) => {
 
 bot.command('start', async (ctx) => {
   await ctx.reply(
-    'Hello! I\'m your personal AI assistant powered by Claude Haiku.\n\n' +
+    'Hello! I\'m your personal AI assistant powered by Claude & Gemini.\n\n' +
     'Just send me any message and I\'ll help you with your questions.\n\n' +
     'You can also send me:\n' +
-    '• Voice messages & audio notes 🎙️ (powered by Gemini Flash)\n' +
-    '• PDF files (.pdf)\n' +
-    '• Text files (.txt)\n' +
-    '• Python files (.py)\n\n' +
+    '• Code files: Python (.py), Java (.java), C++ (.cpp, .h)\n' +
+    '• Documents: PDF (.pdf), Text (.txt), Markdown (.md)\n' +
+    '• Voice messages & audio notes 🎙️\n\n' +
     'Commands:\n' +
+    '/quiz - Generate an interactive quiz poll on the last uploaded file or topic\n' +
+    '/status - View bot and system resource usage\n' +
     '/clear - Clear conversation history\n' +
     '/start - Show this message',
     { parse_mode: 'Markdown' }
@@ -125,11 +130,10 @@ async function extractDocumentContent(file, ctx) {
     if (fileExtension === 'pdf') {
       const data = await pdf(Buffer.from(buffer));
       return data.text;
-    } else if (fileExtension === 'txt' || fileExtension === 'py') {
+    } else {
+      // Decode code and text files (.py, .java, .cpp, .txt, .md, etc.)
       return Buffer.from(buffer).toString('utf-8');
     }
-
-    throw new Error('Unsupported file type');
   } catch (error) {
     console.error('Error extracting document content:', error);
     throw error;
@@ -215,29 +219,62 @@ async function sendToClaudeWithHistory(ctx, content) {
 
 bot.on('message:document', async (ctx) => {
   const document = ctx.message.document;
-  const fileName = document.file_name;
+  const fileName = document.file_name || 'document';
   const fileExtension = fileName.split('.').pop().toLowerCase();
 
-  if (!['pdf', 'txt', 'py'].includes(fileExtension)) {
+  if (!SUPPORTED_EXTENSIONS.includes(fileExtension)) {
     await ctx.reply(
-      '❌ Sorry, I can only process PDF (.pdf), text (.txt), and Python (.py) files.',
+      `❌ Unsupported file type (\`.${fileExtension}\`).\n\n` +
+      `Supported formats:\n` +
+      `• **Code**: Python (.py), Java (.java), C++ (.cpp, .c, .h)\n` +
+      `• **Documents**: PDF (.pdf), Text (.txt), Markdown (.md)`,
       { parse_mode: 'Markdown' }
     );
     return;
   }
 
-  await ctx.reply(`📄 Processing ${fileName}...`);
+  await ctx.reply(`📄 Analyzing ${fileName}...`);
   await ctx.replyWithChatAction('typing');
 
   try {
     const content = await extractDocumentContent(document, ctx);
-    const prompt = `I've received a ${fileExtension.toUpperCase()} file named "${fileName}". Here's the content:\n\n${content}\n\nPlease analyze and explain this document.`;
+
+    // Save document to memory for the /quiz command
+    userLastDocument.set(ctx.from.id, {
+      fileName,
+      fileExtension,
+      content,
+      uploadedAt: Date.now(),
+    });
+
+    let prompt;
+    if (CODE_EXTENSIONS.includes(fileExtension)) {
+      prompt =
+        `I've uploaded a ${fileExtension.toUpperCase()} source code file named "${fileName}". Here is the content:\n\n` +
+        `\`\`\`${fileExtension}\n${content}\n\`\`\`\n\n` +
+        `Please provide a comprehensive technical analysis:\n` +
+        `1. 🎯 **Executive Summary**: What does this code do and what problem does it solve?\n` +
+        `2. 🏗️ **Architecture & Key Components**: Breakdown of main classes, functions/methods, and structures.\n` +
+        `3. ⚙️ **Core Logic & Complexity**: Explain the underlying algorithms and estimated time & space complexity.\n` +
+        `4. ⚠️ **Observations & Edge Cases**: Potential bugs, unhandled conditions, or optimization suggestions.\n\n` +
+        `💡 *Tip: Type /quiz anytime to test your understanding of this code with an interactive quiz!*`;
+    } else {
+      prompt =
+        `I've uploaded a document named "${fileName}". Here is the extracted text content:\n\n` +
+        `${content}\n\n` +
+        `Please provide a detailed, structured summary:\n` +
+        `1. 📌 **Executive Overview**: Main topic, purpose, and central conclusion.\n` +
+        `2. 🔑 **Key Takeaways & Core Concepts**: Crucial definitions, principles, or data.\n` +
+        `3. 📖 **Section-by-Section Breakdown**: In-depth coverage of each major topic discussed.\n` +
+        `4. 💡 **Actionable Insights / Conclusion**.\n\n` +
+        `💡 *Tip: Type /quiz anytime to test your understanding of this document with an interactive quiz!*`;
+    }
 
     await sendToClaudeWithHistory(ctx, prompt);
   } catch (error) {
     console.error('Error processing document:', error);
     await ctx.reply(
-      '❌ Sorry, I encountered an error processing the document. Please try again.',
+      '❌ Sorry, I encountered an error analyzing the file. Please try again.',
       { parse_mode: 'Markdown' }
     );
   }
@@ -352,6 +389,120 @@ async function handleVoiceMessage(ctx) {
     });
   }
 }
+
+async function generateQuizQuestions(contextText) {
+  const quizPrompt =
+    `You are an expert technical instructor. Based on the following code or document content, create exactly 3 multiple-choice quiz questions to test understanding.\n\n` +
+    `${contextText}\n\n` +
+    `CRITICAL REQUIREMENTS:\n` +
+    `1. Return ONLY a valid JSON array of objects. No markdown backticks, no comments, no intro or outro text.\n` +
+    `2. Follow this exact JSON structure:\n` +
+    `[\n` +
+    `  {\n` +
+    `    "question": "Question text here (max 280 characters)",\n` +
+    `    "options": ["Option 1", "Option 2", "Option 3", "Option 4"],\n` +
+    `    "correct_option_id": 0,\n` +
+    `    "explanation": "Brief explanation of why this answer is correct (max 180 characters)"\n` +
+    `  }\n` +
+    `]\n` +
+    `3. Provide 2 to 4 clear options per question.\n` +
+    `4. "correct_option_id" must be an integer (0, 1, 2, or 3) indicating the correct choice index.\n` +
+    `5. "explanation" must be informative and under 180 characters.`;
+
+  // First attempt: Gemini 3.8 Flash (fast, free, preserves Claude token balance!)
+  try {
+    const res = await callGeminiWithRetry(() =>
+      googleAI.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: quizPrompt,
+      })
+    );
+    const rawText = (res.text || '').replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+    const match = rawText.match(/\[\s*\{[\s\S]*\}\s*\]/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (geminiErr) {
+    console.warn('Gemini quiz generation failed, falling back to Claude:', geminiErr.message);
+  }
+
+  // Fallback: Claude / OneProvider
+  const response = await anthropic.messages.create({
+    model: anthropicModel,
+    max_tokens: 1500,
+    messages: [{ role: 'user', content: quizPrompt }],
+  });
+
+  const textBlocks = response.content?.filter((b) => b.type === 'text') || [];
+  const rawClaude = textBlocks.map((b) => b.text).join('\n').replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  const match = rawClaude.match(/\[\s*\{[\s\S]*\}\s*\]/);
+  if (match) {
+    const parsed = JSON.parse(match[0]);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed;
+    }
+  }
+
+  throw new Error('Failed to generate quiz questions array');
+}
+
+bot.command('quiz', async (ctx) => {
+  const userId = ctx.from.id;
+  const topicArg = ctx.message.text.replace(/^\/quiz\s*/i, '').trim();
+  const lastDoc = userLastDocument.get(userId);
+
+  if (!topicArg && !lastDoc) {
+    await ctx.reply(
+      '📚 *No document uploaded yet!*\n\n' +
+      'To take a quiz, you can:\n' +
+      '1. Send me a **PDF**, **Python (.py)**, **Java (.java)**, or **C++ (.cpp)** file, then type `/quiz`\n' +
+      '2. Or run `/quiz <topic>` right now (e.g. `/quiz C++ pointers` or `/quiz Java inheritance`)',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  await ctx.reply('🎲 Generating your interactive quiz poll...');
+  await ctx.replyWithChatAction('typing');
+
+  try {
+    let contextText = '';
+    if (topicArg) {
+      contextText = `Topic: "${topicArg}"`;
+    } else {
+      contextText = `Document: "${lastDoc.fileName}"\n\nContent:\n${lastDoc.content.slice(0, 15000)}`;
+    }
+
+    const quizList = await generateQuizQuestions(contextText);
+
+    for (let i = 0; i < quizList.length; i++) {
+      const q = quizList[i];
+      const questionText = `${i + 1}. ${q.question}`.slice(0, 300);
+      const options = (q.options || []).slice(0, 10).map((opt) => String(opt).slice(0, 100));
+      const correctId = Math.min(Math.max(0, parseInt(q.correct_option_id) || 0), options.length - 1);
+      const explanation = (q.explanation || 'Correct answer!').slice(0, 200);
+
+      await ctx.api.sendPoll(ctx.chat.id, questionText, options, {
+        type: 'quiz',
+        correct_option_id: correctId,
+        explanation: explanation,
+        is_anonymous: false,
+      });
+
+      // Brief delay so polls arrive in clean sequential order
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
+  } catch (err) {
+    console.error('Error generating quiz polls:', err);
+    await ctx.reply(
+      '❌ Sorry, I had trouble creating the quiz questions. Please try again or specify a topic like `/quiz python basics`.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
 
 bot.on(['message:voice', 'message:audio'], handleVoiceMessage);
 
