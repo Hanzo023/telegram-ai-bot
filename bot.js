@@ -299,8 +299,7 @@ bot.on('message:document', async (ctx) => {
         `1. 🎯 **Executive Summary**: What does this code do and what problem does it solve?\n` +
         `2. 🏗️ **Architecture & Key Components**: Breakdown of main classes, functions/methods, and structures.\n` +
         `3. ⚙️ **Core Logic & Complexity**: Explain the underlying algorithms and estimated time & space complexity.\n` +
-        `4. ⚠️ **Observations & Edge Cases**: Potential bugs, unhandled conditions, or optimization suggestions.\n\n` +
-        `💡 *Tip: Type /quiz anytime to test your understanding of this code with an interactive quiz!*`;
+        `4. ⚠️ **Observations & Edge Cases**: Potential bugs, unhandled conditions, or optimization suggestions.`;
     } else {
       const maxTextLen = 75000;
       const textToSend =
@@ -315,8 +314,7 @@ bot.on('message:document', async (ctx) => {
         `1. 📌 **Executive Overview**: Main topic, purpose, and central conclusion.\n` +
         `2. 🔑 **Key Takeaways & Core Concepts**: Crucial definitions, historical events, principles, or data.\n` +
         `3. 📖 **Section-by-Section Breakdown**: In-depth coverage of each major topic discussed.\n` +
-        `4. 💡 **Actionable Insights / Conclusion**.\n\n` +
-        `💡 *Tip: Type /quiz anytime to test your understanding of this document with an interactive quiz!*`;
+        `4. 💡 **Actionable Insights / Conclusion**.`;
     }
     // Launch Claude's thinking & summarizing
     const claudeSummaryPromise = sendToClaudeWithHistory(ctx, prompt);
