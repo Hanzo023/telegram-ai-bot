@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Bot } from 'grammy';
 import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import { createRequire } from 'module';
 import { readFile } from 'fs/promises';
 import path from 'path';
@@ -16,6 +17,10 @@ const allowedUserId = parseInt(process.env.ALLOWED_USER_ID);
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   baseURL: process.env.ANTHROPIC_BASE_URL,
+});
+
+const googleAI = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
 });
 
 const conversationHistory = new Map();
@@ -34,6 +39,7 @@ bot.command('start', async (ctx) => {
     'Hello! I\'m your personal AI assistant powered by Claude Haiku.\n\n' +
     'Just send me any message and I\'ll help you with your questions.\n\n' +
     'You can also send me:\n' +
+    '• Voice messages & audio notes 🎙️ (powered by Gemini Flash)\n' +
     '• PDF files (.pdf)\n' +
     '• Text files (.txt)\n' +
     '• Python files (.py)\n\n' +
@@ -210,6 +216,131 @@ bot.on('message:document', async (ctx) => {
     );
   }
 });
+
+async function callGeminiWithRetry(fn, maxRetries = 3, initialDelay = 1500) {
+  let delay = initialDelay;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isRetryable =
+        err.status === 503 ||
+        err.status === 429 ||
+        err.message?.includes('503') ||
+        err.message?.includes('high demand');
+      if (isRetryable && attempt < maxRetries) {
+        console.warn(`[Gemini] Temporary error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
+        await new Promise((r) => setTimeout(r, delay));
+        delay *= 2;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+async function handleVoiceMessage(ctx) {
+  const voice = ctx.message.voice || ctx.message.audio;
+  if (!voice) return;
+
+  const userId = ctx.from.id;
+  if (!conversationHistory.has(userId)) {
+    conversationHistory.set(userId, []);
+  }
+  const history = conversationHistory.get(userId);
+
+  await ctx.reply('🎧 Listening to your audio message...');
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('typing').catch(() => {});
+  }, 5000);
+
+  try {
+    const fileInfo = await ctx.api.getFile(voice.file_id);
+    const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+
+    const fileRes = await fetch(downloadUrl);
+    if (!fileRes.ok) {
+      throw new Error(`Failed to download audio file: ${fileRes.statusText}`);
+    }
+    const arrayBuffer = await fileRes.arrayBuffer();
+    const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+
+    let mimeType = voice.mime_type || 'audio/ogg';
+    if (fileInfo.file_path.endsWith('.oga') || fileInfo.file_path.endsWith('.ogg')) {
+      mimeType = 'audio/ogg';
+    } else if (fileInfo.file_path.endsWith('.mp3')) {
+      mimeType = 'audio/mp3';
+    } else if (fileInfo.file_path.endsWith('.wav')) {
+      mimeType = 'audio/wav';
+    }
+
+    const contents = history.slice(-6).map((msg) => ({
+      role: msg.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: msg.content }],
+    }));
+
+    contents.push({
+      role: 'user',
+      parts: [
+        {
+          inlineData: {
+            mimeType: mimeType,
+            data: base64Audio,
+          },
+        },
+        {
+          text:
+            'You are a personal AI assistant in Telegram. The user sent this voice message.\n\n' +
+            'Instructions:\n' +
+            '1. Accurately transcribe what the user said in the audio.\n' +
+            '2. Provide a thoughtful, helpful, and direct response to what they said.\n\n' +
+            'Format your reply like this:\n' +
+            '🎤 *You said:* "<exact transcription>"\n\n' +
+            '<your response>',
+        },
+      ],
+    });
+
+    const response = await callGeminiWithRetry(() =>
+      googleAI.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: contents,
+      })
+    );
+
+    clearInterval(typingInterval);
+
+    const replyText = response.text || 'Sorry, I could not process the voice message.';
+
+    history.push({
+      role: 'user',
+      content: '[Voice message audio]',
+    });
+    history.push({
+      role: 'assistant',
+      content: replyText,
+    });
+
+    if (history.length > 20) {
+      history.splice(0, 2);
+    }
+
+    try {
+      await ctx.reply(replyText, { parse_mode: 'Markdown' });
+    } catch (markdownErr) {
+      console.warn('Failed to send voice response with Markdown, sending plain text:', markdownErr.message);
+      await ctx.reply(replyText);
+    }
+  } catch (error) {
+    clearInterval(typingInterval);
+    console.error('Error handling voice message with Gemini:', error);
+    await ctx.reply('❌ Sorry, I encountered an error processing your voice note. Please try again.', {
+      parse_mode: 'Markdown',
+    });
+  }
+}
+
+bot.on(['message:voice', 'message:audio'], handleVoiceMessage);
 
 bot.on('message:text', async (ctx) => {
   const userMessage = ctx.message.text;

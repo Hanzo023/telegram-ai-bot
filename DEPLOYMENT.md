@@ -35,7 +35,7 @@ In the **Environment Variables** section on Render, add the variables from your 
 - `ALLOWED_USER_ID`: `your_telegram_user_id`
 - `ANTHROPIC_API_KEY`: `your_anthropic_api_key`
 - `ANTHROPIC_BASE_URL`: `https://api.anthropic.com` (or your custom proxy URL)
-- `GOOGLE_API_KEY`: (if used)
+- `GEMINI_API_KEY`: `your_gemini_api_key`
 
 Click **Deploy Web Service**.
 
