@@ -16,8 +16,14 @@ const allowedUserId = parseInt(process.env.ALLOWED_USER_ID);
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
-  baseURL: process.env.ANTHROPIC_BASE_URL,
+  ...(process.env.ANTHROPIC_BASE_URL ? { baseURL: process.env.ANTHROPIC_BASE_URL } : {}),
 });
+
+const anthropicModel =
+  process.env.ANTHROPIC_MODEL ||
+  (process.env.ANTHROPIC_BASE_URL && !process.env.ANTHROPIC_BASE_URL.includes('anthropic.com')
+    ? 'claude-haiku-4-5-20251001'
+    : 'claude-3-5-haiku-20241022');
 
 const googleAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
@@ -130,6 +136,27 @@ async function extractDocumentContent(file, ctx) {
   }
 }
 
+async function sendLongMessage(ctx, text, parseMode = 'Markdown') {
+  const MAX_LEN = 4000;
+  if (text.length <= MAX_LEN) {
+    try {
+      await ctx.reply(text, { parse_mode: parseMode });
+    } catch {
+      await ctx.reply(text);
+    }
+    return;
+  }
+
+  for (let i = 0; i < text.length; i += MAX_LEN) {
+    const chunk = text.slice(i, i + MAX_LEN);
+    try {
+      await ctx.reply(chunk, { parse_mode: parseMode });
+    } catch {
+      await ctx.reply(chunk);
+    }
+  }
+}
+
 async function sendToClaudeWithHistory(ctx, content) {
   const userId = ctx.from.id;
 
@@ -149,14 +176,18 @@ async function sendToClaudeWithHistory(ctx, content) {
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: anthropicModel,
       max_tokens: 2048,
       messages: history,
     });
 
     clearInterval(typingInterval);
 
-    const assistantMessage = response.content[0].text;
+    // Safely extract text blocks, ignoring thinking/reasoning blocks
+    const textBlocks = response.content?.filter((block) => block.type === 'text') || [];
+    const assistantMessage =
+      textBlocks.map((block) => block.text).join('\n').trim() ||
+      'Sorry, I could not generate a response.';
 
     history.push({
       role: 'assistant',
@@ -167,12 +198,7 @@ async function sendToClaudeWithHistory(ctx, content) {
       history.splice(0, 2);
     }
 
-    try {
-      await ctx.reply(assistantMessage, { parse_mode: 'Markdown' });
-    } catch (markdownError) {
-      console.warn('Failed to send with Markdown, sending as plain text:', markdownError.message);
-      await ctx.reply(assistantMessage);
-    }
+    await sendLongMessage(ctx, assistantMessage);
   } catch (error) {
     clearInterval(typingInterval);
     console.error('Error calling Claude API:', error);
