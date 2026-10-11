@@ -239,17 +239,42 @@ async function callGeminiWithRetry(fn, maxRetries = 3, initialDelay = 1500) {
   }
 }
 
+async function transcribeAudioWithGemini(base64Audio, mimeType) {
+  const contents = [
+    {
+      role: 'user',
+      parts: [
+        {
+          inlineData: {
+            mimeType: mimeType,
+            data: base64Audio,
+          },
+        },
+        {
+          text:
+            'Please transcribe this spoken audio message accurately and verbatim.\n' +
+            'Return ONLY the plain transcription text. Do not add conversational remarks, introductory text, markdown quotes, or timestamps.\n' +
+            'If the audio is completely silent or contains only inaudible noise with no discernible speech, return: [NO_SPEECH]',
+        },
+      ],
+    },
+  ];
+
+  const response = await callGeminiWithRetry(() =>
+    googleAI.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: contents,
+    })
+  );
+
+  return (response.text || '').trim();
+}
+
 async function handleVoiceMessage(ctx) {
   const voice = ctx.message.voice || ctx.message.audio;
   if (!voice) return;
 
-  const userId = ctx.from.id;
-  if (!conversationHistory.has(userId)) {
-    conversationHistory.set(userId, []);
-  }
-  const history = conversationHistory.get(userId);
-
-  await ctx.reply('🎧 Listening to your audio message...');
+  await ctx.reply('🎧 Transcribing your voice message...');
   const typingInterval = setInterval(() => {
     ctx.replyWithChatAction('typing').catch(() => {});
   }, 5000);
@@ -274,66 +299,28 @@ async function handleVoiceMessage(ctx) {
       mimeType = 'audio/wav';
     }
 
-    const contents = history.slice(-6).map((msg) => ({
-      role: msg.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: msg.content }],
-    }));
-
-    contents.push({
-      role: 'user',
-      parts: [
-        {
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Audio,
-          },
-        },
-        {
-          text:
-            'You are a personal AI assistant in Telegram. The user sent this voice message.\n\n' +
-            'Instructions:\n' +
-            '1. Accurately transcribe what the user said in the audio.\n' +
-            '2. Provide a thoughtful, helpful, and direct response to what they said.\n\n' +
-            'Format your reply like this:\n' +
-            '🎤 *You said:* "<exact transcription>"\n\n' +
-            '<your response>',
-        },
-      ],
-    });
-
-    const response = await callGeminiWithRetry(() =>
-      googleAI.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: contents,
-      })
-    );
-
+    const transcription = await transcribeAudioWithGemini(base64Audio, mimeType);
     clearInterval(typingInterval);
 
-    const replyText = response.text || 'Sorry, I could not process the voice message.';
-
-    history.push({
-      role: 'user',
-      content: '[Voice message audio]',
-    });
-    history.push({
-      role: 'assistant',
-      content: replyText,
-    });
-
-    if (history.length > 20) {
-      history.splice(0, 2);
+    if (!transcription || transcription.includes('[NO_SPEECH]')) {
+      await ctx.reply('🎤 *Could not detect any clear speech in that voice note.* Please try again.', {
+        parse_mode: 'Markdown',
+      });
+      return;
     }
 
+    // Display transcription to the user so they know what was heard
     try {
-      await ctx.reply(replyText, { parse_mode: 'Markdown' });
-    } catch (markdownErr) {
-      console.warn('Failed to send voice response with Markdown, sending plain text:', markdownErr.message);
-      await ctx.reply(replyText);
+      await ctx.reply(`🎤 *You said:* "${transcription}"`, { parse_mode: 'Markdown' });
+    } catch {
+      await ctx.reply(`🎤 You said: "${transcription}"`);
     }
+
+    // Forward the transcription directly to Claude with full conversation history
+    await sendToClaudeWithHistory(ctx, transcription);
   } catch (error) {
     clearInterval(typingInterval);
-    console.error('Error handling voice message with Gemini:', error);
+    console.error('Error handling hybrid voice message:', error);
     await ctx.reply('❌ Sorry, I encountered an error processing your voice note. Please try again.', {
       parse_mode: 'Markdown',
     });
