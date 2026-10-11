@@ -318,8 +318,26 @@ bot.on('message:document', async (ctx) => {
         `4. 💡 **Actionable Insights / Conclusion**.\n\n` +
         `💡 *Tip: Type /quiz anytime to test your understanding of this document with an interactive quiz!*`;
     }
+    // Launch Claude's thinking & summarizing
+    const claudeSummaryPromise = sendToClaudeWithHistory(ctx, prompt);
 
-    await sendToClaudeWithHistory(ctx, prompt);
+    // Concurrently launch Gemini's interactive quiz poll generation (0 Claude tokens)
+    const geminiQuizPromise = generateQuizQuestions(
+      `Document: "${fileName}"\n\nContent:\n${content.slice(0, 15000)}`
+    ).catch((err) => {
+      console.warn('Gemini background quiz generation note:', err.message);
+      return null;
+    });
+
+    // Wait for Claude to deliver the comprehensive summary
+    await claudeSummaryPromise;
+
+    // Immediately present Gemini's quiz polls right below the summary
+    const quizList = await geminiQuizPromise;
+    if (quizList && quizList.length > 0) {
+      await ctx.reply('🎲 **Interactive Quiz**: Test what you learned from this document!', { parse_mode: 'Markdown' });
+      await sendQuizPolls(ctx, quizList);
+    }
   } catch (error) {
     console.error('Error processing document:', error);
     await ctx.reply(
@@ -483,6 +501,26 @@ async function generateQuizQuestions(contextText) {
   throw new Error('Gemini failed to format quiz questions array');
 }
 
+async function sendQuizPolls(ctx, quizList) {
+  for (let i = 0; i < quizList.length; i++) {
+    const q = quizList[i];
+    const questionText = `${i + 1}. ${q.question}`.slice(0, 300);
+    const options = (q.options || []).slice(0, 10).map((opt) => String(opt).slice(0, 100));
+    const correctId = Math.min(Math.max(0, parseInt(q.correct_option_id) || 0), options.length - 1);
+    const explanation = (q.explanation || 'Correct answer!').slice(0, 200);
+
+    await ctx.api.sendPoll(ctx.chat.id, questionText, options, {
+      type: 'quiz',
+      correct_option_id: correctId,
+      explanation: explanation,
+      is_anonymous: false,
+    });
+
+    // Brief delay so polls arrive in clean sequential order
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+}
+
 bot.command('quiz', async (ctx) => {
   const userId = ctx.from.id;
   const topicArg = ctx.message.text.replace(/^\/quiz\s*/i, '').trim();
@@ -511,24 +549,7 @@ bot.command('quiz', async (ctx) => {
     }
 
     const quizList = await generateQuizQuestions(contextText);
-
-    for (let i = 0; i < quizList.length; i++) {
-      const q = quizList[i];
-      const questionText = `${i + 1}. ${q.question}`.slice(0, 300);
-      const options = (q.options || []).slice(0, 10).map((opt) => String(opt).slice(0, 100));
-      const correctId = Math.min(Math.max(0, parseInt(q.correct_option_id) || 0), options.length - 1);
-      const explanation = (q.explanation || 'Correct answer!').slice(0, 200);
-
-      await ctx.api.sendPoll(ctx.chat.id, questionText, options, {
-        type: 'quiz',
-        correct_option_id: correctId,
-        explanation: explanation,
-        is_anonymous: false,
-      });
-
-      // Brief delay so polls arrive in clean sequential order
-      await new Promise((resolve) => setTimeout(resolve, 600));
-    }
+    await sendQuizPolls(ctx, quizList);
   } catch (err) {
     console.error('Error generating quiz polls:', err);
     await ctx.reply(
