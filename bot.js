@@ -60,7 +60,14 @@ bot.command('start', async (ctx) => {
 
 bot.command('clear', async (ctx) => {
   conversationHistory.delete(ctx.from.id);
-  await ctx.reply('✅ Conversation history cleared!');
+  userLastDocument.delete(ctx.from.id);
+  await ctx.reply(
+    '✅ *AI conversation context & uploaded files cleared!*\n\n' +
+    'Claude has completely forgotten previous messages and documents.\n\n' +
+    '💡 *To wipe the message bubbles from your screen:*\n' +
+    'Click the **3 dots (⋮)** in the top-right corner of Telegram → **"Clear history"**.',
+    { parse_mode: 'Markdown' }
+  );
 });
 
 bot.command('status', async (ctx) => {
