@@ -1,6 +1,14 @@
 import 'dotenv/config';
 import { Bot } from 'grammy';
 import Anthropic from '@anthropic-ai/sdk';
+import { createRequire } from 'module';
+import { readFile } from 'fs/promises';
+import path from 'path';
+import http from 'http';
+import os from 'os';
+
+const require = createRequire(import.meta.url);
+const pdf = require('pdf-parse');
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
 const allowedUserId = parseInt(process.env.ALLOWED_USER_ID);
@@ -11,6 +19,7 @@ const anthropic = new Anthropic({
 });
 
 const conversationHistory = new Map();
+const botStartTime = Date.now();
 
 bot.use(async (ctx, next) => {
   if (ctx.from?.id !== allowedUserId) {
@@ -22,8 +31,12 @@ bot.use(async (ctx, next) => {
 
 bot.command('start', async (ctx) => {
   await ctx.reply(
-    'Hello! I\'m your personal AI assistant powered by Claude 3.5 Sonnet.\n\n' +
+    'Hello! I\'m your personal AI assistant powered by Claude Haiku.\n\n' +
     'Just send me any message and I\'ll help you with your questions.\n\n' +
+    'You can also send me:\n' +
+    '• PDF files (.pdf)\n' +
+    '• Text files (.txt)\n' +
+    '• Python files (.py)\n\n' +
     'Commands:\n' +
     '/clear - Clear conversation history\n' +
     '/start - Show this message',
@@ -36,15 +49,83 @@ bot.command('clear', async (ctx) => {
   await ctx.reply('✅ Conversation history cleared!');
 });
 
-bot.on('message:text', async (ctx) => {
-  const userId = ctx.from.id;
-  const userMessage = ctx.message.text;
+bot.command('status', async (ctx) => {
+  const uptime = Date.now() - botStartTime;
+  const uptimeSeconds = Math.floor(uptime / 1000);
+  const uptimeDays = Math.floor(uptimeSeconds / 86400);
+  const uptimeHours = Math.floor((uptimeSeconds % 86400) / 3600);
+  const uptimeMinutes = Math.floor((uptimeSeconds % 3600) / 60);
+  const uptimeSecs = uptimeSeconds % 60;
 
-  if (userMessage.startsWith('/')) {
-    return;
+  const totalMemory = os.totalmem();
+  const freeMemory = os.freemem();
+  const usedMemory = totalMemory - freeMemory;
+  const memoryUsagePercent = ((usedMemory / totalMemory) * 100).toFixed(2);
+
+  const cpuInfo = os.cpus();
+  const cpuModel = cpuInfo[0].model;
+  const cpuCount = cpuInfo.length;
+
+  const loadAverage = os.loadavg();
+  const load1min = loadAverage[0].toFixed(2);
+  const load5min = loadAverage[1].toFixed(2);
+  const load15min = loadAverage[2].toFixed(2);
+
+  const processMemory = process.memoryUsage();
+  const botMemoryUsage = (processMemory.heapUsed / 1024 / 1024).toFixed(2);
+  const botMemoryTotal = (processMemory.heapTotal / 1024 / 1024).toFixed(2);
+
+  const uptimeString = uptimeDays > 0
+    ? `${uptimeDays}d ${uptimeHours}h ${uptimeMinutes}m ${uptimeSecs}s`
+    : uptimeHours > 0
+    ? `${uptimeHours}h ${uptimeMinutes}m ${uptimeSecs}s`
+    : `${uptimeMinutes}m ${uptimeSecs}s`;
+
+  const statusMessage =
+    `📊 *Bot Status*\n\n` +
+    `⏱️ *Uptime:* ${uptimeString}\n\n` +
+    `💾 *System Memory:*\n` +
+    `├─ Total: ${(totalMemory / 1024 / 1024 / 1024).toFixed(2)} GB\n` +
+    `├─ Used: ${(usedMemory / 1024 / 1024 / 1024).toFixed(2)} GB\n` +
+    `├─ Free: ${(freeMemory / 1024 / 1024 / 1024).toFixed(2)} GB\n` +
+    `└─ Usage: ${memoryUsagePercent}%\n\n` +
+    `🤖 *Bot Memory:*\n` +
+    `└─ ${botMemoryUsage} MB / ${botMemoryTotal} MB\n\n` +
+    `🖥️ *CPU:*\n` +
+    `├─ Model: ${cpuModel}\n` +
+    `├─ Cores: ${cpuCount}\n` +
+    `└─ Load Average: ${load1min} (1m), ${load5min} (5m), ${load15min} (15m)\n\n` +
+    `💬 *Active Conversations:* ${conversationHistory.size}`;
+
+  await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
+});
+
+async function extractDocumentContent(file, ctx) {
+  const fileExtension = file.file_path.split('.').pop().toLowerCase();
+
+  try {
+    const fileUrl = await ctx.api.getFile(file.file_id);
+    const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileUrl.file_path}`;
+
+    const response = await fetch(downloadUrl);
+    const buffer = await response.arrayBuffer();
+
+    if (fileExtension === 'pdf') {
+      const data = await pdf(Buffer.from(buffer));
+      return data.text;
+    } else if (fileExtension === 'txt' || fileExtension === 'py') {
+      return Buffer.from(buffer).toString('utf-8');
+    }
+
+    throw new Error('Unsupported file type');
+  } catch (error) {
+    console.error('Error extracting document content:', error);
+    throw error;
   }
+}
 
-  await ctx.replyWithChatAction('typing');
+async function sendToClaudeWithHistory(ctx, content) {
+  const userId = ctx.from.id;
 
   if (!conversationHistory.has(userId)) {
     conversationHistory.set(userId, []);
@@ -53,17 +134,17 @@ bot.on('message:text', async (ctx) => {
   const history = conversationHistory.get(userId);
   history.push({
     role: 'user',
-    content: userMessage,
+    content: content,
   });
 
-  try {
-    const typingInterval = setInterval(() => {
-      ctx.replyWithChatAction('typing').catch(() => {});
-    }, 5000);
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('typing').catch(() => {});
+  }, 5000);
 
+  try {
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-5',
-      max_tokens: 4096,
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2048,
       messages: history,
     });
 
@@ -80,20 +161,96 @@ bot.on('message:text', async (ctx) => {
       history.splice(0, 2);
     }
 
-    await ctx.reply(assistantMessage, { parse_mode: 'Markdown' });
+    try {
+      await ctx.reply(assistantMessage, { parse_mode: 'Markdown' });
+    } catch (markdownError) {
+      console.warn('Failed to send with Markdown, sending as plain text:', markdownError.message);
+      await ctx.reply(assistantMessage);
+    }
   } catch (error) {
+    clearInterval(typingInterval);
     console.error('Error calling Claude API:', error);
     console.error('Full error details:', JSON.stringify(error, null, 2));
+
+    history.pop();
+
     await ctx.reply(
       '❌ Sorry, I encountered an error processing your request. Please try again.',
       { parse_mode: 'Markdown' }
     );
   }
+}
+
+bot.on('message:document', async (ctx) => {
+  const document = ctx.message.document;
+  const fileName = document.file_name;
+  const fileExtension = fileName.split('.').pop().toLowerCase();
+
+  if (!['pdf', 'txt', 'py'].includes(fileExtension)) {
+    await ctx.reply(
+      '❌ Sorry, I can only process PDF (.pdf), text (.txt), and Python (.py) files.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  await ctx.reply(`📄 Processing ${fileName}...`);
+  await ctx.replyWithChatAction('typing');
+
+  try {
+    const content = await extractDocumentContent(document, ctx);
+    const prompt = `I've received a ${fileExtension.toUpperCase()} file named "${fileName}". Here's the content:\n\n${content}\n\nPlease analyze and explain this document.`;
+
+    await sendToClaudeWithHistory(ctx, prompt);
+  } catch (error) {
+    console.error('Error processing document:', error);
+    await ctx.reply(
+      '❌ Sorry, I encountered an error processing the document. Please try again.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
+
+bot.on('message:text', async (ctx) => {
+  const userMessage = ctx.message.text;
+
+  if (userMessage.startsWith('/')) {
+    return;
+  }
+
+  await ctx.replyWithChatAction('typing');
+  await sendToClaudeWithHistory(ctx, userMessage);
 });
 
 bot.catch((err) => {
   console.error('Bot error:', err);
 });
+
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', uptime: Math.floor(process.uptime()) }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`Health check server listening on port ${PORT}`);
+});
+
+const shutdown = () => {
+  console.log('Shutting down bot gracefully...');
+  bot.stop();
+  server.close(() => {
+    process.exit(0);
+  });
+};
+
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
 
 bot.start();
 console.log('Bot is running...');
