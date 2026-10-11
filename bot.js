@@ -600,5 +600,18 @@ const shutdown = () => {
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 
+// Register commands with Telegram so they appear in autocomplete menu when typing /
+try {
+  await bot.api.setMyCommands([
+    { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
+    { command: 'status', description: 'View bot and system resource usage' },
+    { command: 'clear', description: 'Clear conversation history' },
+    { command: 'start', description: 'Show welcome message and help' },
+  ]);
+  console.log('Commands registered with Telegram');
+} catch (err) {
+  console.warn('Failed to register Telegram commands:', err.message);
+}
+
 bot.start();
 console.log('Bot is running...');
