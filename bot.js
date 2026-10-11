@@ -2,13 +2,10 @@ import 'dotenv/config';
 import { Bot } from 'grammy';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenAI } from '@google/genai';
-import { createRequire } from 'module';
+import { PDFParse } from 'pdf-parse';
 import path from 'path';
 import http from 'http';
 import os from 'os';
-
-const require = createRequire(import.meta.url);
-const pdf = require('pdf-parse');
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
 const allowedUserId = parseInt(process.env.ALLOWED_USER_ID);
@@ -117,19 +114,65 @@ bot.command('status', async (ctx) => {
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
 });
 
-async function extractDocumentContent(file, ctx) {
-  const fileExtension = file.file_path.split('.').pop().toLowerCase();
-
+async function extractDocumentContent(file, ctx, fileExtension) {
   try {
     const fileUrl = await ctx.api.getFile(file.file_id);
     const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileUrl.file_path}`;
 
     const response = await fetch(downloadUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to download file from Telegram: ${response.status} ${response.statusText}`);
+    }
     const buffer = await response.arrayBuffer();
 
-    if (fileExtension === 'pdf') {
-      const data = await pdf(Buffer.from(buffer));
-      return data.text;
+    const ext = fileExtension || (fileUrl.file_path ? fileUrl.file_path.split('.').pop().toLowerCase() : '');
+
+    if (ext === 'pdf') {
+      let text = '';
+      try {
+        const parser = new PDFParse({ data: Buffer.from(buffer) });
+        const result = await parser.getText();
+        text = result.text ? result.text.trim() : '';
+      } catch (pdfErr) {
+        console.warn('PDFParse extraction failed, trying Gemini OCR fallback:', pdfErr.message);
+      }
+
+      // If text extraction yielded nothing (e.g. scanned document, images of pages, or custom font encoding),
+      // fall back to Gemini 3.8 Flash multimodal vision to extract and transcribe the document:
+      if (!text && googleAI) {
+        try {
+          const base64Data = Buffer.from(buffer).toString('base64');
+          const geminiRes = await callGeminiWithRetry(() =>
+            googleAI.models.generateContent({
+              model: 'gemini-3.8-flash',
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'application/pdf',
+                        data: base64Data,
+                      },
+                    },
+                    {
+                      text: 'Please thoroughly extract and transcribe all readable text, content, and key information from this PDF document in its original language. Include all sections, headers, and historical details.',
+                    },
+                  ],
+                },
+              ],
+            })
+          );
+          text = geminiRes.text ? geminiRes.text.trim() : '';
+        } catch (ocrErr) {
+          console.error('Gemini PDF OCR fallback error:', ocrErr);
+        }
+      }
+
+      if (!text) {
+        throw new Error('Unable to extract any readable text from this PDF file.');
+      }
+      return text;
     } else {
       // Decode code and text files (.py, .java, .cpp, .txt, .md, etc.)
       return Buffer.from(buffer).toString('utf-8');
@@ -237,7 +280,7 @@ bot.on('message:document', async (ctx) => {
   await ctx.replyWithChatAction('typing');
 
   try {
-    const content = await extractDocumentContent(document, ctx);
+    const content = await extractDocumentContent(document, ctx, fileExtension);
 
     // Save document to memory for the /quiz command
     userLastDocument.set(ctx.from.id, {
@@ -259,12 +302,18 @@ bot.on('message:document', async (ctx) => {
         `4. ⚠️ **Observations & Edge Cases**: Potential bugs, unhandled conditions, or optimization suggestions.\n\n` +
         `💡 *Tip: Type /quiz anytime to test your understanding of this code with an interactive quiz!*`;
     } else {
+      const maxTextLen = 75000;
+      const textToSend =
+        content.length > maxTextLen
+          ? content.slice(0, maxTextLen) + '\n\n[... Note: Document excerpted to first 75,000 characters for analysis ...]'
+          : content;
+
       prompt =
         `I've uploaded a document named "${fileName}". Here is the extracted text content:\n\n` +
-        `${content}\n\n` +
-        `Please provide a detailed, structured summary:\n` +
+        `${textToSend}\n\n` +
+        `Please provide a detailed, structured summary in the primary language of the document:\n` +
         `1. 📌 **Executive Overview**: Main topic, purpose, and central conclusion.\n` +
-        `2. 🔑 **Key Takeaways & Core Concepts**: Crucial definitions, principles, or data.\n` +
+        `2. 🔑 **Key Takeaways & Core Concepts**: Crucial definitions, historical events, principles, or data.\n` +
         `3. 📖 **Section-by-Section Breakdown**: In-depth coverage of each major topic discussed.\n` +
         `4. 💡 **Actionable Insights / Conclusion**.\n\n` +
         `💡 *Tip: Type /quiz anytime to test your understanding of this document with an interactive quiz!*`;
