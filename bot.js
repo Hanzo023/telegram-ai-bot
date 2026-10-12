@@ -231,30 +231,51 @@ async function extractDocumentContent(file, ctx, fileExtension) {
   }
 }
 
-async function loadLocalDocumentContent(fileName) {
-  const safeFileName = path.basename(fileName).replace(/[\/\\]/g, '');
+async function loadLocalDocumentContent(relFilePath) {
+  const cleanPath = path.normalize(relFilePath).replace(/^(\.\.[\/\\])+/, '');
   const storageRoot = path.resolve(STORAGE_DIR);
-  const filePath = path.resolve(storageRoot, safeFileName);
+  const filePath = path.resolve(storageRoot, cleanPath);
   if (!filePath.startsWith(storageRoot)) {
     throw new Error('Access denied: invalid file path');
   }
-  const ext = safeFileName.split('.').pop().toLowerCase();
+  const ext = cleanPath.split('.').pop().toLowerCase();
   const buffer = await fsp.readFile(filePath);
-  return await parseDocumentBuffer(buffer, ext, safeFileName);
+  return await parseDocumentBuffer(buffer, ext, path.basename(cleanPath));
 }
 
-async function getStoredFiles() {
+const IGNORED_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '__pycache__',
+  '.venv',
+  'venv',
+  'dist',
+  'build',
+  '.claude',
+]);
+
+async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 0) {
   try {
-    if (!fs.existsSync(STORAGE_DIR)) return [];
-    const entries = await fsp.readdir(STORAGE_DIR, { withFileTypes: true });
-    const files = [];
+    if (depth > 4 || !fs.existsSync(dir)) return [];
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    let files = [];
+
     for (const entry of entries) {
-      if (entry.isFile() && !entry.name.startsWith('.')) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        if (!IGNORED_DIRS.has(entry.name)) {
+          const subFiles = await getStoredFiles(fullPath, baseDir, depth + 1);
+          files.push(...subFiles);
+        }
+      } else if (entry.isFile()) {
         const ext = entry.name.split('.').pop().toLowerCase();
         if (SUPPORTED_EXTENSIONS.includes(ext)) {
-          const stats = await fsp.stat(path.join(STORAGE_DIR, entry.name));
+          const stats = await fsp.stat(fullPath);
+          const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
           files.push({
-            name: entry.name,
+            name: relPath,
             ext,
             size: stats.size,
             mtime: stats.mtimeMs,
@@ -262,8 +283,11 @@ async function getStoredFiles() {
         }
       }
     }
-    // Sort newest first
-    return files.sort((a, b) => b.mtime - a.mtime);
+
+    if (depth === 0) {
+      files.sort((a, b) => b.mtime - a.mtime);
+    }
+    return files;
   } catch (err) {
     console.error('Error reading storage directory:', err);
     return [];
@@ -291,7 +315,7 @@ async function sendLongMessage(ctx, text, parseMode = 'Markdown') {
   }
 }
 
-async function sendToClaudeWithHistory(ctx, content) {
+async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   const userId = ctx.from.id;
 
   if (!conversationHistory.has(userId)) {
@@ -306,12 +330,30 @@ async function sendToClaudeWithHistory(ctx, content) {
 
   const typingInterval = setInterval(() => {
     ctx.replyWithChatAction('typing').catch(() => {});
-  }, 5000);
+  }, 4000);
 
   try {
+    let systemInstruction = 'You are a helpful, expert AI assistant. Keep responses direct, clear, and thoughtful.';
+    const activeDoc = userLastDocument.get(userId);
+    if (activeDoc) {
+      const docExcerpt =
+        activeDoc.content.length > 25000
+          ? activeDoc.content.slice(0, 25000) + '\n\n[... Document excerpted to first 25,000 characters ...]'
+          : activeDoc.content;
+      systemInstruction +=
+        `\n\nThe user currently has this file loaded in their workspace:\n` +
+        `File Name: "${activeDoc.fileName}" (${activeDoc.fileExtension})\n` +
+        `Content:\n\`\`\`\n${docExcerpt}\n\`\`\`\n` +
+        `When the user asks questions, references code, or asks for refactoring/fixes, refer directly to this loaded file.`;
+    }
+    if (systemOverride) {
+      systemInstruction = systemOverride;
+    }
+
     const response = await anthropic.messages.create({
       model: anthropicModel,
       max_tokens: 2048,
+      system: systemInstruction,
       messages: history,
     });
 
@@ -335,8 +377,7 @@ async function sendToClaudeWithHistory(ctx, content) {
     await sendLongMessage(ctx, assistantMessage);
   } catch (error) {
     clearInterval(typingInterval);
-    console.error('Error calling Claude API:', error);
-    console.error('Full error details:', JSON.stringify(error, null, 2));
+    console.error('Error calling Claude API:', error.status, error.message);
 
     history.pop();
 
@@ -349,7 +390,8 @@ async function sendToClaudeWithHistory(ctx, content) {
 
 bot.on('message:document', async (ctx) => {
   const document = ctx.message.document;
-  const fileName = document.file_name || 'document';
+  const rawFileName = document.file_name || 'document';
+  const fileName = path.basename(rawFileName).replace(/[\/\\]/g, '');
   const fileExtension = fileName.split('.').pop().toLowerCase();
 
   if (!SUPPORTED_EXTENSIONS.includes(fileExtension)) {
@@ -363,13 +405,13 @@ bot.on('message:document', async (ctx) => {
     return;
   }
 
-  await ctx.reply(`📄 Analyzing ${fileName}...`);
+  // Silent typing indicator - no chatter messages
   await ctx.replyWithChatAction('typing');
 
   try {
     const content = await extractDocumentContent(document, ctx, fileExtension);
 
-    // Save document to memory for the /quiz command
+    // Save document to memory so all subsequent chat questions have this context
     userLastDocument.set(ctx.from.id, {
       fileName,
       fileExtension,
@@ -377,56 +419,26 @@ bot.on('message:document', async (ctx) => {
       uploadedAt: Date.now(),
     });
 
-    let prompt;
-    if (CODE_EXTENSIONS.includes(fileExtension)) {
-      prompt =
-        `I've uploaded a ${fileExtension.toUpperCase()} source code file named "${fileName}". Here is the content:\n\n` +
-        `\`\`\`${fileExtension}\n${content}\n\`\`\`\n\n` +
-        `Please provide a comprehensive technical analysis:\n` +
-        `1. 🎯 **Executive Summary**: What does this code do and what problem does it solve?\n` +
-        `2. 🏗️ **Architecture & Key Components**: Breakdown of main classes, functions/methods, and structures.\n` +
-        `3. ⚙️ **Core Logic & Complexity**: Explain the underlying algorithms and estimated time & space complexity.\n` +
-        `4. ⚠️ **Observations & Edge Cases**: Potential bugs, unhandled conditions, or optimization suggestions.`;
+    const userCaption = (ctx.message.caption || '').trim();
+
+    if (userCaption) {
+      // User sent a specific prompt or question with the file: answer it directly!
+      await sendToClaudeWithHistory(ctx, userCaption);
     } else {
-      const maxTextLen = 75000;
-      const textToSend =
-        content.length > maxTextLen
-          ? content.slice(0, maxTextLen) + '\n\n[... Note: Document excerpted to first 75,000 characters for analysis ...]'
-          : content;
-
-      prompt =
-        `I've uploaded a document named "${fileName}". Here is the extracted text content:\n\n` +
-        `${textToSend}\n\n` +
-        `Please provide a detailed, structured summary in the primary language of the document:\n` +
-        `1. 📌 **Executive Overview**: Main topic, purpose, and central conclusion.\n` +
-        `2. 🔑 **Key Takeaways & Core Concepts**: Crucial definitions, historical events, principles, or data.\n` +
-        `3. 📖 **Section-by-Section Breakdown**: In-depth coverage of each major topic discussed.\n` +
-        `4. 💡 **Actionable Insights / Conclusion**.`;
-    }
-    // Launch Claude's thinking & summarizing
-    const claudeSummaryPromise = sendToClaudeWithHistory(ctx, prompt);
-
-    // Concurrently launch Gemini's interactive quiz poll generation (0 Claude tokens)
-    const geminiQuizPromise = generateQuizQuestions(
-      `Document: "${fileName}"\n\nContent:\n${content.slice(0, 15000)}`
-    ).catch((err) => {
-      console.warn('Gemini background quiz generation note:', err.message);
-      return null;
-    });
-
-    // Wait for Claude to deliver the comprehensive summary
-    await claudeSummaryPromise;
-
-    // Immediately present Gemini's quiz polls right below the summary
-    const quizList = await geminiQuizPromise;
-    if (quizList && quizList.length > 0) {
-      await ctx.reply('🎲 **Interactive Quiz**: Test what you learned from this document!', { parse_mode: 'Markdown' });
-      await sendQuizPolls(ctx, quizList);
+      // User simply uploaded the file: confirm save without burning tokens or spamming quiz polls
+      const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
+      await ctx.reply(
+        `${icon} *Saved \`${fileName}\` to your library.*\n\n` +
+        `• Ask me anything about it in chat.\n` +
+        `• Type /quiz if you want to test your understanding.\n` +
+        `• Or browse your documents anytime with /library.`,
+        { parse_mode: 'Markdown' }
+      );
     }
   } catch (error) {
     console.error('Error processing document:', error);
     await ctx.reply(
-      '❌ Sorry, I encountered an error analyzing the file. Please try again.',
+      '❌ Sorry, I encountered an error saving or reading the file. Please try again.',
       { parse_mode: 'Markdown' }
     );
   }
@@ -489,10 +501,9 @@ async function handleVoiceMessage(ctx) {
   const voice = ctx.message.voice || ctx.message.audio;
   if (!voice) return;
 
-  await ctx.reply('🎧 Transcribing your voice message...');
   const typingInterval = setInterval(() => {
     ctx.replyWithChatAction('typing').catch(() => {});
-  }, 5000);
+  }, 4000);
 
   try {
     const fileInfo = await ctx.api.getFile(voice.file_id);
@@ -622,7 +633,6 @@ bot.command('quiz', async (ctx) => {
     return;
   }
 
-  await ctx.reply('🎲 Generating your interactive quiz poll...');
   await ctx.replyWithChatAction('typing');
 
   try {
@@ -657,7 +667,7 @@ function buildLibraryKeyboard(files, page = 0) {
     const f = pageFiles[i];
     const globalIdx = start + i;
     const icon = f.ext === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(f.ext) ? '💻' : '📝';
-    const displayName = f.name.length > 28 ? f.name.slice(0, 25) + '...' : f.name;
+    const displayName = f.name.length > 32 ? '...' + f.name.slice(-29) : f.name;
     keyboard.text(`${icon} ${displayName}`, `lib_sel:${globalIdx}`).row();
   }
 
@@ -811,7 +821,6 @@ bot.on('callback_query:data', async (ctx) => {
     }
 
     await ctx.answerCallbackQuery({ text: `Generating quiz on ${file.name}...` });
-    await ctx.reply(`🎲 *Pulling \`${file.name}\` from Drive D...*\nGenerating interactive quiz polls...`, { parse_mode: 'Markdown' });
     await ctx.replyWithChatAction('typing');
 
     try {
@@ -846,7 +855,6 @@ bot.on('callback_query:data', async (ctx) => {
     }
 
     await ctx.answerCallbackQuery({ text: `Analyzing ${file.name}...` });
-    await ctx.reply(`📄 *Reading \`${file.name}\` from Drive D...*\nClaude is preparing your analysis...`, { parse_mode: 'Markdown' });
     await ctx.replyWithChatAction('typing');
 
     try {
@@ -861,45 +869,21 @@ bot.on('callback_query:data', async (ctx) => {
       let prompt;
       if (CODE_EXTENSIONS.includes(file.ext)) {
         prompt =
-          `I've loaded a ${file.ext.toUpperCase()} source code file named "${file.name}" from storage. Here is the content:\n\n` +
-          `\`\`\`${file.ext}\n${content}\n\`\`\`\n\n` +
-          `Please provide a comprehensive technical analysis:\n` +
+          `Please provide a comprehensive technical analysis of "${file.name}":\n` +
           `1. 🎯 **Executive Summary**: What does this code do and what problem does it solve?\n` +
           `2. 🏗️ **Architecture & Key Components**: Breakdown of main classes, functions/methods, and structures.\n` +
           `3. ⚙️ **Core Logic & Complexity**: Explain the underlying algorithms and estimated time & space complexity.\n` +
           `4. ⚠️ **Observations & Edge Cases**: Potential bugs, unhandled conditions, or optimization suggestions.`;
       } else {
-        const maxTextLen = 75000;
-        const textToSend =
-          content.length > maxTextLen
-            ? content.slice(0, maxTextLen) + '\n\n[... Note: Document excerpted to first 75,000 characters for analysis ...]'
-            : content;
-
         prompt =
-          `I've loaded a document named "${file.name}" from storage. Here is the extracted text content:\n\n` +
-          `${textToSend}\n\n` +
-          `Please provide a detailed, structured summary in the primary language of the document:\n` +
+          `Please provide a detailed, structured summary of "${file.name}":\n` +
           `1. 📌 **Executive Overview**: Main topic, purpose, and central conclusion.\n` +
           `2. 🔑 **Key Takeaways & Core Concepts**: Crucial definitions, historical events, principles, or data.\n` +
           `3. 📖 **Section-by-Section Breakdown**: In-depth coverage of each major topic discussed.\n` +
           `4. 💡 **Actionable Insights / Conclusion**.`;
       }
 
-      const claudeSummaryPromise = sendToClaudeWithHistory(ctx, prompt);
-      const geminiQuizPromise = generateQuizQuestions(
-        `Document: "${file.name}"\n\nContent:\n${content.slice(0, 15000)}`
-      ).catch((err) => {
-        console.warn('Gemini background quiz generation note:', err.message);
-        return null;
-      });
-
-      await claudeSummaryPromise;
-
-      const quizList = await geminiQuizPromise;
-      if (quizList && quizList.length > 0) {
-        await ctx.reply('🎲 **Interactive Quiz**: Test what you learned from this document!', { parse_mode: 'Markdown' });
-        await sendQuizPolls(ctx, quizList);
-      }
+      await sendToClaudeWithHistory(ctx, prompt);
     } catch (err) {
       console.error('Error summarizing stored file:', err);
       await ctx.reply('❌ Sorry, I encountered an error reading or summarizing the file.');
