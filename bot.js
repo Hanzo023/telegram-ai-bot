@@ -8,6 +8,7 @@ import { promises as fsp } from 'fs';
 import path from 'path';
 import http from 'http';
 import os from 'os';
+import crypto from 'crypto';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
 const VAULT_FILE = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
@@ -239,6 +240,82 @@ async function parseDocumentBuffer(buffer, fileExtension, fileName = '') {
   }
 }
 
+let cloudVault = [];
+let vaultPinnedMessageId = null;
+const localFileHashes = new Map();
+
+async function getLocalFileHashInfo(relPath) {
+  try {
+    const storageRoot = path.resolve(STORAGE_DIR);
+    const fullPath = path.resolve(storageRoot, relPath);
+    if (!fullPath.startsWith(storageRoot) || !fs.existsSync(fullPath)) {
+      return null;
+    }
+    const stats = await fsp.stat(fullPath);
+    const cached = localFileHashes.get(relPath);
+    if (cached && cached.mtime === stats.mtimeMs) {
+      return cached;
+    }
+    const buf = await fsp.readFile(fullPath);
+    const rawHash = crypto.createHash('sha256').update(buf).digest('hex');
+    const ext = relPath.split('.').pop().toLowerCase();
+    let textHash = null;
+    if (TEXT_EXTENSIONS.includes(ext) && ext !== 'pdf') {
+      textHash = crypto.createHash('sha256').update(buf.toString('utf-8').replace(/\r\n/g, '\n').trim()).digest('hex');
+    }
+    const info = { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash };
+    localFileHashes.set(relPath, info);
+    return info;
+  } catch {
+    return null;
+  }
+}
+
+async function findDuplicateDocument(rawHash, textHash, currentFileName) {
+  // 1. Check Telegram Cloud Vault entries
+  for (const entry of cloudVault) {
+    if (entry.hash) {
+      if (entry.hash === rawHash || entry.hash === rawHash.slice(0, 16)) {
+        return { duplicateOf: entry.name, source: 'cloud' };
+      }
+    }
+    if (entry.textHash && textHash && entry.textHash === textHash) {
+      return { duplicateOf: entry.name, source: 'cloud' };
+    }
+    // For legacy entries without hash, check if file exists in local storage
+    if (!entry.hash) {
+      const localInfo = await getLocalFileHashInfo(entry.name);
+      if (localInfo) {
+        entry.hash = localInfo.rawHash;
+        entry.textHash = localInfo.textHash;
+        if (localInfo.rawHash === rawHash || (textHash && localInfo.textHash === textHash)) {
+          return { duplicateOf: entry.name, source: 'cloud' };
+        }
+      }
+    }
+  }
+
+  // 2. Check local files in Drive D (STORAGE_DIR)
+  try {
+    const localFiles = await getStoredFiles();
+    for (const lf of localFiles) {
+      const info = await getLocalFileHashInfo(lf.name);
+      if (info) {
+        if (info.rawHash === rawHash) {
+          return { duplicateOf: lf.name, source: 'local' };
+        }
+        if (textHash && info.textHash && info.textHash === textHash) {
+          return { duplicateOf: lf.name, source: 'local' };
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Duplicate check in local storage notice:', err.message);
+  }
+
+  return null;
+}
+
 async function extractDocumentContent(file, ctx, fileExtension) {
   try {
     const fileUrl = await ctx.api.getFile(file.file_id);
@@ -249,38 +326,67 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       throw new Error(`Failed to download file from Telegram: ${response.status} ${response.statusText}`);
     }
     const buffer = await response.arrayBuffer();
+    const nodeBuffer = Buffer.from(buffer);
 
     const rawFileName = file.file_name || 'document';
     const safeFileName = path.basename(rawFileName).replace(/[\/\\]/g, '');
     const ext = fileExtension || (fileUrl.file_path ? fileUrl.file_path.split('.').pop().toLowerCase() : '');
 
-    // Auto-save a copy directly to Drive D storage device (with path traversal protection)
-    try {
-      const storageRoot = path.resolve(STORAGE_DIR);
-      const localFilePath = path.resolve(storageRoot, safeFileName);
-      if (localFilePath.startsWith(storageRoot)) {
-        await fsp.writeFile(localFilePath, Buffer.from(buffer));
-        console.log(`Auto-saved document to Drive D: ${localFilePath}`);
+    // Compute hashes for content-based deduplication
+    const rawHash = crypto.createHash('sha256').update(nodeBuffer).digest('hex');
+    let textHash = null;
+    if (TEXT_EXTENSIONS.includes(ext) && ext !== 'pdf') {
+      textHash = crypto.createHash('sha256').update(nodeBuffer.toString('utf-8').replace(/\r\n/g, '\n').trim()).digest('hex');
+    }
+
+    // Check if an existing file has identical content (even with a different name)
+    const duplicateMatch = await findDuplicateDocument(rawHash, textHash, safeFileName);
+    const isDuplicate = !!duplicateMatch;
+    const duplicateOf = duplicateMatch ? duplicateMatch.duplicateOf : null;
+
+    if (isDuplicate) {
+      console.log(`Duplicate content detected: "${safeFileName}" has identical content to "${duplicateOf}". Skipped saving duplicate.`);
+    } else {
+      // Auto-save a copy directly to Drive D storage device (with path traversal protection)
+      try {
+        const storageRoot = path.resolve(STORAGE_DIR);
+        const localFilePath = path.resolve(storageRoot, safeFileName);
+        if (localFilePath.startsWith(storageRoot)) {
+          await fsp.writeFile(localFilePath, nodeBuffer);
+          console.log(`Auto-saved document to Drive D: ${localFilePath}`);
+          // Cache the new file's hash info
+          const stats = await fsp.stat(localFilePath);
+          localFileHashes.set(safeFileName, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
+        }
+      } catch (saveErr) {
+        console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
       }
-    } catch (saveErr) {
-      console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
+
+      // Auto-save entry to Telegram Cloud Vault
+      try {
+        await saveCloudVaultEntry({
+          name: safeFileName,
+          file_id: file.file_id,
+          ext: ext,
+          size: file.file_size || buffer.byteLength,
+          date: Date.now(),
+          hash: rawHash,
+          textHash: textHash,
+        });
+        console.log(`Saved document to Telegram Cloud Vault: ${safeFileName}`);
+      } catch (vaultErr) {
+        console.warn('Could not save file to Telegram Cloud Vault:', vaultErr.message);
+      }
     }
 
-    // Auto-save entry to Telegram Cloud Vault
-    try {
-      await saveCloudVaultEntry({
-        name: safeFileName,
-        file_id: file.file_id,
-        ext: ext,
-        size: file.file_size || buffer.byteLength,
-        date: Date.now(),
-      });
-      console.log(`Saved document to Telegram Cloud Vault: ${safeFileName}`);
-    } catch (vaultErr) {
-      console.warn('Could not save file to Telegram Cloud Vault:', vaultErr.message);
-    }
-
-    return await parseDocumentBuffer(buffer, ext, safeFileName);
+    const textContent = await parseDocumentBuffer(buffer, ext, safeFileName);
+    return {
+      content: textContent,
+      isDuplicate,
+      duplicateOf,
+      fileName: safeFileName,
+      fileExtension: ext,
+    };
   } catch (error) {
     const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
     console.error('Error extracting document content:', sanitizedMsg);
@@ -299,9 +405,6 @@ async function loadLocalDocumentContent(relFilePath) {
   const buffer = await fsp.readFile(filePath);
   return await parseDocumentBuffer(buffer, ext, path.basename(cleanPath));
 }
-
-let cloudVault = [];
-let vaultPinnedMessageId = null;
 
 async function persistCloudVault() {
   try {
@@ -326,6 +429,7 @@ async function persistCloudVault() {
           e: f.ext,
           s: f.size,
           d: f.date,
+          h: f.hash ? f.hash.slice(0, 16) : undefined,
         }))
       );
 
@@ -389,6 +493,7 @@ async function restoreVaultFromTelegram() {
           ext: item.e || item.ext,
           size: item.s || item.size || 0,
           date: item.d || item.date || Date.now(),
+          hash: item.h || item.hash || undefined,
         }));
         vaultPinnedMessageId = pinned.message_id;
         await fsp.writeFile(VAULT_FILE, JSON.stringify(cloudVault, null, 2), 'utf-8');
@@ -410,7 +515,6 @@ async function initCloudVault() {
       if (Array.isArray(parsed) && parsed.length > 0) {
         cloudVault = parsed;
         console.log(`Loaded ${cloudVault.length} files from local cloud_vault.json`);
-        return;
       }
     }
   } catch (err) {
@@ -418,12 +522,25 @@ async function initCloudVault() {
   }
 
   // If local file is empty or missing, attempt to restore from Telegram pinned sync
-  if (allowedUserId) {
+  if (allowedUserId && cloudVault.length === 0) {
     await restoreVaultFromTelegram();
+  }
+
+  // Backfill hashes for existing files from local storage if available
+  for (const entry of cloudVault) {
+    if (!entry.hash) {
+      try {
+        const info = await getLocalFileHashInfo(entry.name);
+        if (info) {
+          entry.hash = info.rawHash;
+          entry.textHash = info.textHash;
+        }
+      } catch {}
+    }
   }
 }
 
-async function saveCloudVaultEntry({ name, file_id, ext, size, date }) {
+async function saveCloudVaultEntry({ name, file_id, ext, size, date, hash, textHash }) {
   const newEntry = {
     id: Date.now().toString(),
     name,
@@ -431,6 +548,8 @@ async function saveCloudVaultEntry({ name, file_id, ext, size, date }) {
     ext,
     size: size || 0,
     date: date || Date.now(),
+    ...(hash ? { hash } : {}),
+    ...(textHash ? { textHash } : {}),
   };
 
   const existingIdx = cloudVault.findIndex((f) => f.name.toLowerCase() === name.toLowerCase());
@@ -693,13 +812,13 @@ bot.on('message:document', async (ctx) => {
   await ctx.replyWithChatAction('typing');
 
   try {
-    const content = await extractDocumentContent(document, ctx, fileExtension);
+    const docResult = await extractDocumentContent(document, ctx, fileExtension);
 
     // Save document to memory so all subsequent chat questions have this context
     userLastDocument.set(ctx.from.id, {
-      fileName,
+      fileName: docResult.isDuplicate ? docResult.duplicateOf : fileName,
       fileExtension,
-      content,
+      content: docResult.content,
       uploadedAt: Date.now(),
     });
 
@@ -708,6 +827,17 @@ bot.on('message:document', async (ctx) => {
     if (userCaption) {
       // User sent a specific prompt or question with the file: answer it directly!
       await sendToClaudeWithHistory(ctx, userCaption);
+    } else if (docResult.isDuplicate) {
+      // Duplicate file detected: inform user that duplicate wasn't saved, but it's ready for chat
+      const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
+      await ctx.reply(
+        `${icon} *Identical content detected!*\n\n` +
+        `\`${fileName}\` has the exact same content as \`${docResult.duplicateOf}\` already in your library.\n\n` +
+        `• 🛡️ *No duplicate saved* to your Drive D or Cloud Vault (preserving storage).\n` +
+        `• 🧠 Activated in chat — you can ask questions about it or type /quiz right now!\n` +
+        `• Browse your library anytime with /library.`,
+        { parse_mode: 'Markdown' }
+      );
     } else {
       // User simply uploaded the file: confirm save without burning tokens or spamming quiz polls
       const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
