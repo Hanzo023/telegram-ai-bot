@@ -68,31 +68,41 @@ bot.command('start', async (ctx) => {
     '• Voice messages & audio notes 🎙️\n\n' +
     'Commands:\n' +
     '/library - Browse files from Telegram Cloud Vault or Drive D\n' +
-    '/quiz - Generate an interactive quiz poll on the last uploaded file or topic\n' +
-    '/status - View bot and system resource usage\n' +
-    '/clear - Clear conversation history\n' +
+    '/quiz - Generate an interactive quiz poll on loaded file or topic\n' +
+    '/status - View system resources and loaded document\n' +
+    '/clear - Clear chat messages (keeps loaded file active)\n' +
+    '/clearall - Clear everything & unload file (files in folder safe)\n' +
     '/start - Show this message',
     { parse_mode: 'Markdown' }
   );
 });
 
+async function handleClearAll(ctx) {
+  const userId = ctx.from.id;
+  conversationHistory.delete(userId);
+  userLastDocument.set(userId, null);
+
+  await ctx.reply(
+    '✅ *All chat history & loaded documents cleared!*\n\n' +
+    '• 🧠 Claude has forgotten previous messages.\n' +
+    '• 📄 The active document has been unloaded from chat.\n' +
+    '• 📁 *Files in your folder & Cloud Vault are safe:* Nothing was deleted from your drive or cloud. You can browse or re-open them anytime with /library.\n\n' +
+    '💡 *To clear visible message bubbles in Telegram:*\n' +
+    'Tap the 3 dots (⋮) in the top-right corner → "Clear history".',
+    { parse_mode: 'Markdown' }
+  );
+}
+
 bot.command('clear', async (ctx) => {
   const userId = ctx.from.id;
   const arg = ctx.message.text.replace(/^\/clear\s*/i, '').trim().toLowerCase();
 
-  conversationHistory.delete(userId);
-
   if (arg === 'all' || arg === 'doc' || arg === 'file') {
-    userLastDocument.delete(userId);
-    await ctx.reply(
-      '✅ *All conversation history & loaded document cleared!*\n\n' +
-      'Claude has forgotten previous messages and unloaded any active file.\n\n' +
-      '💡 *To clear visible message bubbles in Telegram:*\n' +
-      'Tap the 3 dots (⋮) in the top-right corner → "Clear history".',
-      { parse_mode: 'Markdown' }
-    );
+    await handleClearAll(ctx);
     return;
   }
+
+  conversationHistory.delete(userId);
 
   const activeDoc = userLastDocument.get(userId);
   if (activeDoc) {
@@ -100,7 +110,7 @@ bot.command('clear', async (ctx) => {
       '✅ *Conversation messages cleared!*\n\n' +
       `📄 *Active Document Kept:* \`${activeDoc.fileName}\`\n` +
       `You can continue asking questions or quiz on this file without re-uploading!\n\n` +
-      `💡 _To unload this document too, type \`/clear all\`._`,
+      `💡 _To unload this document from chat memory too, type \`/clearall\`._`,
       { parse_mode: 'Markdown' }
     );
   } else {
@@ -113,6 +123,8 @@ bot.command('clear', async (ctx) => {
     );
   }
 });
+
+bot.command(['clearall', 'clear_all'], handleClearAll);
 
 bot.command('status', async (ctx) => {
   const uptime = Date.now() - botStartTime;
@@ -160,7 +172,8 @@ bot.command('status', async (ctx) => {
     `├─ Model: ${cpuModel}\n` +
     `├─ Cores: ${cpuCount}\n` +
     `└─ Load Average: ${load1min} (1m), ${load5min} (5m), ${load15min} (15m)\n\n` +
-    `💬 *Active Conversations:* ${conversationHistory.size}`;
+    `💬 *Active Conversations:* ${conversationHistory.size}\n` +
+    `📄 *Loaded Document:* ${userLastDocument.get(ctx.from.id)?.fileName ? `\`${userLastDocument.get(ctx.from.id).fileName}\`` : '_None (unloaded)_'}`;
 
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
 });
@@ -1018,11 +1031,11 @@ bot.command('quiz', async (ctx) => {
 
   if (!topicArg && !lastDoc) {
     await ctx.reply(
-      '📚 *No document found in library or storage!*\n\n' +
-      `I checked \`${STORAGE_DIR}\` and your Telegram Cloud Vault, but found no files.\n\n` +
+      '📚 *No document is currently active in chat.*\n\n' +
       'To take a quiz, you can:\n' +
-      '1. Put files in your Drive D folder or upload a file here in Telegram\n' +
-      '2. Or run `/quiz <topic>` right now (e.g. `/quiz Python basics` or `/quiz C++ pointers`)',
+      '• Type /library to select a file from Telegram Cloud Vault or Drive D\n' +
+      '• Upload a new PDF or code file directly to chat\n' +
+      '• Or run `/quiz <topic>` right now (e.g. `/quiz Python basics` or `/quiz C++ pointers`)',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -1555,8 +1568,9 @@ try {
   await bot.api.setMyCommands([
     { command: 'library', description: 'Browse Cloud Vault & Drive D files' },
     { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
-    { command: 'status', description: 'View bot and system resource usage' },
-    { command: 'clear', description: 'Clear conversation history' },
+    { command: 'status', description: 'View system resources & loaded file' },
+    { command: 'clear', description: 'Clear chat messages (keeps loaded file)' },
+    { command: 'clearall', description: 'Clear all chat & unload file (folder safe)' },
     { command: 'start', description: 'Show welcome message and help' },
   ]);
   console.log('Commands registered with Telegram');
