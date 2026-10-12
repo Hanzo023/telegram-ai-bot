@@ -10,6 +10,7 @@ import http from 'http';
 import os from 'os';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
+const VAULT_FILE = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
 
 try {
   if (!fs.existsSync(STORAGE_DIR)) {
@@ -63,7 +64,7 @@ bot.command('start', async (ctx) => {
     '• Documents: PDF (.pdf), Text (.txt), Markdown (.md)\n' +
     '• Voice messages & audio notes 🎙️\n\n' +
     'Commands:\n' +
-    '/library - Browse, quiz, and summarize files from your Drive D folder\n' +
+    '/library - Browse files from Telegram Cloud Vault or Drive D\n' +
     '/quiz - Generate an interactive quiz poll on the last uploaded file or topic\n' +
     '/status - View bot and system resource usage\n' +
     '/clear - Clear conversation history\n' +
@@ -223,6 +224,20 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
     }
 
+    // Auto-save entry to Telegram Cloud Vault
+    try {
+      await saveCloudVaultEntry({
+        name: safeFileName,
+        file_id: file.file_id,
+        ext: ext,
+        size: file.file_size || buffer.byteLength,
+        date: Date.now(),
+      });
+      console.log(`Saved document to Telegram Cloud Vault: ${safeFileName}`);
+    } catch (vaultErr) {
+      console.warn('Could not save file to Telegram Cloud Vault:', vaultErr.message);
+    }
+
     return await parseDocumentBuffer(buffer, ext, safeFileName);
   } catch (error) {
     const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
@@ -241,6 +256,167 @@ async function loadLocalDocumentContent(relFilePath) {
   const ext = cleanPath.split('.').pop().toLowerCase();
   const buffer = await fsp.readFile(filePath);
   return await parseDocumentBuffer(buffer, ext, path.basename(cleanPath));
+}
+
+let cloudVault = [];
+let vaultPinnedMessageId = null;
+
+async function persistCloudVault() {
+  try {
+    await fsp.writeFile(VAULT_FILE, JSON.stringify(cloudVault, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Failed to write cloud_vault.json to disk:', err.message);
+  }
+
+  // Backup sync to Telegram pinned message so it survives Render ephemeral container resets
+  if (allowedUserId) {
+    try {
+      const summaryList = cloudVault
+        .slice(0, 15)
+        .map((f) => `• ${f.name} (${formatBytes(f.size)})`)
+        .join('\n');
+      const moreCount = cloudVault.length > 15 ? `\n...and ${cloudVault.length - 15} more` : '';
+
+      const compactData = JSON.stringify(
+        cloudVault.map((f) => ({
+          n: f.name,
+          f: f.file_id,
+          e: f.ext,
+          s: f.size,
+          d: f.date,
+        }))
+      );
+
+      const msgText =
+        `☁️ Telegram Cloud Vault Index\n` +
+        `📂 Total Files: ${cloudVault.length}\n` +
+        `🕒 Updated: ${new Date().toLocaleString()}\n\n` +
+        (summaryList ? `${summaryList}${moreCount}\n\n` : `Vault is currently empty.\n\n`) +
+        `📌 Keep this message pinned to sync your files across cloud restarts!\n` +
+        `VAULT_DATA:\n${compactData}`;
+
+      if (msgText.length < 3900) {
+        if (vaultPinnedMessageId) {
+          try {
+            await bot.api.editMessageText(allowedUserId, vaultPinnedMessageId, msgText);
+            return;
+          } catch (editErr) {
+            vaultPinnedMessageId = null;
+          }
+        }
+
+        try {
+          const chat = await bot.api.getChat(allowedUserId);
+          if (chat && chat.pinned_message && chat.pinned_message.text && chat.pinned_message.text.includes('Telegram Cloud Vault Index')) {
+            vaultPinnedMessageId = chat.pinned_message.message_id;
+            await bot.api.editMessageText(allowedUserId, vaultPinnedMessageId, msgText);
+            return;
+          }
+        } catch {}
+
+        const sent = await bot.api.sendMessage(allowedUserId, msgText, {
+          disable_notification: true,
+        });
+        vaultPinnedMessageId = sent.message_id;
+        try {
+          await bot.api.pinChatMessage(allowedUserId, sent.message_id, { disable_notification: true });
+        } catch {}
+      }
+    } catch (syncErr) {
+      console.warn('Note: Telegram Cloud Vault sync note:', syncErr.message);
+    }
+  }
+}
+
+async function restoreVaultFromTelegram() {
+  if (!allowedUserId) return false;
+  try {
+    const chat = await bot.api.getChat(allowedUserId);
+    if (!chat || !chat.pinned_message) return false;
+
+    const pinned = chat.pinned_message;
+    if (pinned.text && pinned.text.includes('VAULT_DATA:')) {
+      const idx = pinned.text.indexOf('VAULT_DATA:');
+      const jsonStr = pinned.text.slice(idx + 'VAULT_DATA:'.length).trim();
+      const compactList = JSON.parse(jsonStr);
+      if (Array.isArray(compactList)) {
+        cloudVault = compactList.map((item, i) => ({
+          id: String(item.d || Date.now() - i),
+          name: item.n || item.name,
+          file_id: item.f || item.file_id,
+          ext: item.e || item.ext,
+          size: item.s || item.size || 0,
+          date: item.d || item.date || Date.now(),
+        }));
+        vaultPinnedMessageId = pinned.message_id;
+        await fsp.writeFile(VAULT_FILE, JSON.stringify(cloudVault, null, 2), 'utf-8');
+        console.log(`Restored ${cloudVault.length} files from Telegram pinned message into Cloud Vault.`);
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn('Note: Cloud Vault sync from Telegram pinned message skipped:', err.message);
+  }
+  return false;
+}
+
+async function initCloudVault() {
+  try {
+    if (fs.existsSync(VAULT_FILE)) {
+      const data = await fsp.readFile(VAULT_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        cloudVault = parsed;
+        console.log(`Loaded ${cloudVault.length} files from local cloud_vault.json`);
+        return;
+      }
+    }
+  } catch (err) {
+    console.warn('Could not read cloud_vault.json:', err.message);
+  }
+
+  // If local file is empty or missing, attempt to restore from Telegram pinned sync
+  if (allowedUserId) {
+    await restoreVaultFromTelegram();
+  }
+}
+
+async function saveCloudVaultEntry({ name, file_id, ext, size, date }) {
+  const newEntry = {
+    id: Date.now().toString(),
+    name,
+    file_id,
+    ext,
+    size: size || 0,
+    date: date || Date.now(),
+  };
+
+  const existingIdx = cloudVault.findIndex((f) => f.name.toLowerCase() === name.toLowerCase());
+  if (existingIdx !== -1) {
+    cloudVault[existingIdx] = newEntry;
+  } else {
+    cloudVault.unshift(newEntry);
+  }
+
+  await persistCloudVault();
+}
+
+async function loadCloudDocumentContent(fileId, fileExtension, fileName = '') {
+  try {
+    const fileUrl = await bot.api.getFile(fileId);
+    const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileUrl.file_path}`;
+
+    const response = await fetch(downloadUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to download file from Telegram: ${response.status} ${response.statusText}`);
+    }
+    const buffer = await response.arrayBuffer();
+    return await parseDocumentBuffer(buffer, fileExtension, fileName);
+  } catch (error) {
+    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+    console.error('Error loading cloud document:', sanitizedMsg);
+    throw new Error(sanitizedMsg);
+  }
 }
 
 const IGNORED_DIRS = new Set([
@@ -429,9 +605,11 @@ bot.on('message:document', async (ctx) => {
       const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
       await ctx.reply(
         `${icon} *Saved \`${fileName}\` to your library.*\n\n` +
+        `• ☁️ **Telegram Cloud Vault**: Ready on your phone & any device 24/7.\n` +
+        `• 💻 **Drive D**: Saved to laptop storage.\n\n` +
         `• Ask me anything about it in chat.\n` +
         `• Type /quiz if you want to test your understanding.\n` +
-        `• Or browse your documents anytime with /library.`,
+        `• Or browse all files anytime with /library.`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -656,7 +834,14 @@ bot.command('quiz', async (ctx) => {
 
 let cachedFilesList = [];
 
-function buildLibraryKeyboard(files, page = 0) {
+function buildSourcePickerKeyboard() {
+  return new InlineKeyboard()
+    .text(`☁️ Telegram Cloud Vault (${cloudVault.length})`, 'lib_src:cloud')
+    .row()
+    .text('💻 Local Storage (Drive D)', 'lib_src:local');
+}
+
+function buildLibraryKeyboard(files, source, page = 0) {
   const keyboard = new InlineKeyboard();
   const pageSize = 5;
   const totalPages = Math.ceil(files.length / pageSize) || 1;
@@ -667,50 +852,38 @@ function buildLibraryKeyboard(files, page = 0) {
     const f = pageFiles[i];
     const globalIdx = start + i;
     const icon = f.ext === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(f.ext) ? '💻' : '📝';
-    const displayName = f.name.length > 32 ? '...' + f.name.slice(-29) : f.name;
-    keyboard.text(`${icon} ${displayName}`, `lib_sel:${globalIdx}`).row();
+    const displayName = f.name.length > 28 ? '...' + f.name.slice(-25) : f.name;
+    keyboard.text(`${icon} ${displayName}`, `lib_sel:${source}:${globalIdx}`).row();
   }
 
   // Pagination navigation
   const navButtons = [];
   if (page > 0) {
-    navButtons.push(InlineKeyboard.text('◀️ Prev', `lib_page:${page - 1}`));
+    navButtons.push(InlineKeyboard.text('◀️ Prev', `lib_page:${source}:${page - 1}`));
   }
   if (page < totalPages - 1) {
-    navButtons.push(InlineKeyboard.text('Next ▶️', `lib_page:${page + 1}`));
+    navButtons.push(InlineKeyboard.text('Next ▶️', `lib_page:${source}:${page + 1}`));
   }
   if (navButtons.length > 0) {
     keyboard.row(...navButtons);
   }
 
-  keyboard.row(InlineKeyboard.text('🔄 Refresh Library', 'lib_refresh'));
+  keyboard.row(
+    InlineKeyboard.text('🔄 Refresh', `lib_refresh:${source}`),
+    InlineKeyboard.text('📁 Change Storage', 'lib_sources')
+  );
   return { keyboard, totalPages };
 }
 
 bot.command(['library', 'files'], async (ctx) => {
-  const files = await getStoredFiles();
-  cachedFilesList = files;
-
-  if (files.length === 0) {
-    await ctx.reply(
-      `📂 *Your Drive D Storage Folder is Empty*\n\n` +
-      `Path: \`${STORAGE_DIR}\`\n\n` +
-      `You can:\n` +
-      `1. Copy your PDF, Python, Java, or C++ files directly into that folder on your laptop.\n` +
-      `2. Or send any file right here in Telegram and I will automatically save it there!`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: new InlineKeyboard().text('🔄 Refresh Folder', 'lib_refresh'),
-      }
-    );
-    return;
-  }
-
-  const { keyboard, totalPages } = buildLibraryKeyboard(files, 0);
+  const keyboard = buildSourcePickerKeyboard();
   await ctx.reply(
-    `📂 *Drive D Document Library* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
-    `Folder: \`${STORAGE_DIR}\`\n\n` +
-    `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+    `📚 *Document Library*\n\n` +
+    `Choose a storage location to browse:\n\n` +
+    `• ☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
+    `  Files uploaded via Telegram chat. Accessible 24/7 on your phone and any device.\n\n` +
+    `• 💻 *Local Storage (Drive D)*\n` +
+    `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
     {
       parse_mode: 'Markdown',
       reply_markup: keyboard,
@@ -721,17 +894,17 @@ bot.command(['library', 'files'], async (ctx) => {
 bot.on('callback_query:data', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
-  // Pagination
-  if (data.startsWith('lib_page:')) {
-    const page = parseInt(data.replace('lib_page:', '')) || 0;
-    const files = await getStoredFiles();
-    cachedFilesList = files;
-    const { keyboard, totalPages } = buildLibraryKeyboard(files, page);
+  // Switch / return to source picker
+  if (data === 'lib_sources') {
     await ctx.answerCallbackQuery();
+    const keyboard = buildSourcePickerKeyboard();
     await ctx.editMessageText(
-      `📂 *Drive D Document Library* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
-      `Folder: \`${STORAGE_DIR}\`\n\n` +
-      `Page ${page + 1} of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      `📚 *Document Library*\n\n` +
+      `Choose a storage location to browse:\n\n` +
+      `• ☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
+      `  Files uploaded via Telegram chat. Accessible 24/7 on your phone and any device.\n\n` +
+      `• 💻 *Local Storage (Drive D)*\n` +
+      `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
@@ -740,30 +913,66 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  // Refresh or Back
-  if (data === 'lib_refresh' || data === 'lib_back') {
-    const files = await getStoredFiles();
-    cachedFilesList = files;
-    await ctx.answerCallbackQuery({ text: 'Library refreshed!' });
+  // Open Telegram Cloud Vault
+  if (data === 'lib_src:cloud' || data === 'lib_refresh:cloud') {
+    await ctx.answerCallbackQuery(data === 'lib_refresh:cloud' ? { text: 'Cloud Vault refreshed!' } : undefined);
 
-    if (files.length === 0) {
+    if (cloudVault.length === 0) {
       await ctx.editMessageText(
-        `📂 *Your Drive D Storage Folder is Empty*\n\n` +
-        `Path: \`${STORAGE_DIR}\`\n\n` +
-        `You can:\n` +
-        `1. Copy your PDF, Python, Java, or C++ files directly into that folder on your laptop.\n` +
-        `2. Or send any file right here in Telegram and I will automatically save it there!`,
+        `☁️ *Telegram Cloud Vault is Empty*\n\n` +
+        `You haven't uploaded any files to Telegram yet.\n\n` +
+        `📤 *How to add files:*\n` +
+        `Simply send any **PDF**, **Python (.py)**, **Java (.java)**, or **C++ (.cpp)** file directly to this chat from your phone or desktop. It will be stored in your Cloud Vault automatically!`,
         {
           parse_mode: 'Markdown',
-          reply_markup: new InlineKeyboard().text('🔄 Refresh Folder', 'lib_refresh'),
+          reply_markup: new InlineKeyboard()
+            .text('🔄 Refresh Vault', 'lib_refresh:cloud')
+            .row()
+            .text('💻 Switch to Local Storage', 'lib_src:local'),
         }
       );
       return;
     }
 
-    const { keyboard, totalPages } = buildLibraryKeyboard(files, 0);
+    const { keyboard, totalPages } = buildLibraryKeyboard(cloudVault, 'cloud', 0);
     await ctx.editMessageText(
-      `📂 *Drive D Document Library* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
+      `☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
+      `Accessible 24/7 on your phone & any device.\n\n` +
+      `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Open Local Storage (Drive D)
+  if (data === 'lib_src:local' || data === 'lib_refresh:local') {
+    const files = await getStoredFiles();
+    cachedFilesList = files;
+    await ctx.answerCallbackQuery(data === 'lib_refresh:local' ? { text: 'Local storage refreshed!' } : undefined);
+
+    if (files.length === 0) {
+      await ctx.editMessageText(
+        `💻 *Local Storage (Drive D) is Empty*\n\n` +
+        `Folder: \`${STORAGE_DIR}\`\n\n` +
+        `⚠️ *Note:* If the bot is running in the cloud (on Render), it cannot access your physical laptop drive. Use **☁️ Telegram Cloud Vault** to access your files anywhere on your phone!\n\n` +
+        `If running locally on your laptop, copy your files into that folder.`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('🔄 Refresh Local', 'lib_refresh:local')
+            .row()
+            .text('☁️ Switch to Cloud Vault', 'lib_src:cloud'),
+        }
+      );
+      return;
+    }
+
+    const { keyboard, totalPages } = buildLibraryKeyboard(files, 'local', 0);
+    await ctx.editMessageText(
+      `💻 *Local Storage (Drive D)* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
       `Folder: \`${STORAGE_DIR}\`\n\n` +
       `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
       {
@@ -774,31 +983,120 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  // Select a file
-  if (data.startsWith('lib_sel:')) {
-    const idx = parseInt(data.replace('lib_sel:', ''));
-    if (!cachedFilesList || !cachedFilesList[idx]) {
-      cachedFilesList = await getStoredFiles();
+  // Pagination for either source: lib_page:<source>:<page>
+  if (data.startsWith('lib_page:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const page = parseInt(parts[2], 10) || 0;
+
+    let files = [];
+    let title = '';
+    let subtitle = '';
+
+    if (source === 'cloud') {
+      files = cloudVault;
+      title = '☁️ *Telegram Cloud Vault*';
+      subtitle = 'Accessible 24/7 on your phone & any device.';
+    } else {
+      files = await getStoredFiles();
+      cachedFilesList = files;
+      title = '💻 *Local Storage (Drive D)*';
+      subtitle = `Folder: \`${STORAGE_DIR}\``;
     }
-    const file = cachedFilesList[idx];
+
+    const { keyboard, totalPages } = buildLibraryKeyboard(files, source, page);
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      `${title} (${files.length} file${files.length === 1 ? '' : 's'})\n` +
+      `${subtitle}\n\n` +
+      `Page ${page + 1} of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Back to list: lib_back:<source>:<page>
+  if (data.startsWith('lib_back:')) {
+    const parts = data.split(':');
+    const source = parts[1] || 'cloud';
+    const page = parseInt(parts[2], 10) || 0;
+
+    let files = [];
+    let title = '';
+    let subtitle = '';
+
+    if (source === 'cloud') {
+      files = cloudVault;
+      title = '☁️ *Telegram Cloud Vault*';
+      subtitle = 'Accessible 24/7 on your phone & any device.';
+    } else {
+      files = await getStoredFiles();
+      cachedFilesList = files;
+      title = '💻 *Local Storage (Drive D)*';
+      subtitle = `Folder: \`${STORAGE_DIR}\``;
+    }
+
+    const { keyboard, totalPages } = buildLibraryKeyboard(files, source, page);
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      `${title} (${files.length} file${files.length === 1 ? '' : 's'})\n` +
+      `${subtitle}\n\n` +
+      `Page ${page + 1} of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Select a file: lib_sel:<source>:<idx>
+  if (data.startsWith('lib_sel:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+
+    let file = null;
+    if (source === 'cloud') {
+      file = cloudVault[idx];
+    } else {
+      if (!cachedFilesList || !cachedFilesList[idx]) {
+        cachedFilesList = await getStoredFiles();
+      }
+      file = cachedFilesList[idx];
+    }
+
     if (!file) {
       await ctx.answerCallbackQuery({ text: 'File not found!' });
       return;
     }
 
     await ctx.answerCallbackQuery();
+    const page = Math.floor(idx / 5);
     const actionKeyboard = new InlineKeyboard()
-      .text('🎲 3-Question Quiz', `lib_quiz:${idx}`)
-      .text('📝 Detailed Summary', `lib_sum:${idx}`)
+      .text('🎲 3-Question Quiz', `lib_quiz:${source}:${idx}`)
+      .text('📝 Detailed Summary', `lib_sum:${source}:${idx}`)
       .row()
-      .text('🔙 Back to Library', 'lib_back');
+      .text('🔙 Back to List', `lib_back:${source}:${page}`);
+
+    if (source === 'cloud') {
+      actionKeyboard.text('🗑️ Delete', `lib_del:${idx}`);
+    }
+
+    actionKeyboard.row().text('📁 Change Storage Source', 'lib_sources');
 
     const icon = file.ext === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(file.ext) ? '💻' : '📝';
+    const dateStr = new Date(file.date || file.mtime).toLocaleString();
+    const sourceName = source === 'cloud' ? '☁️ Telegram Cloud Vault' : '💻 Local Storage (Drive D)';
+
     await ctx.editMessageText(
       `${icon} *Selected Document:*\n\`${file.name}\`\n\n` +
       `📦 *Size:* ${formatBytes(file.size)}\n` +
-      `📅 *Modified:* ${new Date(file.mtime).toLocaleString()}\n` +
-      `📂 *Folder:* Drive D\n\n` +
+      `📅 *${source === 'cloud' ? 'Uploaded' : 'Modified'}:* ${dateStr}\n` +
+      `📂 *Source:* ${sourceName}\n\n` +
       `What would you like to do with this file?`,
       {
         parse_mode: 'Markdown',
@@ -808,13 +1106,63 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  // Quiz a selected file from Drive D
-  if (data.startsWith('lib_quiz:')) {
-    const idx = parseInt(data.replace('lib_quiz:', ''));
-    if (!cachedFilesList || !cachedFilesList[idx]) {
-      cachedFilesList = await getStoredFiles();
+  // Delete a file from Cloud Vault: lib_del:<idx>
+  if (data.startsWith('lib_del:')) {
+    const idx = parseInt(data.replace('lib_del:', ''), 10);
+    if (!cloudVault[idx]) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
     }
-    const file = cachedFilesList[idx];
+
+    const removed = cloudVault.splice(idx, 1)[0];
+    await persistCloudVault();
+    await ctx.answerCallbackQuery({ text: `Removed "${removed.name}" from Cloud Vault` });
+
+    if (cloudVault.length === 0) {
+      await ctx.editMessageText(
+        `☁️ *Telegram Cloud Vault is Empty*\n\n` +
+        `You removed all files from the Cloud Vault.\n\n` +
+        `Send any document to this chat to save it anytime!`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('🔄 Refresh Vault', 'lib_refresh:cloud')
+            .row()
+            .text('💻 Switch to Local Storage', 'lib_src:local'),
+        }
+      );
+      return;
+    }
+
+    const { keyboard, totalPages } = buildLibraryKeyboard(cloudVault, 'cloud', 0);
+    await ctx.editMessageText(
+      `☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
+      `Accessible 24/7 on your phone & any device.\n\n` +
+      `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Quiz a selected file: lib_quiz:<source>:<idx>
+  if (data.startsWith('lib_quiz:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+
+    let file = null;
+    if (source === 'cloud') {
+      file = cloudVault[idx];
+    } else {
+      if (!cachedFilesList || !cachedFilesList[idx]) {
+        cachedFilesList = await getStoredFiles();
+      }
+      file = cachedFilesList[idx];
+    }
+
     if (!file) {
       await ctx.answerCallbackQuery({ text: 'File not found!' });
       return;
@@ -824,7 +1172,13 @@ bot.on('callback_query:data', async (ctx) => {
     await ctx.replyWithChatAction('typing');
 
     try {
-      const content = await loadLocalDocumentContent(file.name);
+      let content = '';
+      if (source === 'cloud') {
+        content = await loadCloudDocumentContent(file.file_id, file.ext, file.name);
+      } else {
+        content = await loadLocalDocumentContent(file.name);
+      }
+
       userLastDocument.set(ctx.from.id, {
         fileName: file.name,
         fileExtension: file.ext,
@@ -836,19 +1190,28 @@ bot.on('callback_query:data', async (ctx) => {
       const quizList = await generateQuizQuestions(contextText);
       await sendQuizPolls(ctx, quizList);
     } catch (err) {
-      console.error('Error generating quiz from stored file:', err);
+      console.error('Error generating quiz from library file:', err);
       await ctx.reply('❌ Sorry, I encountered an error reading the file or generating quiz questions.');
     }
     return;
   }
 
-  // Summarize a selected file from Drive D
+  // Summarize a selected file: lib_sum:<source>:<idx>
   if (data.startsWith('lib_sum:')) {
-    const idx = parseInt(data.replace('lib_sum:', ''));
-    if (!cachedFilesList || !cachedFilesList[idx]) {
-      cachedFilesList = await getStoredFiles();
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+
+    let file = null;
+    if (source === 'cloud') {
+      file = cloudVault[idx];
+    } else {
+      if (!cachedFilesList || !cachedFilesList[idx]) {
+        cachedFilesList = await getStoredFiles();
+      }
+      file = cachedFilesList[idx];
     }
-    const file = cachedFilesList[idx];
+
     if (!file) {
       await ctx.answerCallbackQuery({ text: 'File not found!' });
       return;
@@ -858,7 +1221,13 @@ bot.on('callback_query:data', async (ctx) => {
     await ctx.replyWithChatAction('typing');
 
     try {
-      const content = await loadLocalDocumentContent(file.name);
+      let content = '';
+      if (source === 'cloud') {
+        content = await loadCloudDocumentContent(file.file_id, file.ext, file.name);
+      } else {
+        content = await loadLocalDocumentContent(file.name);
+      }
+
       userLastDocument.set(ctx.from.id, {
         fileName: file.name,
         fileExtension: file.ext,
@@ -885,7 +1254,7 @@ bot.on('callback_query:data', async (ctx) => {
 
       await sendToClaudeWithHistory(ctx, prompt);
     } catch (err) {
-      console.error('Error summarizing stored file:', err);
+      console.error('Error summarizing library file:', err);
       await ctx.reply('❌ Sorry, I encountered an error reading or summarizing the file.');
     }
     return;
@@ -955,10 +1324,17 @@ const shutdown = (signal) => {
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 
+// Initialize Telegram Cloud Vault
+try {
+  await initCloudVault();
+} catch (vaultErr) {
+  console.warn('Vault initialization note:', vaultErr.message);
+}
+
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 try {
   await bot.api.setMyCommands([
-    { command: 'library', description: 'Browse, quiz, and summarize files from Drive D' },
+    { command: 'library', description: 'Browse Cloud Vault & Drive D files' },
     { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
     { command: 'status', description: 'View bot and system resource usage' },
     { command: 'clear', description: 'Clear conversation history' },
