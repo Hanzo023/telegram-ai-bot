@@ -1,11 +1,23 @@
 import 'dotenv/config';
-import { Bot } from 'grammy';
+import { Bot, InlineKeyboard } from 'grammy';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenAI } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
+import fs from 'fs';
+import { promises as fsp } from 'fs';
 import path from 'path';
 import http from 'http';
 import os from 'os';
+
+const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
+
+try {
+  if (!fs.existsSync(STORAGE_DIR)) {
+    fs.mkdirSync(STORAGE_DIR, { recursive: true });
+  }
+} catch (dirErr) {
+  console.warn('Storage directory initialization note:', dirErr.message);
+}
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
 const allowedUserId = parseInt(process.env.ALLOWED_USER_ID);
@@ -50,6 +62,7 @@ bot.command('start', async (ctx) => {
     '• Documents: PDF (.pdf), Text (.txt), Markdown (.md)\n' +
     '• Voice messages & audio notes 🎙️\n\n' +
     'Commands:\n' +
+    '/library - Browse, quiz, and summarize files from your Drive D folder\n' +
     '/quiz - Generate an interactive quiz poll on the last uploaded file or topic\n' +
     '/status - View bot and system resource usage\n' +
     '/clear - Clear conversation history\n' +
@@ -121,6 +134,67 @@ bot.command('status', async (ctx) => {
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
 });
 
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+async function parseDocumentBuffer(buffer, fileExtension, fileName = '') {
+  if (fileExtension === 'pdf') {
+    let text = '';
+    try {
+      const parser = new PDFParse({ data: Buffer.from(buffer) });
+      const result = await parser.getText();
+      text = result.text ? result.text.trim() : '';
+    } catch (pdfErr) {
+      console.warn('PDFParse extraction failed, trying Gemini OCR fallback:', pdfErr.message);
+    }
+
+    // If text extraction yielded nothing (e.g. scanned document, images of pages, or custom font encoding),
+    // fall back to Gemini 3.8 Flash multimodal vision to extract and transcribe the document:
+    if (!text && googleAI) {
+      try {
+        const base64Data = Buffer.from(buffer).toString('base64');
+        const geminiRes = await callGeminiWithRetry(() =>
+          googleAI.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'application/pdf',
+                      data: base64Data,
+                    },
+                  },
+                  {
+                    text: 'Please thoroughly extract and transcribe all readable text, content, and key information from this PDF document in its original language. Include all sections, headers, and historical details.',
+                  },
+                ],
+              },
+            ],
+          })
+        );
+        text = geminiRes.text ? geminiRes.text.trim() : '';
+      } catch (ocrErr) {
+        console.error('Gemini PDF OCR fallback error:', ocrErr);
+      }
+    }
+
+    if (!text) {
+      throw new Error('Unable to extract any readable text from this PDF file.');
+    }
+    return text;
+  } else {
+    // Decode code and text files (.py, .java, .cpp, .txt, .md, etc.)
+    return Buffer.from(buffer).toString('utf-8');
+  }
+}
+
 async function extractDocumentContent(file, ctx, fileExtension) {
   try {
     const fileUrl = await ctx.api.getFile(file.file_id);
@@ -132,61 +206,56 @@ async function extractDocumentContent(file, ctx, fileExtension) {
     }
     const buffer = await response.arrayBuffer();
 
+    const fileName = file.file_name || 'document';
     const ext = fileExtension || (fileUrl.file_path ? fileUrl.file_path.split('.').pop().toLowerCase() : '');
 
-    if (ext === 'pdf') {
-      let text = '';
-      try {
-        const parser = new PDFParse({ data: Buffer.from(buffer) });
-        const result = await parser.getText();
-        text = result.text ? result.text.trim() : '';
-      } catch (pdfErr) {
-        console.warn('PDFParse extraction failed, trying Gemini OCR fallback:', pdfErr.message);
-      }
-
-      // If text extraction yielded nothing (e.g. scanned document, images of pages, or custom font encoding),
-      // fall back to Gemini 3.8 Flash multimodal vision to extract and transcribe the document:
-      if (!text && googleAI) {
-        try {
-          const base64Data = Buffer.from(buffer).toString('base64');
-          const geminiRes = await callGeminiWithRetry(() =>
-            googleAI.models.generateContent({
-              model: 'gemini-3.8-flash',
-              contents: [
-                {
-                  role: 'user',
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: 'application/pdf',
-                        data: base64Data,
-                      },
-                    },
-                    {
-                      text: 'Please thoroughly extract and transcribe all readable text, content, and key information from this PDF document in its original language. Include all sections, headers, and historical details.',
-                    },
-                  ],
-                },
-              ],
-            })
-          );
-          text = geminiRes.text ? geminiRes.text.trim() : '';
-        } catch (ocrErr) {
-          console.error('Gemini PDF OCR fallback error:', ocrErr);
-        }
-      }
-
-      if (!text) {
-        throw new Error('Unable to extract any readable text from this PDF file.');
-      }
-      return text;
-    } else {
-      // Decode code and text files (.py, .java, .cpp, .txt, .md, etc.)
-      return Buffer.from(buffer).toString('utf-8');
+    // Auto-save a copy directly to Drive D storage device
+    try {
+      const localFilePath = path.join(STORAGE_DIR, fileName);
+      await fsp.writeFile(localFilePath, Buffer.from(buffer));
+      console.log(`Auto-saved document to Drive D: ${localFilePath}`);
+    } catch (saveErr) {
+      console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
     }
+
+    return await parseDocumentBuffer(buffer, ext, fileName);
   } catch (error) {
     console.error('Error extracting document content:', error);
     throw error;
+  }
+}
+
+async function loadLocalDocumentContent(fileName) {
+  const filePath = path.join(STORAGE_DIR, fileName);
+  const ext = fileName.split('.').pop().toLowerCase();
+  const buffer = await fsp.readFile(filePath);
+  return await parseDocumentBuffer(buffer, ext, fileName);
+}
+
+async function getStoredFiles() {
+  try {
+    if (!fs.existsSync(STORAGE_DIR)) return [];
+    const entries = await fsp.readdir(STORAGE_DIR, { withFileTypes: true });
+    const files = [];
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        const ext = entry.name.split('.').pop().toLowerCase();
+        if (SUPPORTED_EXTENSIONS.includes(ext)) {
+          const stats = await fsp.stat(path.join(STORAGE_DIR, entry.name));
+          files.push({
+            name: entry.name,
+            ext,
+            size: stats.size,
+            mtime: stats.mtimeMs,
+          });
+        }
+      }
+    }
+    // Sort newest first
+    return files.sort((a, b) => b.mtime - a.mtime);
+  } catch (err) {
+    console.error('Error reading storage directory:', err);
+    return [];
   }
 }
 
@@ -564,6 +633,270 @@ bot.command('quiz', async (ctx) => {
   }
 });
 
+let cachedFilesList = [];
+
+function buildLibraryKeyboard(files, page = 0) {
+  const keyboard = new InlineKeyboard();
+  const pageSize = 5;
+  const totalPages = Math.ceil(files.length / pageSize) || 1;
+  const start = page * pageSize;
+  const pageFiles = files.slice(start, start + pageSize);
+
+  for (let i = 0; i < pageFiles.length; i++) {
+    const f = pageFiles[i];
+    const globalIdx = start + i;
+    const icon = f.ext === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(f.ext) ? '💻' : '📝';
+    const displayName = f.name.length > 28 ? f.name.slice(0, 25) + '...' : f.name;
+    keyboard.text(`${icon} ${displayName}`, `lib_sel:${globalIdx}`).row();
+  }
+
+  // Pagination navigation
+  const navButtons = [];
+  if (page > 0) {
+    navButtons.push(InlineKeyboard.text('◀️ Prev', `lib_page:${page - 1}`));
+  }
+  if (page < totalPages - 1) {
+    navButtons.push(InlineKeyboard.text('Next ▶️', `lib_page:${page + 1}`));
+  }
+  if (navButtons.length > 0) {
+    keyboard.row(...navButtons);
+  }
+
+  keyboard.row(InlineKeyboard.text('🔄 Refresh Library', 'lib_refresh'));
+  return { keyboard, totalPages };
+}
+
+bot.command(['library', 'files'], async (ctx) => {
+  const files = await getStoredFiles();
+  cachedFilesList = files;
+
+  if (files.length === 0) {
+    await ctx.reply(
+      `📂 *Your Drive D Storage Folder is Empty*\n\n` +
+      `Path: \`${STORAGE_DIR}\`\n\n` +
+      `You can:\n` +
+      `1. Copy your PDF, Python, Java, or C++ files directly into that folder on your laptop.\n` +
+      `2. Or send any file right here in Telegram and I will automatically save it there!`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: new InlineKeyboard().text('🔄 Refresh Folder', 'lib_refresh'),
+      }
+    );
+    return;
+  }
+
+  const { keyboard, totalPages } = buildLibraryKeyboard(files, 0);
+  await ctx.reply(
+    `📂 *Drive D Document Library* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
+    `Folder: \`${STORAGE_DIR}\`\n\n` +
+    `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard,
+    }
+  );
+});
+
+bot.on('callback_query:data', async (ctx) => {
+  const data = ctx.callbackQuery.data;
+
+  // Pagination
+  if (data.startsWith('lib_page:')) {
+    const page = parseInt(data.replace('lib_page:', '')) || 0;
+    const files = await getStoredFiles();
+    cachedFilesList = files;
+    const { keyboard, totalPages } = buildLibraryKeyboard(files, page);
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      `📂 *Drive D Document Library* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
+      `Folder: \`${STORAGE_DIR}\`\n\n` +
+      `Page ${page + 1} of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Refresh or Back
+  if (data === 'lib_refresh' || data === 'lib_back') {
+    const files = await getStoredFiles();
+    cachedFilesList = files;
+    await ctx.answerCallbackQuery({ text: 'Library refreshed!' });
+
+    if (files.length === 0) {
+      await ctx.editMessageText(
+        `📂 *Your Drive D Storage Folder is Empty*\n\n` +
+        `Path: \`${STORAGE_DIR}\`\n\n` +
+        `You can:\n` +
+        `1. Copy your PDF, Python, Java, or C++ files directly into that folder on your laptop.\n` +
+        `2. Or send any file right here in Telegram and I will automatically save it there!`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard().text('🔄 Refresh Folder', 'lib_refresh'),
+        }
+      );
+      return;
+    }
+
+    const { keyboard, totalPages } = buildLibraryKeyboard(files, 0);
+    await ctx.editMessageText(
+      `📂 *Drive D Document Library* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
+      `Folder: \`${STORAGE_DIR}\`\n\n` +
+      `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Select a file
+  if (data.startsWith('lib_sel:')) {
+    const idx = parseInt(data.replace('lib_sel:', ''));
+    if (!cachedFilesList || !cachedFilesList[idx]) {
+      cachedFilesList = await getStoredFiles();
+    }
+    const file = cachedFilesList[idx];
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    const actionKeyboard = new InlineKeyboard()
+      .text('🎲 3-Question Quiz', `lib_quiz:${idx}`)
+      .text('📝 Detailed Summary', `lib_sum:${idx}`)
+      .row()
+      .text('🔙 Back to Library', 'lib_back');
+
+    const icon = file.ext === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(file.ext) ? '💻' : '📝';
+    await ctx.editMessageText(
+      `${icon} *Selected Document:*\n\`${file.name}\`\n\n` +
+      `📦 *Size:* ${formatBytes(file.size)}\n` +
+      `📅 *Modified:* ${new Date(file.mtime).toLocaleString()}\n` +
+      `📂 *Folder:* Drive D\n\n` +
+      `What would you like to do with this file?`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: actionKeyboard,
+      }
+    );
+    return;
+  }
+
+  // Quiz a selected file from Drive D
+  if (data.startsWith('lib_quiz:')) {
+    const idx = parseInt(data.replace('lib_quiz:', ''));
+    if (!cachedFilesList || !cachedFilesList[idx]) {
+      cachedFilesList = await getStoredFiles();
+    }
+    const file = cachedFilesList[idx];
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `Generating quiz on ${file.name}...` });
+    await ctx.reply(`🎲 *Pulling \`${file.name}\` from Drive D...*\nGenerating interactive quiz polls...`, { parse_mode: 'Markdown' });
+    await ctx.replyWithChatAction('typing');
+
+    try {
+      const content = await loadLocalDocumentContent(file.name);
+      userLastDocument.set(ctx.from.id, {
+        fileName: file.name,
+        fileExtension: file.ext,
+        content: content,
+        uploadedAt: Date.now(),
+      });
+
+      const contextText = `Document: "${file.name}"\n\nContent:\n${content.slice(0, 15000)}`;
+      const quizList = await generateQuizQuestions(contextText);
+      await sendQuizPolls(ctx, quizList);
+    } catch (err) {
+      console.error('Error generating quiz from stored file:', err);
+      await ctx.reply('❌ Sorry, I encountered an error reading the file or generating quiz questions.');
+    }
+    return;
+  }
+
+  // Summarize a selected file from Drive D
+  if (data.startsWith('lib_sum:')) {
+    const idx = parseInt(data.replace('lib_sum:', ''));
+    if (!cachedFilesList || !cachedFilesList[idx]) {
+      cachedFilesList = await getStoredFiles();
+    }
+    const file = cachedFilesList[idx];
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `Analyzing ${file.name}...` });
+    await ctx.reply(`📄 *Reading \`${file.name}\` from Drive D...*\nClaude is preparing your analysis...`, { parse_mode: 'Markdown' });
+    await ctx.replyWithChatAction('typing');
+
+    try {
+      const content = await loadLocalDocumentContent(file.name);
+      userLastDocument.set(ctx.from.id, {
+        fileName: file.name,
+        fileExtension: file.ext,
+        content: content,
+        uploadedAt: Date.now(),
+      });
+
+      let prompt;
+      if (CODE_EXTENSIONS.includes(file.ext)) {
+        prompt =
+          `I've loaded a ${file.ext.toUpperCase()} source code file named "${file.name}" from storage. Here is the content:\n\n` +
+          `\`\`\`${file.ext}\n${content}\n\`\`\`\n\n` +
+          `Please provide a comprehensive technical analysis:\n` +
+          `1. 🎯 **Executive Summary**: What does this code do and what problem does it solve?\n` +
+          `2. 🏗️ **Architecture & Key Components**: Breakdown of main classes, functions/methods, and structures.\n` +
+          `3. ⚙️ **Core Logic & Complexity**: Explain the underlying algorithms and estimated time & space complexity.\n` +
+          `4. ⚠️ **Observations & Edge Cases**: Potential bugs, unhandled conditions, or optimization suggestions.`;
+      } else {
+        const maxTextLen = 75000;
+        const textToSend =
+          content.length > maxTextLen
+            ? content.slice(0, maxTextLen) + '\n\n[... Note: Document excerpted to first 75,000 characters for analysis ...]'
+            : content;
+
+        prompt =
+          `I've loaded a document named "${file.name}" from storage. Here is the extracted text content:\n\n` +
+          `${textToSend}\n\n` +
+          `Please provide a detailed, structured summary in the primary language of the document:\n` +
+          `1. 📌 **Executive Overview**: Main topic, purpose, and central conclusion.\n` +
+          `2. 🔑 **Key Takeaways & Core Concepts**: Crucial definitions, historical events, principles, or data.\n` +
+          `3. 📖 **Section-by-Section Breakdown**: In-depth coverage of each major topic discussed.\n` +
+          `4. 💡 **Actionable Insights / Conclusion**.`;
+      }
+
+      const claudeSummaryPromise = sendToClaudeWithHistory(ctx, prompt);
+      const geminiQuizPromise = generateQuizQuestions(
+        `Document: "${file.name}"\n\nContent:\n${content.slice(0, 15000)}`
+      ).catch((err) => {
+        console.warn('Gemini background quiz generation note:', err.message);
+        return null;
+      });
+
+      await claudeSummaryPromise;
+
+      const quizList = await geminiQuizPromise;
+      if (quizList && quizList.length > 0) {
+        await ctx.reply('🎲 **Interactive Quiz**: Test what you learned from this document!', { parse_mode: 'Markdown' });
+        await sendQuizPolls(ctx, quizList);
+      }
+    } catch (err) {
+      console.error('Error summarizing stored file:', err);
+      await ctx.reply('❌ Sorry, I encountered an error reading or summarizing the file.');
+    }
+    return;
+  }
+});
+
 bot.on(['message:voice', 'message:audio'], handleVoiceMessage);
 
 bot.on('message:text', async (ctx) => {
@@ -630,6 +963,7 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 try {
   await bot.api.setMyCommands([
+    { command: 'library', description: 'Browse, quiz, and summarize files from Drive D' },
     { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
     { command: 'status', description: 'View bot and system resource usage' },
     { command: 'clear', description: 'Clear conversation history' },
