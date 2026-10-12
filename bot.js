@@ -820,7 +820,14 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   }, 4000);
 
   try {
-    let systemInstruction = 'You are a helpful, expert AI assistant. Keep responses direct, clear, and thoughtful.';
+    let systemInstruction =
+      'You are a helpful, expert AI assistant. Keep responses direct, clear, and thoughtful.\n\n' +
+      'LANGUAGE & TRANSLATION GUIDANCE:\n' +
+      '• When the user asks to translate or shares phonetic phrases, romaji, lyrics, slang, or foreign words (e.g. Japanese, Khmer, Spanish, French, etc.):\n' +
+      '  - Never give flat refusals or say you cannot translate simply because spelling or romanization is informal, phonetic, or approximate.\n' +
+      '  - Be perceptive: identify the most probable intended phrase, song lyric (e.g. anime, J-pop, trending TikTok/Reels sounds), or idiom.\n' +
+      '  - Provide the most likely translation, the correct spelling in native script (kanji/hiragana/katakana, etc.), the standard romanization, and helpful context (e.g. song title or origin).';
+
     const activeDoc = await getOrAutoLoadDocument(userId);
     if (activeDoc) {
       const docExcerpt =
