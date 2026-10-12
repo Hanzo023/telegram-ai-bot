@@ -42,7 +42,12 @@ const googleAI = new GoogleGenAI({
 
 const conversationHistory = new Map();
 const userLastDocument = new Map();
+const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
 const botStartTime = Date.now();
+
+function getUserStorageMode(userId) {
+  return userStorageMode.get(userId) || 'local';
+}
 
 const CODE_EXTENSIONS = ['py', 'java', 'cpp', 'cc', 'cxx', 'c', 'h', 'hpp', 'js', 'ts', 'cs', 'go', 'rs', 'html', 'css', 'sql'];
 const DOC_EXTENSIONS = ['pdf', 'txt', 'md'];
@@ -69,10 +74,14 @@ bot.command('start', async (ctx) => {
     '• Voice messages & audio notes 🎙️\n\n' +
     'Commands:\n' +
     '/library - Browse files from Telegram Cloud Vault or Drive D\n' +
+    '/storage - Choose upload destination (Cloud, Local, or /nosave)\n' +
     '/quiz - Generate an interactive quiz poll on loaded file or topic\n' +
-    '/status - View system resources and loaded document\n' +
+    '/status - View system resources, loaded file & storage mode\n' +
     '/clear - Clear chat messages (keeps loaded file active)\n' +
     '/clearall - Clear everything & unload file (files in folder safe)\n' +
+    '/nosave - Save new files only to Drive D (no cloud upload)\n' +
+    '/cloud - Save new files only to Cloud Vault (0 laptop space)\n' +
+    '/local - Save new files to both Drive D and Cloud Vault\n' +
     '/start - Show this message',
     { parse_mode: 'Markdown' }
   );
@@ -127,6 +136,77 @@ bot.command('clear', async (ctx) => {
 
 bot.command(['clearall', 'clear_all'], handleClearAll);
 
+bot.command(['nosave', 'no_save'], async (ctx) => {
+  const userId = ctx.from.id;
+  userStorageMode.set(userId, 'nosave');
+  await ctx.reply(
+    '💻 *Upload Mode set to: Local Only (/nosave)*\n\n' +
+    '• New files you upload will be saved **only to your laptop (Drive D)**.\n' +
+    '• They will **NOT** be uploaded to Telegram Cloud Vault.\n\n' +
+    '💡 _To switch back:_\n' +
+    '• Type /local to save to both Drive D and Cloud Vault\n' +
+    '• Type /cloud to save to Cloud Vault only (saving laptop space)',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command(['cloud', 'cloudonly'], async (ctx) => {
+  const userId = ctx.from.id;
+  userStorageMode.set(userId, 'cloud');
+  await ctx.reply(
+    '☁️ *Upload Mode set to: Cloud Only*\n\n' +
+    '• New files you upload will be saved **only to Telegram Cloud Vault**.\n' +
+    '• They will **NOT** take up space on your laptop drive (Drive D).\n\n' +
+    '💡 _To switch back:_\n' +
+    '• Type /local to save to both Drive D and Cloud Vault\n' +
+    '• Type /nosave to save to local Drive D only',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command(['local', 'dual'], async (ctx) => {
+  const userId = ctx.from.id;
+  userStorageMode.set(userId, 'local');
+  await ctx.reply(
+    '💻+☁️ *Upload Mode set to: Local & Cloud (Default)*\n\n' +
+    '• New files you upload will be saved to **both Drive D and Telegram Cloud Vault**.\n\n' +
+    '💡 _Other modes:_\n' +
+    '• Type /cloud to save to Cloud Vault only\n' +
+    '• Type /nosave to save to Drive D only',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command(['storage', 'mode'], async (ctx) => {
+  const userId = ctx.from.id;
+  const currentMode = getUserStorageMode(userId);
+  const modeLabels = {
+    local: '💻+☁️ Local & Cloud (Dual Save)',
+    cloud: '☁️ Cloud Only (No laptop space)',
+    nosave: '💻 Local Only (/nosave - No cloud save)',
+  };
+
+  const keyboard = new InlineKeyboard()
+    .text('☁️ Cloud Only', 'set_storage:cloud')
+    .row()
+    .text('💻+☁️ Local & Cloud', 'set_storage:local')
+    .row()
+    .text('💻 Local Only (/nosave)', 'set_storage:nosave');
+
+  await ctx.reply(
+    `⚙️ *Storage Destination Settings*\n\n` +
+    `Current Mode: *${modeLabels[currentMode]}*\n\n` +
+    `Choose where newly uploaded files should be saved:\n\n` +
+    `• ☁️ **Cloud Only**: Saved only to Telegram Cloud Vault. Takes 0 MB on laptop.\n` +
+    `• 💻+☁️ **Local & Cloud**: Saved to both Drive D and Telegram Cloud Vault.\n` +
+    `• 💻 **Local Only (/nosave)**: Saved only to Drive D. No cloud upload.`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard,
+    }
+  );
+});
+
 bot.command('status', async (ctx) => {
   const uptime = Date.now() - botStartTime;
   const uptimeSeconds = Math.floor(uptime / 1000);
@@ -174,7 +254,8 @@ bot.command('status', async (ctx) => {
     `├─ Cores: ${cpuCount}\n` +
     `└─ Load Average: ${load1min} (1m), ${load5min} (5m), ${load15min} (15m)\n\n` +
     `💬 *Active Conversations:* ${conversationHistory.size}\n` +
-    `📄 *Loaded Document:* ${userLastDocument.get(ctx.from.id)?.fileName ? `\`${userLastDocument.get(ctx.from.id).fileName}\`` : '_None (unloaded)_'}`;
+    `📄 *Loaded Document:* ${userLastDocument.get(ctx.from.id)?.fileName ? `\`${userLastDocument.get(ctx.from.id).fileName}\`` : '_None (unloaded)_'}\n` +
+    `⚙️ *Upload Storage Mode:* ${getUserStorageMode(ctx.from.id) === 'cloud' ? '☁️ Cloud Only' : getUserStorageMode(ctx.from.id) === 'nosave' ? '💻 Local Only (/nosave)' : '💻+☁️ Local & Cloud (Dual)'}`;
 
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
 });
@@ -339,6 +420,20 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       textHash = crypto.createHash('sha256').update(nodeBuffer.toString('utf-8').replace(/\r\n/g, '\n').trim()).digest('hex');
     }
 
+    // Determine target storage mode: 'local' (dual save), 'cloud' (cloud only), 'nosave' (local only)
+    let targetMode = getUserStorageMode(ctx.from.id);
+    const rawCaption = (ctx.message.caption || '').trim();
+    if (/\b\/nosave\b/i.test(rawCaption)) {
+      targetMode = 'nosave';
+    } else if (/\b\/cloud\b/i.test(rawCaption)) {
+      targetMode = 'cloud';
+    } else if (/\b\/local\b/i.test(rawCaption)) {
+      targetMode = 'local';
+    }
+
+    const saveToDriveD = targetMode === 'local' || targetMode === 'nosave';
+    const saveToCloudVault = targetMode === 'local' || targetMode === 'cloud';
+
     // Check if an existing file has identical content (even with a different name)
     const duplicateMatch = await findDuplicateDocument(rawHash, textHash, safeFileName);
     const isDuplicate = !!duplicateMatch;
@@ -347,35 +442,39 @@ async function extractDocumentContent(file, ctx, fileExtension) {
     if (isDuplicate) {
       console.log(`Duplicate content detected: "${safeFileName}" has identical content to "${duplicateOf}". Skipped saving duplicate.`);
     } else {
-      // Auto-save a copy directly to Drive D storage device (with path traversal protection)
-      try {
-        const storageRoot = path.resolve(STORAGE_DIR);
-        const localFilePath = path.resolve(storageRoot, safeFileName);
-        if (localFilePath.startsWith(storageRoot)) {
-          await fsp.writeFile(localFilePath, nodeBuffer);
-          console.log(`Auto-saved document to Drive D: ${localFilePath}`);
-          // Cache the new file's hash info
-          const stats = await fsp.stat(localFilePath);
-          localFileHashes.set(safeFileName, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
+      // Save to Drive D if mode allows (local or nosave)
+      if (saveToDriveD) {
+        try {
+          const storageRoot = path.resolve(STORAGE_DIR);
+          const localFilePath = path.resolve(storageRoot, safeFileName);
+          if (localFilePath.startsWith(storageRoot)) {
+            await fsp.writeFile(localFilePath, nodeBuffer);
+            console.log(`Auto-saved document to Drive D: ${localFilePath}`);
+            // Cache the new file's hash info
+            const stats = await fsp.stat(localFilePath);
+            localFileHashes.set(safeFileName, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
+          }
+        } catch (saveErr) {
+          console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
         }
-      } catch (saveErr) {
-        console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
       }
 
-      // Auto-save entry to Telegram Cloud Vault
-      try {
-        await saveCloudVaultEntry({
-          name: safeFileName,
-          file_id: file.file_id,
-          ext: ext,
-          size: file.file_size || buffer.byteLength,
-          date: Date.now(),
-          hash: rawHash,
-          textHash: textHash,
-        });
-        console.log(`Saved document to Telegram Cloud Vault: ${safeFileName}`);
-      } catch (vaultErr) {
-        console.warn('Could not save file to Telegram Cloud Vault:', vaultErr.message);
+      // Save to Telegram Cloud Vault if mode allows (local or cloud)
+      if (saveToCloudVault) {
+        try {
+          await saveCloudVaultEntry({
+            name: safeFileName,
+            file_id: file.file_id,
+            ext: ext,
+            size: file.file_size || buffer.byteLength,
+            date: Date.now(),
+            hash: rawHash,
+            textHash: textHash,
+          });
+          console.log(`Saved document to Telegram Cloud Vault: ${safeFileName}`);
+        } catch (vaultErr) {
+          console.warn('Could not save file to Telegram Cloud Vault:', vaultErr.message);
+        }
       }
     }
 
@@ -386,6 +485,7 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       duplicateOf,
       fileName: safeFileName,
       fileExtension: ext,
+      targetMode,
     };
   } catch (error) {
     const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
@@ -822,30 +922,41 @@ bot.on('message:document', async (ctx) => {
       uploadedAt: Date.now(),
     });
 
-    const userCaption = (ctx.message.caption || '').trim();
+    const rawCaption = (ctx.message.caption || '').trim();
+    const promptCaption = rawCaption.replace(/^\/(nosave|cloud|local)\s*/i, '').trim();
 
-    if (userCaption) {
+    if (promptCaption) {
       // User sent a specific prompt or question with the file: answer it directly!
-      await sendToClaudeWithHistory(ctx, userCaption);
+      await sendToClaudeWithHistory(ctx, promptCaption);
     } else if (docResult.isDuplicate) {
       // Duplicate file detected: inform user that duplicate wasn't saved, but it's ready for chat
       const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
       await ctx.reply(
         `${icon} *Identical content detected!*\n\n` +
         `\`${fileName}\` has the exact same content as \`${docResult.duplicateOf}\` already in your library.\n\n` +
-        `• 🛡️ *No duplicate saved* to your Drive D or Cloud Vault (preserving storage).\n` +
+        `• 🛡️ *No duplicate saved* (storage preserved).\n` +
         `• 🧠 Activated in chat — you can ask questions about it or type /quiz right now!\n` +
         `• Browse your library anytime with /library.`,
         { parse_mode: 'Markdown' }
       );
     } else {
-      // User simply uploaded the file: confirm save without burning tokens or spamming quiz polls
+      // User simply uploaded the file: confirm save with exact storage destination
       const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
+      let destText = '';
+      if (docResult.targetMode === 'cloud') {
+        destText = '• ☁️ **Telegram Cloud Vault only**: Saved to cloud (laptop storage untouched).\n';
+      } else if (docResult.targetMode === 'nosave') {
+        destText = '• 💻 **Drive D only**: Saved to laptop storage (cloud save skipped via `/nosave`).\n';
+      } else {
+        destText =
+          '• ☁️ **Telegram Cloud Vault**: Ready on your phone & any device 24/7.\n' +
+          '• 💻 **Drive D**: Saved to laptop storage.\n';
+      }
+
       await ctx.reply(
         `${icon} *Saved \`${fileName}\` to your library.*\n\n` +
-        `• ☁️ **Telegram Cloud Vault**: Ready on your phone & any device 24/7.\n` +
-        `• 💻 **Drive D**: Saved to laptop storage.\n\n` +
-        `• Ask me anything about it in chat.\n` +
+        destText +
+        `\n• Ask me anything about it in chat.\n` +
         `• Type /quiz if you want to test your understanding.\n` +
         `• Or browse all files anytime with /library.`,
         { parse_mode: 'Markdown' }
@@ -1195,11 +1306,15 @@ bot.command('quiz', async (ctx) => {
 
 let cachedFilesList = [];
 
-function buildSourcePickerKeyboard() {
+function buildSourcePickerKeyboard(userId = null) {
+  const currentMode = userId ? getUserStorageMode(userId) : 'local';
+  const modeShort = currentMode === 'cloud' ? '☁️ Cloud' : currentMode === 'nosave' ? '💻 Local Only' : '💻+☁️ Dual';
   return new InlineKeyboard()
     .text(`☁️ Telegram Cloud Vault (${cloudVault.length})`, 'lib_src:cloud')
     .row()
-    .text('💻 Local Storage (Drive D)', 'lib_src:local');
+    .text('💻 Local Storage (Drive D)', 'lib_src:local')
+    .row()
+    .text(`⚙️ Upload Mode: ${modeShort}`, 'open_storage_settings');
 }
 
 function buildLibraryKeyboard(files, source, page = 0) {
@@ -1237,14 +1352,23 @@ function buildLibraryKeyboard(files, source, page = 0) {
 }
 
 bot.command(['library', 'files'], async (ctx) => {
-  const keyboard = buildSourcePickerKeyboard();
+  const userId = ctx.from.id;
+  const currentMode = getUserStorageMode(userId);
+  const modeLabels = {
+    local: '💻+☁️ Local & Cloud (Dual Save)',
+    cloud: '☁️ Cloud Only (No laptop space)',
+    nosave: '💻 Local Only (/nosave - No cloud save)',
+  };
+
+  const keyboard = buildSourcePickerKeyboard(userId);
   await ctx.reply(
     `📚 *Document Library*\n\n` +
     `Choose a storage location to browse:\n\n` +
     `• ☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
     `  Files uploaded via Telegram chat. Accessible 24/7 on your phone and any device.\n\n` +
     `• 💻 *Local Storage (Drive D)*\n` +
-    `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
+    `  Physical files located in \`${STORAGE_DIR}\` on your laptop.\n\n` +
+    `⚙️ *Upload Destination:* ${modeLabels[currentMode]}`,
     {
       parse_mode: 'Markdown',
       reply_markup: keyboard,
@@ -1255,17 +1379,94 @@ bot.command(['library', 'files'], async (ctx) => {
 bot.on('callback_query:data', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
+  // Open storage settings from inline button
+  if (data === 'open_storage_settings') {
+    await ctx.answerCallbackQuery();
+    const currentMode = getUserStorageMode(ctx.from.id);
+    const modeLabels = {
+      local: '💻+☁️ Local & Cloud (Dual Save)',
+      cloud: '☁️ Cloud Only (No laptop space)',
+      nosave: '💻 Local Only (/nosave - No cloud save)',
+    };
+
+    const keyboard = new InlineKeyboard()
+      .text('☁️ Cloud Only', 'set_storage:cloud')
+      .row()
+      .text('💻+☁️ Local & Cloud', 'set_storage:local')
+      .row()
+      .text('💻 Local Only (/nosave)', 'set_storage:nosave')
+      .row()
+      .text('◀️ Back to Library', 'lib_sources');
+
+    await ctx.editMessageText(
+      `⚙️ *Storage Destination Settings*\n\n` +
+      `Current Mode: *${modeLabels[currentMode]}*\n\n` +
+      `Choose where newly uploaded files should be saved:\n\n` +
+      `• ☁️ **Cloud Only**: Saved only to Telegram Cloud Vault. Takes 0 MB on laptop.\n` +
+      `• 💻+☁️ **Local & Cloud**: Saved to both Drive D and Telegram Cloud Vault.\n` +
+      `• 💻 **Local Only (/nosave)**: Saved only to Drive D. No cloud upload.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Set storage mode
+  if (data.startsWith('set_storage:')) {
+    const newMode = data.split(':')[1];
+    userStorageMode.set(ctx.from.id, newMode);
+    await ctx.answerCallbackQuery({ text: `Mode updated to ${newMode}!` });
+
+    const modeLabels = {
+      local: '💻+☁️ Local & Cloud (Dual Save)',
+      cloud: '☁️ Cloud Only (No laptop space)',
+      nosave: '💻 Local Only (/nosave - No cloud save)',
+    };
+
+    const keyboard = new InlineKeyboard()
+      .text('☁️ Cloud Only', 'set_storage:cloud')
+      .row()
+      .text('💻+☁️ Local & Cloud', 'set_storage:local')
+      .row()
+      .text('💻 Local Only (/nosave)', 'set_storage:nosave')
+      .row()
+      .text('📚 Back to Library', 'lib_sources');
+
+    await ctx.editMessageText(
+      `✅ *Storage Mode Updated!*\n\n` +
+      `Active Mode: *${modeLabels[newMode]}*\n\n` +
+      `• ☁️ **Cloud Only**: Saves to Cloud Vault only (0 laptop space).\n` +
+      `• 💻+☁️ **Local & Cloud**: Saves to both Drive D & Cloud Vault.\n` +
+      `• 💻 **Local Only (/nosave)**: Saves to Drive D only.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
   // Switch / return to source picker
   if (data === 'lib_sources') {
     await ctx.answerCallbackQuery();
-    const keyboard = buildSourcePickerKeyboard();
+    const keyboard = buildSourcePickerKeyboard(ctx.from.id);
+    const currentMode = getUserStorageMode(ctx.from.id);
+    const modeLabels = {
+      local: '💻+☁️ Local & Cloud (Dual Save)',
+      cloud: '☁️ Cloud Only (No laptop space)',
+      nosave: '💻 Local Only (/nosave - No cloud save)',
+    };
+
     await ctx.editMessageText(
       `📚 *Document Library*\n\n` +
       `Choose a storage location to browse:\n\n` +
       `• ☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
       `  Files uploaded via Telegram chat. Accessible 24/7 on your phone and any device.\n\n` +
       `• 💻 *Local Storage (Drive D)*\n` +
-      `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
+      `  Physical files located in \`${STORAGE_DIR}\` on your laptop.\n\n` +
+      `⚙️ *Upload Destination:* ${modeLabels[currentMode]}`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
@@ -1697,10 +1898,14 @@ try {
 try {
   await bot.api.setMyCommands([
     { command: 'library', description: 'Browse Cloud Vault & Drive D files' },
+    { command: 'storage', description: 'Choose upload storage (Cloud, Local, /nosave)' },
     { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
-    { command: 'status', description: 'View system resources & loaded file' },
+    { command: 'status', description: 'View system resources, loaded file & mode' },
     { command: 'clear', description: 'Clear chat messages (keeps loaded file)' },
     { command: 'clearall', description: 'Clear all chat & unload file (folder safe)' },
+    { command: 'nosave', description: 'Save new files to Drive D only (no cloud upload)' },
+    { command: 'cloud', description: 'Save new files to Cloud Vault only (0 laptop space)' },
+    { command: 'local', description: 'Save new files to both Drive D and Cloud Vault' },
     { command: 'start', description: 'Show welcome message and help' },
   ]);
   console.log('Commands registered with Telegram');
