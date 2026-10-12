@@ -20,7 +20,8 @@ try {
 }
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
-const allowedUserId = parseInt(process.env.ALLOWED_USER_ID);
+const rawAllowedId = (process.env.ALLOWED_USER_ID || '').trim();
+const allowedUserId = rawAllowedId ? parseInt(rawAllowedId, 10) : null;
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -46,7 +47,7 @@ const DOC_EXTENSIONS = ['pdf', 'txt', 'md'];
 const SUPPORTED_EXTENSIONS = [...CODE_EXTENSIONS, ...DOC_EXTENSIONS];
 
 bot.use(async (ctx, next) => {
-  if (ctx.from?.id !== allowedUserId) {
+  if (!allowedUserId || ctx.from?.id !== allowedUserId) {
     console.log(`Rejected message from unauthorized user: ${ctx.from?.id}`);
     return;
   }
@@ -206,30 +207,40 @@ async function extractDocumentContent(file, ctx, fileExtension) {
     }
     const buffer = await response.arrayBuffer();
 
-    const fileName = file.file_name || 'document';
+    const rawFileName = file.file_name || 'document';
+    const safeFileName = path.basename(rawFileName).replace(/[\/\\]/g, '');
     const ext = fileExtension || (fileUrl.file_path ? fileUrl.file_path.split('.').pop().toLowerCase() : '');
 
-    // Auto-save a copy directly to Drive D storage device
+    // Auto-save a copy directly to Drive D storage device (with path traversal protection)
     try {
-      const localFilePath = path.join(STORAGE_DIR, fileName);
-      await fsp.writeFile(localFilePath, Buffer.from(buffer));
-      console.log(`Auto-saved document to Drive D: ${localFilePath}`);
+      const storageRoot = path.resolve(STORAGE_DIR);
+      const localFilePath = path.resolve(storageRoot, safeFileName);
+      if (localFilePath.startsWith(storageRoot)) {
+        await fsp.writeFile(localFilePath, Buffer.from(buffer));
+        console.log(`Auto-saved document to Drive D: ${localFilePath}`);
+      }
     } catch (saveErr) {
       console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
     }
 
-    return await parseDocumentBuffer(buffer, ext, fileName);
+    return await parseDocumentBuffer(buffer, ext, safeFileName);
   } catch (error) {
-    console.error('Error extracting document content:', error);
-    throw error;
+    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+    console.error('Error extracting document content:', sanitizedMsg);
+    throw new Error(sanitizedMsg);
   }
 }
 
 async function loadLocalDocumentContent(fileName) {
-  const filePath = path.join(STORAGE_DIR, fileName);
-  const ext = fileName.split('.').pop().toLowerCase();
+  const safeFileName = path.basename(fileName).replace(/[\/\\]/g, '');
+  const storageRoot = path.resolve(STORAGE_DIR);
+  const filePath = path.resolve(storageRoot, safeFileName);
+  if (!filePath.startsWith(storageRoot)) {
+    throw new Error('Access denied: invalid file path');
+  }
+  const ext = safeFileName.split('.').pop().toLowerCase();
   const buffer = await fsp.readFile(filePath);
-  return await parseDocumentBuffer(buffer, ext, fileName);
+  return await parseDocumentBuffer(buffer, ext, safeFileName);
 }
 
 async function getStoredFiles() {
@@ -238,7 +249,7 @@ async function getStoredFiles() {
     const entries = await fsp.readdir(STORAGE_DIR, { withFileTypes: true });
     const files = [];
     for (const entry of entries) {
-      if (entry.isFile()) {
+      if (entry.isFile() && !entry.name.startsWith('.')) {
         const ext = entry.name.split('.').pop().toLowerCase();
         if (SUPPORTED_EXTENSIONS.includes(ext)) {
           const stats = await fsp.stat(path.join(STORAGE_DIR, entry.name));
