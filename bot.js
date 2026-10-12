@@ -74,15 +74,41 @@ bot.command('start', async (ctx) => {
 });
 
 bot.command('clear', async (ctx) => {
-  conversationHistory.delete(ctx.from.id);
-  userLastDocument.delete(ctx.from.id);
-  await ctx.reply(
-    '✅ *AI conversation context & uploaded files cleared!*\n\n' +
-    'Claude has completely forgotten previous messages and documents.\n\n' +
-    '💡 *To wipe the message bubbles from your screen:*\n' +
-    'Click the **3 dots (⋮)** in the top-right corner of Telegram → **"Clear history"**.',
-    { parse_mode: 'Markdown' }
-  );
+  const userId = ctx.from.id;
+  const arg = ctx.message.text.replace(/^\/clear\s*/i, '').trim().toLowerCase();
+
+  conversationHistory.delete(userId);
+
+  if (arg === 'all' || arg === 'doc' || arg === 'file') {
+    userLastDocument.delete(userId);
+    await ctx.reply(
+      '✅ *All conversation history & loaded document cleared!*\n\n' +
+      'Claude has forgotten previous messages and unloaded any active file.\n\n' +
+      '💡 *To clear visible message bubbles in Telegram:*\n' +
+      'Tap the 3 dots (⋮) in the top-right corner → "Clear history".',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const activeDoc = userLastDocument.get(userId);
+  if (activeDoc) {
+    await ctx.reply(
+      '✅ *Conversation messages cleared!*\n\n' +
+      `📄 *Active Document Kept:* \`${activeDoc.fileName}\`\n` +
+      `You can continue asking questions or quiz on this file without re-uploading!\n\n` +
+      `💡 _To unload this document too, type \`/clear all\`._`,
+      { parse_mode: 'Markdown' }
+    );
+  } else {
+    await ctx.reply(
+      '✅ *Conversation history cleared!*\n\n' +
+      'Claude has forgotten previous messages.\n\n' +
+      '💡 *To clear visible message bubbles in Telegram:*\n' +
+      'Tap the 3 dots (⋮) in the top-right corner → "Clear history".',
+      { parse_mode: 'Markdown' }
+    );
+  }
 });
 
 bot.command('status', async (ctx) => {
@@ -491,6 +517,56 @@ async function sendLongMessage(ctx, text, parseMode = 'Markdown') {
   }
 }
 
+async function getOrAutoLoadDocument(userId) {
+  // 1. If document is already cached in memory for user, return it
+  if (userLastDocument.has(userId)) {
+    return userLastDocument.get(userId);
+  }
+
+  // 2. Check local storage directory (D:\drive-download-20260715T073323Z-1-001)
+  try {
+    const localFiles = await getStoredFiles();
+    if (localFiles && localFiles.length > 0) {
+      const latest = localFiles[0];
+      const content = await loadLocalDocumentContent(latest.name);
+      const docEntry = {
+        fileName: latest.name,
+        fileExtension: latest.ext,
+        content: content,
+        uploadedAt: latest.mtime || Date.now(),
+        source: 'local',
+      };
+      userLastDocument.set(userId, docEntry);
+      console.log(`Auto-loaded active document from local Drive D: ${latest.name}`);
+      return docEntry;
+    }
+  } catch (err) {
+    console.warn('Auto-load from local storage notice:', err.message);
+  }
+
+  // 3. Fall back to Telegram Cloud Vault
+  try {
+    if (cloudVault && cloudVault.length > 0) {
+      const latestCloud = cloudVault[0];
+      const content = await loadCloudDocumentContent(latestCloud.file_id, latestCloud.ext, latestCloud.name);
+      const docEntry = {
+        fileName: latestCloud.name,
+        fileExtension: latestCloud.ext,
+        content: content,
+        uploadedAt: latestCloud.date || Date.now(),
+        source: 'cloud',
+      };
+      userLastDocument.set(userId, docEntry);
+      console.log(`Auto-loaded active document from Cloud Vault: ${latestCloud.name}`);
+      return docEntry;
+    }
+  } catch (err) {
+    console.warn('Auto-load from Cloud Vault notice:', err.message);
+  }
+
+  return null;
+}
+
 async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   const userId = ctx.from.id;
 
@@ -510,7 +586,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
 
   try {
     let systemInstruction = 'You are a helpful, expert AI assistant. Keep responses direct, clear, and thoughtful.';
-    const activeDoc = userLastDocument.get(userId);
+    const activeDoc = await getOrAutoLoadDocument(userId);
     if (activeDoc) {
       const docExcerpt =
         activeDoc.content.length > 25000
@@ -724,7 +800,8 @@ async function handleVoiceMessage(ctx) {
     await sendToClaudeWithHistory(ctx, transcription);
   } catch (error) {
     clearInterval(typingInterval);
-    console.error('Error handling hybrid voice message:', error);
+    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+    console.error('Error handling hybrid voice message:', sanitizedMsg);
     await ctx.reply('❌ Sorry, I encountered an error processing your voice note. Please try again.', {
       parse_mode: 'Markdown',
     });
@@ -798,14 +875,15 @@ async function sendQuizPolls(ctx, quizList) {
 bot.command('quiz', async (ctx) => {
   const userId = ctx.from.id;
   const topicArg = ctx.message.text.replace(/^\/quiz\s*/i, '').trim();
-  const lastDoc = userLastDocument.get(userId);
+  let lastDoc = await getOrAutoLoadDocument(userId);
 
   if (!topicArg && !lastDoc) {
     await ctx.reply(
-      '📚 *No document uploaded yet!*\n\n' +
+      '📚 *No document found in library or storage!*\n\n' +
+      `I checked \`${STORAGE_DIR}\` and your Telegram Cloud Vault, but found no files.\n\n` +
       'To take a quiz, you can:\n' +
-      '1. Send me a **PDF**, **Python (.py)**, **Java (.java)**, or **C++ (.cpp)** file, then type `/quiz`\n' +
-      '2. Or run `/quiz <topic>` right now (e.g. `/quiz C++ pointers` or `/quiz Java inheritance`)',
+      '1. Put files in your Drive D folder or upload a file here in Telegram\n' +
+      '2. Or run `/quiz <topic>` right now (e.g. `/quiz Python basics` or `/quiz C++ pointers`)',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -819,6 +897,7 @@ bot.command('quiz', async (ctx) => {
       contextText = `Topic: "${topicArg}"`;
     } else {
       contextText = `Document: "${lastDoc.fileName}"\n\nContent:\n${lastDoc.content.slice(0, 15000)}`;
+      await ctx.reply(`🎯 *Generating quiz on:* \`${lastDoc.fileName}\``, { parse_mode: 'Markdown' });
     }
 
     const quizList = await generateQuizQuestions(contextText);
