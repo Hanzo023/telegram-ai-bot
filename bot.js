@@ -45,7 +45,9 @@ const botStartTime = Date.now();
 
 const CODE_EXTENSIONS = ['py', 'java', 'cpp', 'cc', 'cxx', 'c', 'h', 'hpp', 'js', 'ts', 'cs', 'go', 'rs', 'html', 'css', 'sql'];
 const DOC_EXTENSIONS = ['pdf', 'txt', 'md'];
-const SUPPORTED_EXTENSIONS = [...CODE_EXTENSIONS, ...DOC_EXTENSIONS];
+const TEXT_EXTENSIONS = [...CODE_EXTENSIONS, ...DOC_EXTENSIONS];
+const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
+const SUPPORTED_EXTENSIONS = [...TEXT_EXTENSIONS, ...IMAGE_EXTENSIONS];
 
 bot.use(async (ctx, next) => {
   if (!allowedUserId || ctx.from?.id !== allowedUserId) {
@@ -60,6 +62,7 @@ bot.command('start', async (ctx) => {
     'Hello! I\'m your personal AI assistant powered by Claude & Gemini.\n\n' +
     'Just send me any message and I\'ll help you with your questions.\n\n' +
     'You can also send me:\n' +
+    '• Photos & Screenshots 📸 (ask questions about anything on your screen!)\n' +
     '• Code files: Python (.py), Java (.java), C++ (.cpp, .h)\n' +
     '• Documents: PDF (.pdf), Text (.txt), Markdown (.md)\n' +
     '• Voice messages & audio notes 🎙️\n\n' +
@@ -473,7 +476,7 @@ async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 
         }
       } else if (entry.isFile()) {
         const ext = entry.name.split('.').pop().toLowerCase();
-        if (SUPPORTED_EXTENSIONS.includes(ext)) {
+        if (TEXT_EXTENSIONS.includes(ext)) {
           const stats = await fsp.stat(fullPath);
           const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
           files.push({
@@ -626,6 +629,16 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       history.splice(0, 2);
     }
 
+    // Prune heavy base64 image payloads older than the last 4 messages to save tokens
+    for (let i = 0; i < history.length - 4; i++) {
+      const msg = history[i];
+      if (Array.isArray(msg.content) && msg.content.some((part) => part.type === 'image')) {
+        msg.content = msg.content
+          .filter((part) => part.type !== 'image')
+          .concat([{ type: 'text', text: '[Earlier image already analyzed above]' }]);
+      }
+    }
+
     await sendLongMessage(ctx, assistantMessage);
   } catch (error) {
     clearInterval(typingInterval);
@@ -650,10 +663,16 @@ bot.on('message:document', async (ctx) => {
     await ctx.reply(
       `❌ Unsupported file type (\`.${fileExtension}\`).\n\n` +
       `Supported formats:\n` +
+      `• **Photos & Images**: PNG (.png), JPG (.jpg, .jpeg), WebP (.webp), GIF (.gif)\n` +
       `• **Code**: Python (.py), Java (.java), C++ (.cpp, .c, .h)\n` +
       `• **Documents**: PDF (.pdf), Text (.txt), Markdown (.md)`,
       { parse_mode: 'Markdown' }
     );
+    return;
+  }
+
+  if (IMAGE_EXTENSIONS.includes(fileExtension)) {
+    await handleImageDocument(ctx, document, fileName, fileExtension);
     return;
   }
 
@@ -803,6 +822,126 @@ async function handleVoiceMessage(ctx) {
     const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
     console.error('Error handling hybrid voice message:', sanitizedMsg);
     await ctx.reply('❌ Sorry, I encountered an error processing your voice note. Please try again.', {
+      parse_mode: 'Markdown',
+    });
+  }
+}
+
+async function handlePhotoMessage(ctx) {
+  const photos = ctx.message.photo;
+  if (!photos || photos.length === 0) return;
+
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('typing').catch(() => {});
+  }, 4000);
+
+  try {
+    // Select highest resolution photo
+    const photo = photos[photos.length - 1];
+    const fileInfo = await ctx.api.getFile(photo.file_id);
+    const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+
+    const fileRes = await fetch(downloadUrl);
+    if (!fileRes.ok) {
+      throw new Error(`Failed to download photo: ${fileRes.statusText}`);
+    }
+    const arrayBuffer = await fileRes.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString('base64');
+
+    let mimeType = 'image/jpeg';
+    const filePathLower = (fileInfo.file_path || '').toLowerCase();
+    if (filePathLower.endsWith('.png')) {
+      mimeType = 'image/png';
+    } else if (filePathLower.endsWith('.webp')) {
+      mimeType = 'image/webp';
+    } else if (filePathLower.endsWith('.gif')) {
+      mimeType = 'image/gif';
+    }
+
+    const caption = (ctx.message.caption || '').trim();
+    const promptText =
+      caption ||
+      'Please inspect and analyze this image or screenshot in detail. Describe what you see, transcribe any visible text or code, and answer any apparent questions.';
+
+    const multimodalContent = [
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: mimeType,
+          data: base64Data,
+        },
+      },
+      {
+        type: 'text',
+        text: promptText,
+      },
+    ];
+
+    clearInterval(typingInterval);
+    await sendToClaudeWithHistory(ctx, multimodalContent);
+  } catch (error) {
+    clearInterval(typingInterval);
+    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+    console.error('Error handling photo message:', sanitizedMsg);
+    await ctx.reply('❌ Sorry, I encountered an error processing your photo. Please try again.', {
+      parse_mode: 'Markdown',
+    });
+  }
+}
+
+async function handleImageDocument(ctx, document, fileName, fileExtension) {
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('typing').catch(() => {});
+  }, 4000);
+
+  try {
+    const fileInfo = await ctx.api.getFile(document.file_id);
+    const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+
+    const fileRes = await fetch(downloadUrl);
+    if (!fileRes.ok) {
+      throw new Error(`Failed to download image file: ${fileRes.statusText}`);
+    }
+    const arrayBuffer = await fileRes.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString('base64');
+
+    let mimeType = 'image/jpeg';
+    if (fileExtension === 'png') {
+      mimeType = 'image/png';
+    } else if (fileExtension === 'webp') {
+      mimeType = 'image/webp';
+    } else if (fileExtension === 'gif') {
+      mimeType = 'image/gif';
+    }
+
+    const caption = (ctx.message.caption || '').trim();
+    const promptText =
+      caption ||
+      `Please inspect and analyze this image ("${fileName}"). Describe what you see, transcribe any visible text or code, and answer any apparent questions.`;
+
+    const multimodalContent = [
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: mimeType,
+          data: base64Data,
+        },
+      },
+      {
+        type: 'text',
+        text: promptText,
+      },
+    ];
+
+    clearInterval(typingInterval);
+    await sendToClaudeWithHistory(ctx, multimodalContent);
+  } catch (error) {
+    clearInterval(typingInterval);
+    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+    console.error('Error handling image document:', sanitizedMsg);
+    await ctx.reply('❌ Sorry, I encountered an error reading your image. Please try again.', {
       parse_mode: 'Markdown',
     });
   }
@@ -1341,6 +1480,7 @@ bot.on('callback_query:data', async (ctx) => {
 });
 
 bot.on(['message:voice', 'message:audio'], handleVoiceMessage);
+bot.on('message:photo', handlePhotoMessage);
 
 bot.on('message:text', async (ctx) => {
   const userMessage = ctx.message.text;
