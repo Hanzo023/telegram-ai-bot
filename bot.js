@@ -64,81 +64,214 @@ const googleAI = new GoogleGenAI({
 
 const conversationHistory = new Map();
 const userLastDocument = new Map();
+const userLastInteraction = new Map(); // userId -> timestamp of last message/activity
+const DOC_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active document session TTL
+const CONVERSATION_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes chat session TTL
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
 const userPendingAction = new Map(); // userId -> { action: 'shop'|'youtube'|'search'|'download' }
 const botStartTime = Date.now();
 
-// User message debouncer and queue to eliminate double-replies and token waste
-const userPendingBatches = new Map();
-const userProcessingLocks = new Map();
+// Robust per-user message debouncer and concurrency queue
+// Eliminates duplicate replies, handles multi-part message bursts (text + photo + comment),
+// and guarantees atomic single-turn execution per user.
+const userQueues = new Map();
+const DEBOUNCE_DELAY_MS = 2000;
+
+function getUserQueue(userId) {
+  let q = userQueues.get(userId);
+  if (!q) {
+    q = {
+      items: [],
+      activeDownloads: 0,
+      timer: null,
+      isProcessing: false,
+      latestCtx: null,
+    };
+    userQueues.set(userId, q);
+  }
+  return q;
+}
+
+function registerPendingDownload(userId, ctx) {
+  const q = getUserQueue(userId);
+  q.activeDownloads++;
+  q.latestCtx = ctx;
+
+  // Clear existing timer so it doesn't fire while media is downloading
+  if (q.timer) {
+    clearTimeout(q.timer);
+    q.timer = null;
+  }
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    q.activeDownloads = Math.max(0, q.activeDownloads - 1);
+    // Media finished downloading, reset debounce window for any follow-up text
+    scheduleDebounce(userId);
+  };
+}
 
 function enqueueUserMessage(userId, item, ctx) {
-  if (!userPendingBatches.has(userId)) {
-    userPendingBatches.set(userId, { items: [], ctx, timer: null });
+  const q = getUserQueue(userId);
+  q.items.push(item);
+  q.latestCtx = ctx;
+
+  scheduleDebounce(userId);
+}
+
+function scheduleDebounce(userId) {
+  const q = getUserQueue(userId);
+
+  if (q.timer) {
+    clearTimeout(q.timer);
+    q.timer = null;
   }
 
-  const batch = userPendingBatches.get(userId);
-  batch.items.push(item);
-  batch.ctx = ctx;
+  q.timer = setTimeout(async () => {
+    q.timer = null;
+    await triggerUserQueueExecution(userId);
+  }, DEBOUNCE_DELAY_MS);
+}
 
-  if (batch.timer) {
-    clearTimeout(batch.timer);
+async function triggerUserQueueExecution(userId) {
+  const q = getUserQueue(userId);
+
+  // If there are media downloads still in progress, wait for them
+  if (q.activeDownloads > 0) {
+    scheduleDebounce(userId);
+    return;
   }
 
-  batch.timer = setTimeout(async () => {
-    userPendingBatches.delete(userId);
+  // If Claude is currently generating a response for this user, do NOT fire a parallel turn.
+  // The items remain buffered in q.items and will be executed when the current turn finishes.
+  if (q.isProcessing) {
+    return;
+  }
 
-    // Wait if already processing a previous turn for this user
-    while (userProcessingLocks.get(userId)) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
+  // If there are no items to process, nothing to do
+  if (q.items.length === 0) {
+    return;
+  }
 
-    userProcessingLocks.set(userId, true);
-    try {
-      await processUserBatch(userId, batch.items, batch.ctx);
-    } catch (err) {
-      console.error('Error processing user message batch:', err);
-    } finally {
-      userProcessingLocks.set(userId, false);
+  // Atomically grab all pending items and mark processing
+  const itemsToProcess = q.items.splice(0);
+  const ctx = q.latestCtx;
+  q.isProcessing = true;
+
+  try {
+    await processUserBatch(userId, itemsToProcess, ctx);
+  } catch (err) {
+    console.error(`Error processing user message batch for ${userId}:`, err);
+  } finally {
+    q.isProcessing = false;
+
+    // After completing the turn, check if subsequent messages arrived while Claude was responding
+    if (q.activeDownloads > 0) {
+      scheduleDebounce(userId);
+    } else if (q.items.length > 0) {
+      if (q.timer) {
+        // Debounce timer is still ticking down from a recent incoming message
+      } else {
+        // Debounce period already completed while Claude was generating; trigger next turn immediately
+        triggerUserQueueExecution(userId).catch((err) => {
+          console.error(`Error in chained user queue execution for ${userId}:`, err);
+        });
+      }
+    } else {
+      if (!q.timer && q.activeDownloads === 0) {
+        userQueues.delete(userId);
+      }
     }
-  }, 1200);
+  }
+}
+
+function clearUserQueue(userId) {
+  const q = userQueues.get(userId);
+  if (q) {
+    if (q.timer) {
+      clearTimeout(q.timer);
+      q.timer = null;
+    }
+    q.items = [];
+    if (!q.isProcessing && q.activeDownloads === 0) {
+      userQueues.delete(userId);
+    }
+  }
 }
 
 async function processUserBatch(userId, items, ctx) {
   if (!items || items.length === 0) return;
 
-  const photoItem = items.find((it) => it.type === 'photo');
+  const photoItems = items.filter((it) => it.type === 'photo');
   const textItems = items.filter((it) => it.type === 'text');
 
-  if (photoItem) {
-    const extraTexts = textItems.map((t) => t.text).join('\n');
-    let promptText = photoItem.caption || '';
-    if (extraTexts) {
-      promptText = promptText ? `${promptText}\n\nAdditional text: ${extraTexts}` : extraTexts;
-    }
-    if (!promptText) {
-      promptText = 'Please inspect and analyze this image or screenshot in detail. Describe what you see, transcribe any visible text or code, and answer any apparent questions.';
+  if (photoItems.length > 0) {
+    // Media query: immediately clear any active document so it never contaminates visual queries
+    userLastDocument.delete(userId);
+
+    const textParts = [];
+    let photoIndex = 0;
+    const totalPhotos = photoItems.length;
+
+    // Traverse all items in the exact chronological order received
+    for (const item of items) {
+      if (item.type === 'text') {
+        const trimmed = (item.text || '').trim();
+        if (trimmed) {
+          textParts.push(trimmed);
+        }
+      } else if (item.type === 'photo') {
+        photoIndex++;
+        const caption = (item.caption || '').trim();
+        if (caption) {
+          if (totalPhotos > 1) {
+            textParts.push(`[Image ${photoIndex} note: ${caption}]`);
+          } else {
+            textParts.push(caption);
+          }
+        }
+      }
     }
 
-    const multimodalContent = [
-      {
+    let promptText = textParts.join('\n\n').trim();
+    if (!promptText) {
+      promptText =
+        totalPhotos > 1
+          ? 'Please inspect and analyze these images or screenshots in detail. Describe what you see, transcribe any visible text or code, and answer any apparent questions.'
+          : 'Please inspect and analyze this image or screenshot in detail. Describe what you see, transcribe any visible text or code, and answer any apparent questions.';
+    }
+
+    // Build multimodal content array: image blocks followed by the prompt text block
+    const multimodalContent = [];
+    for (const photo of photoItems) {
+      multimodalContent.push({
         type: 'image',
         source: {
           type: 'base64',
-          media_type: photoItem.mimeType,
-          data: photoItem.base64Data,
+          media_type: photo.mimeType || 'image/jpeg',
+          data: photo.base64Data,
         },
-      },
-      {
-        type: 'text',
-        text: promptText,
-      },
-    ];
+      });
+    }
+
+    multimodalContent.push({
+      type: 'text',
+      text: promptText,
+    });
 
     await sendToClaudeWithHistory(ctx, multimodalContent);
   } else {
-    const combinedText = textItems.map((t) => t.text).join('\n\n');
-    await sendToClaudeWithHistory(ctx, combinedText);
+    // Text-only batch: join all texts chronologically
+    const combinedText = textItems
+      .map((t) => (t.text || '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+
+    if (combinedText) {
+      await sendToClaudeWithHistory(ctx, combinedText);
+    }
   }
 }
 
@@ -192,8 +325,10 @@ bot.command('start', async (ctx) => {
 
 async function handleClearAll(ctx) {
   const userId = ctx.from.id;
+  clearUserQueue(userId);
   conversationHistory.delete(userId);
-  userLastDocument.set(userId, null);
+  userLastDocument.delete(userId);
+  userLastInteraction.delete(userId);
 
   await ctx.reply(
     '✅ *All chat history & loaded documents cleared!*\n\n' +
@@ -208,6 +343,7 @@ async function handleClearAll(ctx) {
 
 bot.command('clear', async (ctx) => {
   const userId = ctx.from.id;
+  clearUserQueue(userId);
   const arg = ctx.message.text.replace(/^\/clear\s*/i, '').trim().toLowerCase();
 
   if (arg === 'all' || arg === 'doc' || arg === 'file') {
@@ -216,8 +352,9 @@ bot.command('clear', async (ctx) => {
   }
 
   conversationHistory.delete(userId);
+  userLastInteraction.delete(userId);
 
-  const activeDoc = userLastDocument.get(userId);
+  const activeDoc = await getOrAutoLoadDocument(userId);
   if (activeDoc) {
     await ctx.reply(
       '✅ *Conversation messages cleared!*\n\n' +
@@ -227,6 +364,7 @@ bot.command('clear', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
   } else {
+    userLastDocument.delete(userId);
     await ctx.reply(
       '✅ *Conversation history cleared!*\n\n' +
       'Claude has forgotten previous messages.\n\n' +
@@ -611,6 +749,7 @@ bot.command('status', async (ctx) => {
     ? `${uptimeHours}h ${uptimeMinutes}m ${uptimeSecs}s`
     : `${uptimeMinutes}m ${uptimeSecs}s`;
 
+  const activeDoc = await getOrAutoLoadDocument(ctx.from.id);
   const statusMessage =
     `📊 *Bot Status*\n\n` +
     `⏱️ *Uptime:* ${uptimeString}\n\n` +
@@ -626,7 +765,7 @@ bot.command('status', async (ctx) => {
     `├─ Cores: ${cpuCount}\n` +
     `└─ Load Average: ${load1min} (1m), ${load5min} (5m), ${load15min} (15m)\n\n` +
     `💬 *Active Conversations:* ${conversationHistory.size}\n` +
-    `📄 *Loaded Document:* ${userLastDocument.get(ctx.from.id)?.fileName ? `\`${userLastDocument.get(ctx.from.id).fileName}\`` : '_None (unloaded)_'}\n` +
+    `📄 *Loaded Document:* ${activeDoc?.fileName ? `\`${activeDoc.fileName}\`` : '_None (unloaded)_'}\n` +
     `⚙️ *Upload Storage Mode:* ${getUserStorageMode(ctx.from.id) === 'cloud' ? '☁️ Cloud Only' : getUserStorageMode(ctx.from.id) === 'nosave' ? '💻 Local Only (/nosave)' : '💻+☁️ Local & Cloud (Dual)'}`;
 
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
@@ -1141,21 +1280,85 @@ async function sendLongMessage(ctx, text, parseMode = 'Markdown') {
 }
 
 async function getOrAutoLoadDocument(userId) {
-  // Only return explicitly loaded/selected document for the user
-  if (userLastDocument.has(userId) && userLastDocument.get(userId)) {
-    return userLastDocument.get(userId);
+  if (!userLastDocument.has(userId)) return null;
+  const doc = userLastDocument.get(userId);
+  if (!doc) return null;
+
+  // Only return documents that were explicitly uploaded in this active session
+  if (!doc.explicitUpload) {
+    userLastDocument.delete(userId);
+    return null;
   }
-  return null;
+
+  const now = Date.now();
+  if (doc.lastAccessedAt && now - doc.lastAccessedAt > DOC_SESSION_TIMEOUT_MS) {
+    userLastDocument.delete(userId);
+    return null;
+  }
+
+  doc.lastAccessedAt = now;
+  return doc;
+}
+
+function sanitizeConversationHistory(history, hasActiveDoc = false) {
+  if (!Array.isArray(history) || history.length === 0) return;
+
+  for (const msg of history) {
+    if (typeof msg.content === 'string') {
+      if (!hasActiveDoc) {
+        msg.content = msg.content
+          .replace(/If you're asking about something in your Python file,?\s*let me know which line or concept,?\s*and I'll break it down for you\.?/gi, "Please let me know what you'd like me to look at or explain.")
+          .replace(/\b(in|about|from|regarding)\s+your\s+Python\s+file\b/gi, '$1 the content')
+          .replace(/\byour\s+Python\s+file\b/gi, 'the content')
+          .replace(/\bthe\s+Python\s+file\b/gi, 'the content')
+          .replace(/\bUntitled-1\.py\b/gi, 'the file');
+      }
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type === 'text' && typeof part.text === 'string' && !hasActiveDoc) {
+          part.text = part.text
+            .replace(/If you're asking about something in your Python file,?\s*let me know which line or concept,?\s*and I'll break it down for you\.?/gi, "Please let me know what you'd like me to look at or explain.")
+            .replace(/\b(in|about|from|regarding)\s+your\s+Python\s+file\b/gi, '$1 the content')
+            .replace(/\byour\s+Python\s+file\b/gi, 'the content')
+            .replace(/\bthe\s+Python\s+file\b/gi, 'the content')
+            .replace(/\bUntitled-1\.py\b/gi, 'the file');
+        }
+      }
+    }
+  }
 }
 
 async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   const userId = ctx.from.id;
+  const q = getUserQueue(userId);
+  const wasAlreadyProcessing = q.isProcessing;
+  q.isProcessing = true;
+
+  const now = Date.now();
+  const lastActive = userLastInteraction.get(userId) || 0;
+  if (lastActive > 0 && now - lastActive > CONVERSATION_SESSION_TIMEOUT_MS) {
+    // 30-minute idle expiration: reset conversation history and loaded document
+    conversationHistory.delete(userId);
+    userLastDocument.delete(userId);
+  }
+  userLastInteraction.set(userId, now);
+
+  const isMultimodal = Array.isArray(content) && content.some((part) => part.type === 'image');
+  if (isMultimodal) {
+    // Visual media query: immediately unload active document so it never pollutes visual queries
+    userLastDocument.delete(userId);
+  }
 
   if (!conversationHistory.has(userId)) {
     conversationHistory.set(userId, []);
   }
 
+  const activeDoc = await getOrAutoLoadDocument(userId);
   const history = conversationHistory.get(userId);
+
+  // Sanitize prior turns in history so stale/hallucinated Python references don't poison new queries
+  sanitizeConversationHistory(history, !!activeDoc);
+
   history.push({
     role: 'user',
     content: content,
@@ -1172,20 +1375,26 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       '• When the user asks to translate or shares phonetic phrases, romaji, lyrics, slang, or foreign words (e.g. Japanese, Khmer, Spanish, French, etc.):\n' +
       '  - Never give flat refusals or say you cannot translate simply because spelling or romanization is informal, phonetic, or approximate.\n' +
       '  - Be perceptive: identify the most probable intended phrase, song lyric (e.g. anime, J-pop, trending TikTok/Reels sounds), or idiom.\n' +
-      '  - Provide the most likely translation, the correct spelling in native script (kanji/hiragana/katakana, etc.), the standard romanization, and helpful context (e.g. song title or origin).';
+      '  - Provide the most likely translation, the correct spelling in native script (kanji/hiragana/katakana, etc.), the standard romanization, and helpful context (e.g. song title or origin).\n\n' +
+      'IMAGE & SCREENSHOT ANALYSIS GUIDANCE:\n' +
+      '• When the user sends a photo, screenshot, image, or asks a question about an image (e.g. "what does this mean?", "explain this", "transcribe this"):\n' +
+      '  - Focus directly on analyzing, reading, transcribing, translating, or explaining the visual contents of the image or screenshot.\n' +
+      '  - NEVER assume, suggest, or ask if the user is referring to a "Python file", code file, or workspace document unless the user explicitly asks about code in their prompt.\n' +
+      '  - If something in an image is unclear or cannot be determined, directly state what is unclear about the image itself. NEVER speculate about unrelated files or previous coding tasks.\n\n' +
+      'STRICT CONTEXT ACCURACY:\n' +
+      '• NEVER assume or hallucinate the existence of external files, documents, or "Python file" unless one is explicitly loaded and provided in this prompt.\n' +
+      '• Do not invent references to code files, programming scripts, or past files when responding to photos, screenshots, or general chat questions.';
 
-    const isMultimodal = Array.isArray(content) && content.some((part) => part.type === 'image');
-    const activeDoc = await getOrAutoLoadDocument(userId);
     if (activeDoc && !isMultimodal) {
       const docExcerpt =
         activeDoc.content.length > 25000
           ? activeDoc.content.slice(0, 25000) + '\n\n[... Document excerpted to first 25,000 characters ...]'
           : activeDoc.content;
       systemInstruction +=
-        `\n\nThe user currently has this file loaded in their workspace:\n` +
+        `\n\nThe user explicitly uploaded this file for reference in the active session:\n` +
         `File Name: "${activeDoc.fileName}" (${activeDoc.fileExtension})\n` +
         `Content:\n\`\`\`\n${docExcerpt}\n\`\`\`\n` +
-        `When the user asks questions, references code, or asks for refactoring/fixes, refer directly to this loaded file.`;
+        `If the user's question specifically relates to this uploaded file, refer to it. Otherwise, answer their query normally without forcing references to this file.`;
     }
     if (systemOverride) {
       systemInstruction = systemOverride;
@@ -1215,13 +1424,25 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       history.splice(0, 2);
     }
 
-    // Prune heavy base64 image payloads older than the last 4 messages to save tokens
-    for (let i = 0; i < history.length - 4; i++) {
+    // Prune older base64 image payloads to save tokens, but ALWAYS preserve the most recent image
+    // so follow-up questions ("what does this mean?", "explain this error") retain visual context.
+    const imageMsgIndices = [];
+    for (let i = 0; i < history.length; i++) {
       const msg = history[i];
       if (Array.isArray(msg.content) && msg.content.some((part) => part.type === 'image')) {
-        msg.content = msg.content
-          .filter((part) => part.type !== 'image')
-          .concat([{ type: 'text', text: '[Earlier image already analyzed above]' }]);
+        imageMsgIndices.push(i);
+      }
+    }
+
+    if (imageMsgIndices.length > 1) {
+      const latestImageIdx = imageMsgIndices[imageMsgIndices.length - 1];
+      for (const idx of imageMsgIndices) {
+        if (idx !== latestImageIdx && idx < history.length - 6) {
+          const msg = history[idx];
+          msg.content = msg.content
+            .filter((part) => part.type !== 'image')
+            .concat([{ type: 'text', text: '[Earlier image already analyzed above]' }]);
+        }
       }
     }
 
@@ -1236,6 +1457,15 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       '❌ Sorry, I encountered an error processing your request. Please try again.',
       { parse_mode: 'Markdown' }
     );
+  } finally {
+    if (!wasAlreadyProcessing) {
+      q.isProcessing = false;
+      if (q.items.length > 0 && !q.timer && q.activeDownloads === 0) {
+        triggerUserQueueExecution(userId).catch((err) => {
+          console.error(`Error in chained user queue execution for ${userId}:`, err);
+        });
+      }
+    }
   }
 }
 
@@ -1257,12 +1487,14 @@ bot.on('message:document', async (ctx) => {
   try {
     const docResult = await extractDocumentContent(document, ctx, fileExtension);
 
-    // Save document to memory so all subsequent chat questions have this context
+    // Save document to memory so all subsequent chat questions in active session have this context
     userLastDocument.set(ctx.from.id, {
       fileName: docResult.isDuplicate ? docResult.duplicateOf : fileName,
       fileExtension,
       content: docResult.content,
       uploadedAt: Date.now(),
+      lastAccessedAt: Date.now(),
+      explicitUpload: true,
     });
 
     const rawCaption = (ctx.message.caption || '').trim();
@@ -1371,6 +1603,8 @@ async function handleVoiceMessage(ctx) {
   const voice = ctx.message.voice || ctx.message.audio;
   if (!voice) return;
 
+  const releaseDownload = registerPendingDownload(ctx.from.id, ctx);
+
   const typingInterval = setInterval(() => {
     ctx.replyWithChatAction('typing').catch(() => {});
   }, 4000);
@@ -1412,8 +1646,11 @@ async function handleVoiceMessage(ctx) {
       await ctx.reply(`🎤 You said: "${transcription}"`);
     }
 
-    // Forward the transcription directly to Claude with full conversation history
-    await sendToClaudeWithHistory(ctx, transcription);
+    // Forward the transcription directly through the debounce queue with full conversation history
+    enqueueUserMessage(ctx.from.id, {
+      type: 'text',
+      text: transcription,
+    }, ctx);
   } catch (error) {
     clearInterval(typingInterval);
     const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
@@ -1421,12 +1658,17 @@ async function handleVoiceMessage(ctx) {
     await ctx.reply('❌ Sorry, I encountered an error processing your voice note. Please try again.', {
       parse_mode: 'Markdown',
     });
+  } finally {
+    releaseDownload();
   }
 }
 
 async function handlePhotoMessage(ctx) {
   const photos = ctx.message.photo;
   if (!photos || photos.length === 0) return;
+
+  userLastDocument.delete(ctx.from.id);
+  const releaseDownload = registerPendingDownload(ctx.from.id, ctx);
 
   const typingInterval = setInterval(() => {
     ctx.replyWithChatAction('typing').catch(() => {});
@@ -1470,10 +1712,15 @@ async function handlePhotoMessage(ctx) {
     await ctx.reply('❌ Sorry, I encountered an error processing your photo. Please try again.', {
       parse_mode: 'Markdown',
     });
+  } finally {
+    releaseDownload();
   }
 }
 
 async function handleImageDocument(ctx, document, fileName, fileExtension) {
+  userLastDocument.delete(ctx.from.id);
+  const releaseDownload = registerPendingDownload(ctx.from.id, ctx);
+
   const typingInterval = setInterval(() => {
     ctx.replyWithChatAction('typing').catch(() => {});
   }, 4000);
@@ -1515,6 +1762,8 @@ async function handleImageDocument(ctx, document, fileName, fileExtension) {
     await ctx.reply('❌ Sorry, I encountered an error reading your image. Please try again.', {
       parse_mode: 'Markdown',
     });
+  } finally {
+    releaseDownload();
   }
 }
 
@@ -2575,6 +2824,8 @@ bot.on('callback_query:data', async (ctx) => {
         fileExtension: file.ext,
         content: content,
         uploadedAt: Date.now(),
+        lastAccessedAt: Date.now(),
+        explicitUpload: false,
       });
 
       const contextText = `Document: "${file.name}"\n\nContent:\n${content.slice(0, 15000)}`;
@@ -2624,6 +2875,8 @@ bot.on('callback_query:data', async (ctx) => {
         fileExtension: file.ext,
         content: content,
         uploadedAt: Date.now(),
+        lastAccessedAt: Date.now(),
+        explicitUpload: false,
       });
 
       let prompt;
