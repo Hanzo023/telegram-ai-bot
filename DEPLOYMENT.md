@@ -24,9 +24,9 @@ git push origin main
    - **Name:** `telegram-ai-bot` (or any name you like)
    - **Region:** Pick the closest region to you (e.g., Singapore, Frankfurt, Oregon)
    - **Branch:** `main`
-   - **Runtime:** `Node`
-   - **Build Command:** `npm install`
-   - **Start Command:** `npm start`
+   - **Runtime:** `Docker` *(Recommended — automatically installs `ffmpeg` & `yt-dlp` for video downloading)* OR `Node`
+   - **Build Command (if using Node):** `npm install && pip install yt-dlp || npm install`
+   - **Start Command (if using Node):** `npm start`
    - **Instance Type:** `Free`
 
 ### Step 3: Add Environment Variables
