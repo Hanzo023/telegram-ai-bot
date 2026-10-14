@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenAI } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
@@ -10,12 +10,34 @@ import http from 'http';
 import os from 'os';
 import crypto from 'crypto';
 
+import {
+  getFileCategory,
+  FILE_CATEGORIES,
+  searchWeb,
+  searchYouTube,
+  downloadMediaVideo,
+} from './search-service.js';
+
+import {
+  initSearchHistory,
+  addSearchHistoryEntry,
+  getAllSearchHistory,
+  getSearchHistoryPage,
+  getSearchHistoryEntry,
+  deleteSearchHistoryEntry,
+  clearAllSearchHistory,
+} from './history-service.js';
+
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
 const VAULT_FILE = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
+const TEMP_DOWNLOADS_DIR = path.resolve('./temp_downloads');
 
 try {
   if (!fs.existsSync(STORAGE_DIR)) {
     fs.mkdirSync(STORAGE_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(TEMP_DOWNLOADS_DIR)) {
+    fs.mkdirSync(TEMP_DOWNLOADS_DIR, { recursive: true });
   }
 } catch (dirErr) {
   console.warn('Storage directory initialization note:', dirErr.message);
@@ -43,7 +65,82 @@ const googleAI = new GoogleGenAI({
 const conversationHistory = new Map();
 const userLastDocument = new Map();
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
+const userPendingAction = new Map(); // userId -> { action: 'shop'|'youtube'|'search'|'download' }
 const botStartTime = Date.now();
+
+// User message debouncer and queue to eliminate double-replies and token waste
+const userPendingBatches = new Map();
+const userProcessingLocks = new Map();
+
+function enqueueUserMessage(userId, item, ctx) {
+  if (!userPendingBatches.has(userId)) {
+    userPendingBatches.set(userId, { items: [], ctx, timer: null });
+  }
+
+  const batch = userPendingBatches.get(userId);
+  batch.items.push(item);
+  batch.ctx = ctx;
+
+  if (batch.timer) {
+    clearTimeout(batch.timer);
+  }
+
+  batch.timer = setTimeout(async () => {
+    userPendingBatches.delete(userId);
+
+    // Wait if already processing a previous turn for this user
+    while (userProcessingLocks.get(userId)) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    userProcessingLocks.set(userId, true);
+    try {
+      await processUserBatch(userId, batch.items, batch.ctx);
+    } catch (err) {
+      console.error('Error processing user message batch:', err);
+    } finally {
+      userProcessingLocks.set(userId, false);
+    }
+  }, 1200);
+}
+
+async function processUserBatch(userId, items, ctx) {
+  if (!items || items.length === 0) return;
+
+  const photoItem = items.find((it) => it.type === 'photo');
+  const textItems = items.filter((it) => it.type === 'text');
+
+  if (photoItem) {
+    const extraTexts = textItems.map((t) => t.text).join('\n');
+    let promptText = photoItem.caption || '';
+    if (extraTexts) {
+      promptText = promptText ? `${promptText}\n\nAdditional text: ${extraTexts}` : extraTexts;
+    }
+    if (!promptText) {
+      promptText = 'Please inspect and analyze this image or screenshot in detail. Describe what you see, transcribe any visible text or code, and answer any apparent questions.';
+    }
+
+    const multimodalContent = [
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: photoItem.mimeType,
+          data: photoItem.base64Data,
+        },
+      },
+      {
+        type: 'text',
+        text: promptText,
+      },
+    ];
+
+    await sendToClaudeWithHistory(ctx, multimodalContent);
+  } else {
+    const combinedText = textItems.map((t) => t.text).join('\n\n');
+    await sendToClaudeWithHistory(ctx, combinedText);
+  }
+}
 
 function getUserStorageMode(userId) {
   return userStorageMode.get(userId) || 'local';
@@ -53,7 +150,8 @@ const CODE_EXTENSIONS = ['py', 'java', 'cpp', 'cc', 'cxx', 'c', 'h', 'hpp', 'js'
 const DOC_EXTENSIONS = ['pdf', 'txt', 'md'];
 const TEXT_EXTENSIONS = [...CODE_EXTENSIONS, ...DOC_EXTENSIONS];
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
-const SUPPORTED_EXTENSIONS = [...TEXT_EXTENSIONS, ...IMAGE_EXTENSIONS];
+const MEDIA_EXTENSIONS = ['mp4', 'webm', 'mkv', 'mov', 'avi', 'mp3', 'm4a', 'ogg', 'wav'];
+const SUPPORTED_EXTENSIONS = [...TEXT_EXTENSIONS, ...IMAGE_EXTENSIONS, ...MEDIA_EXTENSIONS];
 
 bot.use(async (ctx, next) => {
   if (!allowedUserId || ctx.from?.id !== allowedUserId) {
@@ -66,23 +164,28 @@ bot.use(async (ctx, next) => {
 bot.command('start', async (ctx) => {
   await ctx.reply(
     'Hello! I\'m your personal AI assistant powered by Claude & Gemini.\n\n' +
-    'Just send me any message and I\'ll help you with your questions.\n\n' +
-    'You can also send me:\n' +
-    '• Photos & Screenshots 📸 (ask questions about anything on your screen!)\n' +
-    '• Code files: Python (.py), Java (.java), C++ (.cpp, .h)\n' +
-    '• Documents: PDF (.pdf), Text (.txt), Markdown (.md)\n' +
-    '• Voice messages & audio notes 🎙️\n\n' +
-    'Commands:\n' +
-    '/library - Browse files from Telegram Cloud Vault or Drive D\n' +
-    '/storage - Choose upload destination (Cloud, Local, or /nosave)\n' +
+    'Just send me any message, photo, document, or link and I\'ll help you right away!\n\n' +
+    '✨ *What I can do for you:*\n' +
+    '• 📸 **Photos & Screenshots**: Send any image or screenshot to analyze, transcribe, or translate.\n' +
+    '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
+    '• 🎥 **YouTube Research**: Search videos and download MP4s directly into chat.\n' +
+    '• 🌐 **AI Web & Shop Research**: Look up websites, research topics, and find stores/products.\n' +
+    '• 📥 **Video Downloader**: Download YouTube or TikTok videos and save them to your Cloud Vault.\n' +
+    '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
+    '📌 *Commands:*\n' +
+    '/storage - Open Cloud Vault (Files & Search History) and upload settings\n' +
+    '/library - Browse saved files by category (A-Z)\n' +
+    '/youtube <term> - Search YouTube videos & download directly\n' +
+    '/search <query> - AI web search for websites and articles\n' +
+    '/shop <query> - Search stores, shops, and products online\n' +
+    '/download <url> - Download YouTube or TikTok video\n' +
     '/quiz - Generate an interactive quiz poll on loaded file or topic\n' +
     '/status - View system resources, loaded file & storage mode\n' +
     '/clear - Clear chat messages (keeps loaded file active)\n' +
-    '/clearall - Clear everything & unload file (files in folder safe)\n' +
-    '/nosave - Save new files only to Drive D (no cloud upload)\n' +
-    '/cloud - Save new files only to Cloud Vault (0 laptop space)\n' +
-    '/local - Save new files to both Drive D and Cloud Vault\n' +
-    '/start - Show this message',
+    '/clearall - Clear everything & unload file\n' +
+    '/nosave - Save new files only to Drive D\n' +
+    '/cloud - Save new files only to Cloud Vault\n' +
+    '/local - Save new files to both Drive D and Cloud Vault',
     { parse_mode: 'Markdown' }
   );
 });
@@ -187,24 +290,293 @@ bot.command(['storage', 'mode'], async (ctx) => {
   };
 
   const keyboard = new InlineKeyboard()
-    .text('☁️ Cloud Only', 'set_storage:cloud')
+    .text(`☁️ Telegram Cloud Vault (${cloudVault.length} files)`, 'storage_cloud')
     .row()
-    .text('💻+☁️ Local & Cloud', 'set_storage:local')
+    .text('💻 Local Storage (Drive D)', 'lib_src:local')
     .row()
-    .text('💻 Local Only (/nosave)', 'set_storage:nosave');
+    .text(`⚙️ Upload Destination: ${modeLabels[currentMode]}`, 'open_storage_settings');
 
   await ctx.reply(
-    `⚙️ *Storage Destination Settings*\n\n` +
-    `Current Mode: *${modeLabels[currentMode]}*\n\n` +
-    `Choose where newly uploaded files should be saved:\n\n` +
-    `• ☁️ **Cloud Only**: Saved only to Telegram Cloud Vault. Takes 0 MB on laptop.\n` +
-    `• 💻+☁️ **Local & Cloud**: Saved to both Drive D and Telegram Cloud Vault.\n` +
-    `• 💻 **Local Only (/nosave)**: Saved only to Drive D. No cloud upload.`,
+    `⚙️ *Storage & Cloud Hub*\n\n` +
+    `Current Upload Mode: *${modeLabels[currentMode]}*\n\n` +
+    `Choose what you'd like to do:\n\n` +
+    `• ☁️ **Telegram Cloud Vault**: Access your saved files & search history\n` +
+    `• 💻 **Local Storage (Drive D)**: Files stored in \`${STORAGE_DIR}\` on your laptop\n` +
+    `• ⚙️ **Upload Destination**: Configure where new uploads are saved`,
     {
       parse_mode: 'Markdown',
       reply_markup: keyboard,
     }
   );
+});
+
+// --- Research & Search Action Handlers ---
+
+async function handleYoutubeSearch(ctx, query) {
+  const cleanQuery = (query || '').trim();
+  if (!cleanQuery) return;
+
+  await ctx.replyWithChatAction('typing');
+  const results = await searchYouTube(cleanQuery, 3);
+  if (results.length === 0) {
+    await ctx.reply(`❌ No YouTube videos found for: \`${cleanQuery}\``, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  // Save to search history
+  await addSearchHistoryEntry({
+    query: cleanQuery,
+    type: 'youtube',
+    title: results[0].title,
+    url: results[0].url,
+    resultsCount: results.length,
+    topResults: results.map((r) => ({ title: r.title, link: r.url })),
+  });
+
+  let msgText = `🎥 *YouTube Search Results for: "${cleanQuery}"*\n\n`;
+  const keyboard = new InlineKeyboard();
+
+  results.forEach((r, idx) => {
+    msgText += `${idx + 1}. [${r.title}](${r.url})\n`;
+    msgText += `   ⏱️ Duration: \`${r.duration}\` | 👤 \`${r.uploader}\`\n\n`;
+    if (r.id) {
+      keyboard.text(`📥 Download #${idx + 1}`, `dl_yt:${r.id}`).row();
+    }
+  });
+
+  msgText += `💡 _Tap any download button to download the video and save it to your Cloud Vault!_`;
+  keyboard.text('💾 View in Search History', 'cloud_hist_page:0');
+
+  await ctx.reply(msgText, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+}
+
+async function handleWebSearch(ctx, query) {
+  const cleanQuery = (query || '').trim();
+  if (!cleanQuery) return;
+
+  await ctx.replyWithChatAction('typing');
+  const results = await searchWeb(cleanQuery, 5);
+
+  if (results.length === 0) {
+    await ctx.reply(`❌ No web results found for: \`${cleanQuery}\``, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  // Save to search history
+  await addSearchHistoryEntry({
+    query: cleanQuery,
+    type: 'web',
+    title: results[0].title,
+    url: results[0].link,
+    resultsCount: results.length,
+    topResults: results.map((r) => ({ title: r.title, link: r.link })),
+  });
+
+  let msgText = `🌐 *Web Search Results for: "${cleanQuery}"*\n\n`;
+  results.slice(0, 4).forEach((r, idx) => {
+    msgText += `${idx + 1}. [${r.title}](${r.link})\n`;
+    if (r.snippet) {
+      msgText += `   _${r.snippet.slice(0, 160)}..._\n\n`;
+    }
+  });
+
+  const keyboard = new InlineKeyboard()
+    .text('💾 View in Search History', 'cloud_hist_page:0');
+
+  await ctx.reply(msgText, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+}
+
+async function handleShopSearch(ctx, query) {
+  const cleanQuery = (query || '').trim();
+  if (!cleanQuery) return;
+
+  await ctx.replyWithChatAction('typing');
+  const results = await searchWeb(`${cleanQuery} store shop buy online`, 5);
+
+  if (results.length === 0) {
+    await ctx.reply(`❌ No shops found for: \`${cleanQuery}\``, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  // Save to search history
+  await addSearchHistoryEntry({
+    query: cleanQuery,
+    type: 'shop',
+    title: results[0].title,
+    url: results[0].link,
+    resultsCount: results.length,
+    topResults: results.map((r) => ({ title: r.title, link: r.link })),
+  });
+
+  let msgText = `🛍️ *Store & Product Results for: "${cleanQuery}"*\n\n`;
+  results.slice(0, 4).forEach((r, idx) => {
+    msgText += `${idx + 1}. [${r.title}](${r.link})\n`;
+    if (r.snippet) {
+      msgText += `   _${r.snippet.slice(0, 160)}..._\n\n`;
+    }
+  });
+
+  const keyboard = new InlineKeyboard()
+    .text('💾 View in Search History', 'cloud_hist_page:0');
+
+  await ctx.reply(msgText, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+}
+
+async function handleDownload(ctx, rawUrl) {
+  const url = (rawUrl || '').trim();
+  if (!url || !url.startsWith('http')) {
+    await ctx.reply('⚠️ Please provide a valid link starting with http:// or https://');
+    return;
+  }
+
+  const statusMsg = await ctx.reply('⏳ *Downloading video...* Please wait a moment while it processes.', {
+    parse_mode: 'Markdown',
+  });
+
+  try {
+    const targetDir = TEMP_DOWNLOADS_DIR;
+    const dlResult = await downloadMediaVideo(url, targetDir);
+
+    if (dlResult.isOverTelegramLimit) {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `⚠️ *Video is too large for Telegram upload (> 50 MB)*\n\n` +
+        `Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB.\n` +
+        (getUserStorageMode(ctx.from.id) !== 'cloud' ? `Saved locally on laptop at: \`${dlResult.filePath}\`` : ''),
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    await ctx.replyWithChatAction('upload_video');
+    const sentVideo = await ctx.replyWithVideo(new InputFile(dlResult.filePath), {
+      caption: `🎥 *${dlResult.fileName}*\n📦 Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB\n💾 Saved to Telegram Cloud Vault!`,
+      parse_mode: 'Markdown',
+    });
+
+    const fileId = sentVideo.video?.file_id || sentVideo.document?.file_id;
+    if (fileId) {
+      await saveCloudVaultEntry({
+        name: dlResult.fileName,
+        file_id: fileId,
+        ext: 'mp4',
+        category: 'media',
+        size: dlResult.fileSize,
+        date: Date.now(),
+      });
+    }
+
+    // Save to local Drive D if mode allows
+    const userMode = getUserStorageMode(ctx.from.id);
+    if (userMode === 'local' || userMode === 'nosave') {
+      try {
+        const mediaDir = path.join(STORAGE_DIR, 'media');
+        if (!fs.existsSync(mediaDir)) {
+          await fsp.mkdir(mediaDir, { recursive: true });
+        }
+        const destPath = path.join(mediaDir, dlResult.fileName);
+        await fsp.copyFile(dlResult.filePath, destPath);
+      } catch (copyErr) {
+        console.warn('Could not copy downloaded video to local Drive D:', copyErr.message);
+      }
+    }
+
+    // Record in search history
+    await addSearchHistoryEntry({
+      query: url,
+      type: 'download',
+      title: dlResult.fileName,
+      url: url,
+      resultsCount: 1,
+    });
+
+    try {
+      await fsp.unlink(dlResult.filePath);
+    } catch {}
+
+    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+  } catch (err) {
+    console.error('Download error:', err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `❌ *Download failed:*\n\`${err.message.slice(0, 200)}\`\n\nPlease check the link and try again.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+// YouTube Search Command
+bot.command('youtube', async (ctx) => {
+  const query = ctx.message.text.replace(/^\/youtube\s*/i, '').trim();
+  if (!query) {
+    userPendingAction.set(ctx.from.id, { action: 'youtube' });
+    await ctx.reply(
+      '🎥 *YouTube Search*\n\n' +
+      'What YouTube video or music are you searching for?\n' +
+      'Type your search below (e.g. `lofi hip hop` or `python full course`):',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  await handleYoutubeSearch(ctx, query);
+});
+
+// Web & Research Search Command
+bot.command(['search', 'find'], async (ctx) => {
+  const query = ctx.message.text.replace(/^\/(search|find)\s*/i, '').trim();
+  if (!query) {
+    userPendingAction.set(ctx.from.id, { action: 'search' });
+    await ctx.reply(
+      '🌐 *AI Web & Research Search*\n\n' +
+      'What would you like to search on the web?\n' +
+      'Type your search topic below:',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  await handleWebSearch(ctx, query);
+});
+
+// Shop & Product Search Command
+bot.command('shop', async (ctx) => {
+  const query = ctx.message.text.replace(/^\/shop\s*/i, '').trim();
+  if (!query) {
+    userPendingAction.set(ctx.from.id, { action: 'shop' });
+    await ctx.reply(
+      '🛍️ *Shop & Product Search*\n\n' +
+      'What product or store are you looking for?\n' +
+      'Type it below (e.g. `phone`, `wireless mechanical keyboard`, `espresso machine`):',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  await handleShopSearch(ctx, query);
+});
+
+// Video Downloader Command (YouTube & TikTok)
+bot.command(['download', 'dl'], async (ctx) => {
+  const url = ctx.message.text.replace(/^\/(download|dl)\s*/i, '').trim();
+  if (!url || !url.startsWith('http')) {
+    userPendingAction.set(ctx.from.id, { action: 'download' });
+    await ctx.reply(
+      '📥 *Video Downloader (YouTube & TikTok)*\n\n' +
+      'Send or paste the video link you want to download below:',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  await handleDownload(ctx, url);
 });
 
 bot.command('status', async (ctx) => {
@@ -446,12 +818,19 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       if (saveToDriveD) {
         try {
           const storageRoot = path.resolve(STORAGE_DIR);
-          const localFilePath = path.resolve(storageRoot, safeFileName);
+          const cat = getFileCategory(ext);
+          const targetDir = path.resolve(storageRoot, cat.folder);
+          if (!fs.existsSync(targetDir)) {
+            await fsp.mkdir(targetDir, { recursive: true });
+          }
+          const localFilePath = path.resolve(targetDir, safeFileName);
           if (localFilePath.startsWith(storageRoot)) {
             await fsp.writeFile(localFilePath, nodeBuffer);
-            console.log(`Auto-saved document to Drive D: ${localFilePath}`);
+            console.log(`Auto-saved document to Drive D [${cat.name}]: ${localFilePath}`);
             // Cache the new file's hash info
             const stats = await fsp.stat(localFilePath);
+            const relKey = `${cat.folder}/${safeFileName}`;
+            localFileHashes.set(relKey, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
             localFileHashes.set(safeFileName, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
           }
         } catch (saveErr) {
@@ -462,16 +841,18 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       // Save to Telegram Cloud Vault if mode allows (local or cloud)
       if (saveToCloudVault) {
         try {
+          const cat = getFileCategory(ext);
           await saveCloudVaultEntry({
             name: safeFileName,
             file_id: file.file_id,
             ext: ext,
+            category: cat.id,
             size: file.file_size || buffer.byteLength,
             date: Date.now(),
             hash: rawHash,
             textHash: textHash,
           });
-          console.log(`Saved document to Telegram Cloud Vault: ${safeFileName}`);
+          console.log(`Saved document to Telegram Cloud Vault [${cat.name}]: ${safeFileName}`);
         } catch (vaultErr) {
           console.warn('Could not save file to Telegram Cloud Vault:', vaultErr.message);
         }
@@ -626,8 +1007,11 @@ async function initCloudVault() {
     await restoreVaultFromTelegram();
   }
 
-  // Backfill hashes for existing files from local storage if available
+  // Backfill hashes and categories for existing files from local storage if available
   for (const entry of cloudVault) {
+    if (!entry.category) {
+      entry.category = getFileCategory(entry.ext).id;
+    }
     if (!entry.hash) {
       try {
         const info = await getLocalFileHashInfo(entry.name);
@@ -640,12 +1024,14 @@ async function initCloudVault() {
   }
 }
 
-async function saveCloudVaultEntry({ name, file_id, ext, size, date, hash, textHash }) {
+async function saveCloudVaultEntry({ name, file_id, ext, category, size, date, hash, textHash }) {
+  const cat = category || getFileCategory(ext).id;
   const newEntry = {
     id: Date.now().toString(),
     name,
     file_id,
     ext,
+    category: cat,
     size: size || 0,
     date: date || Date.now(),
     ...(hash ? { hash } : {}),
@@ -708,16 +1094,18 @@ async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 
         }
       } else if (entry.isFile()) {
         const ext = entry.name.split('.').pop().toLowerCase();
-        if (TEXT_EXTENSIONS.includes(ext)) {
-          const stats = await fsp.stat(fullPath);
-          const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
-          files.push({
-            name: relPath,
-            ext,
-            size: stats.size,
-            mtime: stats.mtimeMs,
-          });
-        }
+        const stats = await fsp.stat(fullPath);
+        const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
+        const cat = getFileCategory(ext);
+        files.push({
+          name: entry.name,
+          relPath: relPath,
+          ext,
+          category: cat.id,
+          categoryName: cat.name,
+          size: stats.size,
+          mtime: stats.mtimeMs,
+        });
       }
     }
 
@@ -753,52 +1141,10 @@ async function sendLongMessage(ctx, text, parseMode = 'Markdown') {
 }
 
 async function getOrAutoLoadDocument(userId) {
-  // 1. If document is already cached in memory for user, return it
-  if (userLastDocument.has(userId)) {
+  // Only return explicitly loaded/selected document for the user
+  if (userLastDocument.has(userId) && userLastDocument.get(userId)) {
     return userLastDocument.get(userId);
   }
-
-  // 2. Check local storage directory (D:\drive-download-20260715T073323Z-1-001)
-  try {
-    const localFiles = await getStoredFiles();
-    if (localFiles && localFiles.length > 0) {
-      const latest = localFiles[0];
-      const content = await loadLocalDocumentContent(latest.name);
-      const docEntry = {
-        fileName: latest.name,
-        fileExtension: latest.ext,
-        content: content,
-        uploadedAt: latest.mtime || Date.now(),
-        source: 'local',
-      };
-      userLastDocument.set(userId, docEntry);
-      console.log(`Auto-loaded active document from local Drive D: ${latest.name}`);
-      return docEntry;
-    }
-  } catch (err) {
-    console.warn('Auto-load from local storage notice:', err.message);
-  }
-
-  // 3. Fall back to Telegram Cloud Vault
-  try {
-    if (cloudVault && cloudVault.length > 0) {
-      const latestCloud = cloudVault[0];
-      const content = await loadCloudDocumentContent(latestCloud.file_id, latestCloud.ext, latestCloud.name);
-      const docEntry = {
-        fileName: latestCloud.name,
-        fileExtension: latestCloud.ext,
-        content: content,
-        uploadedAt: latestCloud.date || Date.now(),
-        source: 'cloud',
-      };
-      userLastDocument.set(userId, docEntry);
-      console.log(`Auto-loaded active document from Cloud Vault: ${latestCloud.name}`);
-      return docEntry;
-    }
-  } catch (err) {
-    console.warn('Auto-load from Cloud Vault notice:', err.message);
-  }
-
   return null;
 }
 
@@ -828,8 +1174,9 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       '  - Be perceptive: identify the most probable intended phrase, song lyric (e.g. anime, J-pop, trending TikTok/Reels sounds), or idiom.\n' +
       '  - Provide the most likely translation, the correct spelling in native script (kanji/hiragana/katakana, etc.), the standard romanization, and helpful context (e.g. song title or origin).';
 
+    const isMultimodal = Array.isArray(content) && content.some((part) => part.type === 'image');
     const activeDoc = await getOrAutoLoadDocument(userId);
-    if (activeDoc) {
+    if (activeDoc && !isMultimodal) {
       const docExcerpt =
         activeDoc.content.length > 25000
           ? activeDoc.content.slice(0, 25000) + '\n\n[... Document excerpted to first 25,000 characters ...]'
@@ -897,18 +1244,7 @@ bot.on('message:document', async (ctx) => {
   const rawFileName = document.file_name || 'document';
   const fileName = path.basename(rawFileName).replace(/[\/\\]/g, '');
   const fileExtension = fileName.split('.').pop().toLowerCase();
-
-  if (!SUPPORTED_EXTENSIONS.includes(fileExtension)) {
-    await ctx.reply(
-      `❌ Unsupported file type (\`.${fileExtension}\`).\n\n` +
-      `Supported formats:\n` +
-      `• **Photos & Images**: PNG (.png), JPG (.jpg, .jpeg), WebP (.webp), GIF (.gif)\n` +
-      `• **Code**: Python (.py), Java (.java), C++ (.cpp, .c, .h)\n` +
-      `• **Documents**: PDF (.pdf), Text (.txt), Markdown (.md)`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
+  const cat = getFileCategory(fileExtension);
 
   if (IMAGE_EXTENSIONS.includes(fileExtension)) {
     await handleImageDocument(ctx, document, fileName, fileExtension);
@@ -937,7 +1273,7 @@ bot.on('message:document', async (ctx) => {
       await sendToClaudeWithHistory(ctx, promptCaption);
     } else if (docResult.isDuplicate) {
       // Duplicate file detected: inform user that duplicate wasn't saved, but it's ready for chat
-      const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
+      const icon = cat.icon || '📁';
       await ctx.reply(
         `${icon} *Identical content detected!*\n\n` +
         `\`${fileName}\` has the exact same content as \`${docResult.duplicateOf}\` already in your library.\n\n` +
@@ -948,7 +1284,7 @@ bot.on('message:document', async (ctx) => {
       );
     } else {
       // User simply uploaded the file: confirm save with exact storage destination
-      const icon = fileExtension === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(fileExtension) ? '💻' : '📝';
+      const icon = cat.icon || '📁';
       let destText = '';
       if (docResult.targetMode === 'cloud') {
         destText = '• ☁️ **Telegram Cloud Vault only**: Saved to cloud (laptop storage untouched).\n';
@@ -961,7 +1297,7 @@ bot.on('message:document', async (ctx) => {
       }
 
       await ctx.reply(
-        `${icon} *Saved \`${fileName}\` to your library.*\n\n` +
+        `${icon} *Saved \`${fileName}\` to category: ${cat.name}*\n\n` +
         destText +
         `\n• Ask me anything about it in chat.\n` +
         `• Type /quiz if you want to test your understanding.\n` +
@@ -1120,27 +1456,13 @@ async function handlePhotoMessage(ctx) {
     }
 
     const caption = (ctx.message.caption || '').trim();
-    const promptText =
-      caption ||
-      'Please inspect and analyze this image or screenshot in detail. Describe what you see, transcribe any visible text or code, and answer any apparent questions.';
-
-    const multimodalContent = [
-      {
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: mimeType,
-          data: base64Data,
-        },
-      },
-      {
-        type: 'text',
-        text: promptText,
-      },
-    ];
-
     clearInterval(typingInterval);
-    await sendToClaudeWithHistory(ctx, multimodalContent);
+    enqueueUserMessage(ctx.from.id, {
+      type: 'photo',
+      base64Data,
+      mimeType,
+      caption,
+    }, ctx);
   } catch (error) {
     clearInterval(typingInterval);
     const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
@@ -1177,27 +1499,15 @@ async function handleImageDocument(ctx, document, fileName, fileExtension) {
     }
 
     const caption = (ctx.message.caption || '').trim();
-    const promptText =
-      caption ||
-      `Please inspect and analyze this image ("${fileName}"). Describe what you see, transcribe any visible text or code, and answer any apparent questions.`;
-
-    const multimodalContent = [
-      {
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: mimeType,
-          data: base64Data,
-        },
-      },
-      {
-        type: 'text',
-        text: promptText,
-      },
-    ];
+    const promptText = caption || `Image file: ${fileName}`;
 
     clearInterval(typingInterval);
-    await sendToClaudeWithHistory(ctx, multimodalContent);
+    enqueueUserMessage(ctx.from.id, {
+      type: 'photo',
+      base64Data,
+      mimeType,
+      caption: promptText,
+    }, ctx);
   } catch (error) {
     clearInterval(typingInterval);
     const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
@@ -1313,69 +1623,170 @@ bot.command('quiz', async (ctx) => {
 
 let cachedFilesList = [];
 
-function buildSourcePickerKeyboard(userId = null) {
-  const currentMode = userId ? getUserStorageMode(userId) : 'local';
-  const modeShort = currentMode === 'cloud' ? '☁️ Cloud' : currentMode === 'nosave' ? '💻 Local Only' : '💻+☁️ Dual';
-  return new InlineKeyboard()
-    .text(`☁️ Telegram Cloud Vault (${cloudVault.length})`, 'lib_src:cloud')
-    .row()
-    .text('💻 Local Storage (Drive D)', 'lib_src:local')
-    .row()
-    .text(`⚙️ Upload Mode: ${modeShort}`, 'open_storage_settings');
+function buildCategoriesKeyboard(files, source) {
+  const counts = {
+    pdf: 0,
+    python: 0,
+    code: 0,
+    docs: 0,
+    images: 0,
+    media: 0,
+    other: 0,
+  };
+
+  for (const f of files) {
+    const catId = f.category || getFileCategory(f.ext).id;
+    if (counts[catId] !== undefined) {
+      counts[catId]++;
+    } else {
+      counts.other++;
+    }
+  }
+
+  const keyboard = new InlineKeyboard();
+
+  if (counts.pdf > 0) {
+    keyboard.text(`📄 PDF Documents (${counts.pdf})`, `lib_cat:${source}:pdf`).row();
+  }
+  if (counts.python > 0) {
+    keyboard.text(`🐍 Python Scripts (${counts.python})`, `lib_cat:${source}:python`).row();
+  }
+  if (counts.code > 0) {
+    keyboard.text(`💻 Code Files (${counts.code})`, `lib_cat:${source}:code`).row();
+  }
+  if (counts.docs > 0) {
+    keyboard.text(`📝 Documents & Text (${counts.docs})`, `lib_cat:${source}:docs`).row();
+  }
+  if (counts.media > 0) {
+    keyboard.text(`🎥 Videos & Audio (${counts.media})`, `lib_cat:${source}:media`).row();
+  }
+  if (counts.images > 0) {
+    keyboard.text(`🖼️ Photos & Images (${counts.images})`, `lib_cat:${source}:images`).row();
+  }
+  if (counts.other > 0) {
+    keyboard.text(`❓ Other / Unknown (${counts.other})`, `lib_cat:${source}:other`).row();
+  }
+
+  keyboard.text(`🌐 All Files A-Z (${files.length})`, `lib_cat:${source}:all`).row();
+
+  if (source === 'cloud') {
+    keyboard.text('◀️ Back to Cloud Hub', 'storage_cloud');
+  } else {
+    keyboard.text('📁 Change Storage Source', 'lib_sources');
+  }
+
+  return keyboard;
 }
 
-function buildLibraryKeyboard(files, source, page = 0) {
+function buildCategoryFilesKeyboard(files, source, categoryId, page = 0) {
   const keyboard = new InlineKeyboard();
   const pageSize = 5;
-  const totalPages = Math.ceil(files.length / pageSize) || 1;
-  const start = page * pageSize;
-  const pageFiles = files.slice(start, start + pageSize);
+
+  let filtered = [];
+  let catName = 'All Files';
+  if (categoryId === 'all') {
+    filtered = [...files];
+    catName = '🌐 All Files';
+  } else {
+    filtered = files.filter((f) => (f.category || getFileCategory(f.ext).id) === categoryId);
+    catName = FILE_CATEGORIES[categoryId]?.name || categoryId;
+  }
+
+  // Requirement 2: Sort files from A to Z alphabetically!
+  filtered.sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true })
+  );
+
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1;
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const start = safePage * pageSize;
+  const pageFiles = filtered.slice(start, start + pageSize);
 
   for (let i = 0; i < pageFiles.length; i++) {
     const f = pageFiles[i];
-    const globalIdx = start + i;
-    const icon = f.ext === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(f.ext) ? '💻' : '📝';
+    const masterIdx = files.indexOf(f);
+    const cat = FILE_CATEGORIES[f.category || getFileCategory(f.ext).id] || FILE_CATEGORIES.other;
     const displayName = f.name.length > 28 ? '...' + f.name.slice(-25) : f.name;
-    keyboard.text(`${icon} ${displayName}`, `lib_sel:${source}:${globalIdx}`).row();
+    keyboard.text(`${cat.icon} ${displayName}`, `lib_sel:${source}:${masterIdx}`).row();
   }
 
   // Pagination navigation
   const navButtons = [];
-  if (page > 0) {
-    navButtons.push(InlineKeyboard.text('◀️ Prev', `lib_page:${source}:${page - 1}`));
+  if (safePage > 0) {
+    navButtons.push(InlineKeyboard.text('◀️ Prev', `lib_cat_page:${source}:${categoryId}:${safePage - 1}`));
   }
-  if (page < totalPages - 1) {
-    navButtons.push(InlineKeyboard.text('Next ▶️', `lib_page:${source}:${page + 1}`));
+  if (safePage < totalPages - 1) {
+    navButtons.push(InlineKeyboard.text('Next ▶️', `lib_cat_page:${source}:${categoryId}:${safePage + 1}`));
   }
   if (navButtons.length > 0) {
     keyboard.row(...navButtons);
   }
 
   keyboard.row(
-    InlineKeyboard.text('🔄 Refresh', `lib_refresh:${source}`),
-    InlineKeyboard.text('📁 Change Storage', 'lib_sources')
+    InlineKeyboard.text('📂 Categories', source === 'cloud' ? 'cloud_files_cats' : 'lib_src:local'),
+    InlineKeyboard.text('🔄 Refresh', `lib_cat_page:${source}:${categoryId}:${safePage}`)
   );
-  return { keyboard, totalPages };
+
+  return { keyboard, totalPages, totalCount: filtered.length, catName, page: safePage };
+}
+
+function buildSearchHistoryKeyboard(page = 0) {
+  const { items, totalPages, total, page: safePage } = getSearchHistoryPage(page, 5);
+  const keyboard = new InlineKeyboard();
+
+  for (const item of items) {
+    const icon =
+      item.type === 'youtube'
+        ? '🎥'
+        : item.type === 'shop'
+        ? '🛍️'
+        : item.type === 'download'
+        ? '📥'
+        : '🌐';
+    const displayTitle = item.query.length > 26 ? item.query.slice(0, 24) + '...' : item.query;
+    keyboard.text(`${icon} ${displayTitle}`, `view_hist:${item.id}`).row();
+  }
+
+  const navButtons = [];
+  if (safePage > 0) {
+    navButtons.push(InlineKeyboard.text('◀️ Prev', `cloud_hist_page:${safePage - 1}`));
+  }
+  if (safePage < totalPages - 1) {
+    navButtons.push(InlineKeyboard.text('Next ▶️', `cloud_hist_page:${safePage + 1}`));
+  }
+  if (navButtons.length > 0) {
+    keyboard.row(...navButtons);
+  }
+
+  keyboard.row(
+    InlineKeyboard.text('🗑️ Clear History', 'confirm_clear_hist'),
+    InlineKeyboard.text('◀️ Cloud Hub', 'storage_cloud')
+  );
+
+  return { keyboard, totalPages, total, page: safePage };
+}
+
+function buildSourcePickerKeyboard(userId = null) {
+  const currentMode = userId ? getUserStorageMode(userId) : 'local';
+  const modeShort = currentMode === 'cloud' ? '☁️ Cloud' : currentMode === 'nosave' ? '💻 Local Only' : '💻+☁️ Dual';
+  return new InlineKeyboard()
+    .text(`☁️ Telegram Cloud Vault (${cloudVault.length})`, 'storage_cloud')
+    .row()
+    .text('💻 Local Storage (Drive D)', 'lib_src:local')
+    .row()
+    .text(`⚙️ Upload Destination: ${modeShort}`, 'open_storage_settings');
 }
 
 bot.command(['library', 'files'], async (ctx) => {
   const userId = ctx.from.id;
-  const currentMode = getUserStorageMode(userId);
-  const modeLabels = {
-    local: '💻+☁️ Local & Cloud (Dual Save)',
-    cloud: '☁️ Cloud Only (No laptop space)',
-    nosave: '💻 Local Only (/nosave - No cloud save)',
-  };
-
   const keyboard = buildSourcePickerKeyboard(userId);
   await ctx.reply(
-    `📚 *Document Library*\n\n` +
-    `Choose a storage location to browse:\n\n` +
-    `• ☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
-    `  Files uploaded via Telegram chat. Accessible 24/7 on your phone and any device.\n\n` +
-    `• 💻 *Local Storage (Drive D)*\n` +
-    `  Physical files located in \`${STORAGE_DIR}\` on your laptop.\n\n` +
-    `⚙️ *Upload Destination:* ${modeLabels[currentMode]}`,
+    `📚 *Document & File Library*\n\n` +
+    `Choose a storage location to browse (Files organized by category, sorted A-Z):\n\n` +
+    `• ☁️ **Telegram Cloud Vault** (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
+    `  Accessible 24/7 on your phone & any device.\n\n` +
+    `• 💻 **Local Storage (Drive D)**\n` +
+    `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
     {
       parse_mode: 'Markdown',
       reply_markup: keyboard,
@@ -1385,6 +1796,616 @@ bot.command(['library', 'files'], async (ctx) => {
 
 bot.on('callback_query:data', async (ctx) => {
   const data = ctx.callbackQuery.data;
+
+  // Return to Storage Hub
+  if (data === 'storage_main') {
+    await ctx.answerCallbackQuery();
+    const currentMode = getUserStorageMode(ctx.from.id);
+    const modeLabels = {
+      local: '💻+☁️ Local & Cloud (Dual Save)',
+      cloud: '☁️ Cloud Only (No laptop space)',
+      nosave: '💻 Local Only (/nosave - No cloud save)',
+    };
+
+    const keyboard = new InlineKeyboard()
+      .text(`☁️ Telegram Cloud Vault (${cloudVault.length} files)`, 'storage_cloud')
+      .row()
+      .text('💻 Local Storage (Drive D)', 'lib_src:local')
+      .row()
+      .text(`⚙️ Upload Destination: ${modeLabels[currentMode]}`, 'open_storage_settings');
+
+    await ctx.editMessageText(
+      `⚙️ *Storage & Cloud Hub*\n\n` +
+      `Current Upload Mode: *${modeLabels[currentMode]}*\n\n` +
+      `Choose what you'd like to do:\n\n` +
+      `• ☁️ **Telegram Cloud Vault**: Access your saved files & search history\n` +
+      `• 💻 **Local Storage (Drive D)**: Files stored in \`${STORAGE_DIR}\` on your laptop\n` +
+      `• ⚙️ **Upload Destination**: Configure where new uploads are saved`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Requirement 5: When user clicks on Cloud in storage, pop up TWO options:
+  // 1. Saved Files
+  // 2. Search History
+  if (data === 'storage_cloud') {
+    await ctx.answerCallbackQuery();
+    const history = getAllSearchHistory();
+    const keyboard = new InlineKeyboard()
+      .text(`📁 Saved Files (${cloudVault.length})`, 'cloud_files_cats')
+      .row()
+      .text(`🔍 Search History (${history.length})`, 'cloud_hist_page:0')
+      .row()
+      .text('◀️ Back to Storage', 'storage_main');
+
+    await ctx.editMessageText(
+      `☁️ *Telegram Cloud Hub*\n\n` +
+      `Everything in your cloud is saved 24/7 on Telegram.\n\n` +
+      `Please choose what you would like to view:\n\n` +
+      `1. 📁 **Saved Files**: Browse documents, Python scripts, code, and videos (organized by category, sorted A-Z).\n` +
+      `2. 🔍 **Search History**: View your saved research lookups, YouTube searches, and store finds.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Cloud Files Categories View
+  if (data === 'cloud_files_cats' || data === 'lib_src:cloud') {
+    await ctx.answerCallbackQuery();
+    if (cloudVault.length === 0) {
+      await ctx.editMessageText(
+        `☁️ *Telegram Cloud Vault is Empty*\n\n` +
+        `You haven't uploaded or saved any files to Telegram yet.\n\n` +
+        `📤 *How to add files:*\n` +
+        `• Send any PDF, Python (.py), Code, or Document file to this chat.\n` +
+        `• Or download videos using /youtube or /download.`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('🔍 View Search History', 'cloud_hist_page:0')
+            .row()
+            .text('💻 Switch to Local Storage', 'lib_src:local')
+            .row()
+            .text('◀️ Back to Cloud Hub', 'storage_cloud'),
+        }
+      );
+      return;
+    }
+
+    const keyboard = buildCategoriesKeyboard(cloudVault, 'cloud');
+    await ctx.editMessageText(
+      `☁️ *Telegram Cloud Vault — File Categories*\n\n` +
+      `Total Files: *${cloudVault.length}*\n\n` +
+      `Select a category below to browse (files are sorted alphabetically **A-Z**):`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Local Storage (Drive D) Categories View
+  if (data === 'lib_src:local' || data === 'lib_refresh:local') {
+    const files = await getStoredFiles();
+    cachedFilesList = files;
+    await ctx.answerCallbackQuery();
+
+    if (files.length === 0) {
+      await ctx.editMessageText(
+        `💻 *Local Storage (Drive D) is Empty*\n\n` +
+        `Folder: \`${STORAGE_DIR}\`\n\n` +
+        `If running locally on your laptop, copy your files into that folder.\n` +
+        `You can also browse your **☁️ Telegram Cloud Vault** anytime!`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('🔄 Refresh Local', 'lib_src:local')
+            .row()
+            .text('☁️ Switch to Cloud Vault', 'storage_cloud'),
+        }
+      );
+      return;
+    }
+
+    const keyboard = buildCategoriesKeyboard(files, 'local');
+    await ctx.editMessageText(
+      `💻 *Local Storage (Drive D) — File Categories*\n\n` +
+      `Folder: \`${STORAGE_DIR}\`\n` +
+      `Total Files: *${files.length}*\n\n` +
+      `Select a category below to browse (files are sorted alphabetically **A-Z**):`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // View category files list: lib_cat:<source>:<categoryId> or lib_cat_page:<source>:<categoryId>:<page>
+  if (data.startsWith('lib_cat:') || data.startsWith('lib_cat_page:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const categoryId = parts[2];
+    const page = parts.length > 3 ? parseInt(parts[3], 10) || 0 : 0;
+
+    let files = [];
+    if (source === 'cloud') {
+      files = cloudVault;
+    } else {
+      files = await getStoredFiles();
+      cachedFilesList = files;
+    }
+
+    const { keyboard, totalPages, totalCount, catName, page: safePage } = buildCategoryFilesKeyboard(
+      files,
+      source,
+      categoryId,
+      page
+    );
+
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      `📁 *${catName}* (${totalCount} file${totalCount === 1 ? '' : 's'})\n` +
+      `Storage: *${source === 'cloud' ? '☁️ Telegram Cloud Vault' : '💻 Local Storage (Drive D)'}*\n` +
+      `Files sorted alphabetically **A to Z**.\n\n` +
+      `Page ${safePage + 1} of ${totalPages}. Select a file to view, quiz, or download:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Select a file: lib_sel:<source>:<idx>
+  if (data.startsWith('lib_sel:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+
+    let file = null;
+    if (source === 'cloud') {
+      file = cloudVault[idx];
+    } else {
+      if (!cachedFilesList || !cachedFilesList[idx]) {
+        cachedFilesList = await getStoredFiles();
+      }
+      file = cachedFilesList[idx];
+    }
+
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    const cat = FILE_CATEGORIES[file.category || getFileCategory(file.ext).id] || FILE_CATEGORIES.other;
+    const actionKeyboard = new InlineKeyboard()
+      .text('🎲 3-Question Quiz', `lib_quiz:${source}:${idx}`)
+      .text('📝 Detailed Summary', `lib_sum:${source}:${idx}`)
+      .row()
+      .text('📥 Send File to Chat', `lib_send:${source}:${idx}`)
+      .row();
+
+    if (source === 'cloud') {
+      actionKeyboard.text('🗑️ Delete', `lib_del:${idx}`);
+    }
+
+    actionKeyboard.text('🔙 Back to Categories', source === 'cloud' ? 'cloud_files_cats' : 'lib_src:local');
+
+    const dateStr = new Date(file.date || file.mtime).toLocaleString();
+    const sourceName = source === 'cloud' ? '☁️ Telegram Cloud Vault' : '💻 Local Storage (Drive D)';
+
+    await ctx.editMessageText(
+      `${cat.icon} *Selected Document:*\n\`${file.name}\`\n\n` +
+      `📂 *Category:* ${cat.name}\n` +
+      `📦 *Size:* ${formatBytes(file.size)}\n` +
+      `📅 *${source === 'cloud' ? 'Uploaded' : 'Modified'}:* ${dateStr}\n` +
+      `📍 *Source:* ${sourceName}\n\n` +
+      `What would you like to do with this file?`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: actionKeyboard,
+      }
+    );
+    return;
+  }
+
+  // Send file directly into chat: lib_send:<source>:<idx>
+  if (data.startsWith('lib_send:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+
+    let file = null;
+    if (source === 'cloud') {
+      file = cloudVault[idx];
+    } else {
+      if (!cachedFilesList || !cachedFilesList[idx]) {
+        cachedFilesList = await getStoredFiles();
+      }
+      file = cachedFilesList[idx];
+    }
+
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `Sending ${file.name}...` });
+    await ctx.replyWithChatAction('upload_document');
+
+    try {
+      if (source === 'cloud') {
+        if (file.ext === 'mp4') {
+          await ctx.replyWithVideo(file.file_id, {
+            caption: `🎥 *${file.name}*\n📦 Size: ${formatBytes(file.size)}`,
+            parse_mode: 'Markdown',
+          });
+        } else {
+          await ctx.replyWithDocument(file.file_id, {
+            caption: `📄 *${file.name}*\n📦 Size: ${formatBytes(file.size)}`,
+            parse_mode: 'Markdown',
+          });
+        }
+      } else {
+        const filePath = path.resolve(STORAGE_DIR, file.relPath || file.name);
+        await ctx.replyWithDocument(new InputFile(filePath), {
+          caption: `📄 *${file.name}*\n📦 Size: ${formatBytes(file.size)}`,
+          parse_mode: 'Markdown',
+        });
+      }
+    } catch (sendErr) {
+      console.error('Error sending file to chat:', sendErr);
+      await ctx.reply(`❌ Could not send file: ${sendErr.message}`);
+    }
+    return;
+  }
+
+  // Browse Search History: cloud_hist_page:<page>
+  if (data.startsWith('cloud_hist_page:')) {
+    const page = parseInt(data.replace('cloud_hist_page:', ''), 10) || 0;
+    const history = getAllSearchHistory();
+    await ctx.answerCallbackQuery();
+
+    if (history.length === 0) {
+      await ctx.editMessageText(
+        `🔍 *Search & Research History is Empty*\n\n` +
+        `You haven't looked up anything yet.\n\n` +
+        `💡 *Try these commands:*\n` +
+        `• \`/youtube <query>\` - Search YouTube videos\n` +
+        `• \`/search <query>\` - Search web & research\n` +
+        `• \`/shop <query>\` - Search shops & products\n\n` +
+        `All your searches and lookups will be saved here automatically!`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('📁 Browse Files', 'cloud_files_cats')
+            .row()
+            .text('◀️ Back to Cloud Hub', 'storage_cloud'),
+        }
+      );
+      return;
+    }
+
+    const { keyboard, totalPages, total, page: safePage } = buildSearchHistoryKeyboard(page);
+    await ctx.editMessageText(
+      `🔍 *Search & Research History (Cloud)*\n\n` +
+      `Total Saved Lookups: *${total}*\n` +
+      `Page ${safePage + 1} of ${totalPages}.\n\n` +
+      `Tap any search below to view details, re-run, or download:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // View Search Entry Details: view_hist:<id>
+  if (data.startsWith('view_hist:')) {
+    const id = data.replace('view_hist:', '');
+    const entry = getSearchHistoryEntry(id);
+    if (!entry) {
+      await ctx.answerCallbackQuery({ text: 'Search entry not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    const icon =
+      entry.type === 'youtube'
+        ? '🎥 YouTube Search'
+        : entry.type === 'shop'
+        ? '🛍️ Shop / Product Search'
+        : entry.type === 'download'
+        ? '📥 Video Download'
+        : '🌐 Web Research';
+
+    const dateStr = new Date(entry.date).toLocaleString();
+    let detailsText =
+      `🔍 *Search Entry Details*\n\n` +
+      `• *Query:* \`${entry.query}\`\n` +
+      `• *Type:* ${icon}\n` +
+      `• *Date:* ${dateStr}\n` +
+      (entry.url ? `• *Link:* ${entry.url}\n` : '') +
+      `\n`;
+
+    if (entry.topResults && entry.topResults.length > 0) {
+      detailsText += `📋 *Top Results Saved:*\n`;
+      entry.topResults.forEach((r, i) => {
+        detailsText += `${i + 1}. [${r.title || 'Link'}](${r.link})\n`;
+      });
+      detailsText += '\n';
+    }
+
+    const keyboard = new InlineKeyboard()
+      .text('🔄 Re-run Search', `rerun_search:${entry.id}`)
+      .row();
+
+    if (entry.type === 'youtube' && entry.url) {
+      keyboard.text('📥 Download Video', `dl_hist:${entry.id}`).row();
+    }
+
+    keyboard
+      .text('🗑️ Delete Entry', `del_hist:${entry.id}`)
+      .row()
+      .text('🔙 Back to Search History', 'cloud_hist_page:0');
+
+    await ctx.editMessageText(detailsText, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard,
+      disable_web_page_preview: true,
+    });
+    return;
+  }
+
+  // Re-run search: rerun_search:<id>
+  if (data.startsWith('rerun_search:')) {
+    const id = data.replace('rerun_search:', '');
+    const entry = getSearchHistoryEntry(id);
+    if (!entry) {
+      await ctx.answerCallbackQuery({ text: 'Entry not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: `Re-running search for: ${entry.query}` });
+    await ctx.replyWithChatAction('typing');
+
+    if (entry.type === 'youtube') {
+      const results = await searchYouTube(entry.query, 3);
+      if (results.length === 0) {
+        await ctx.reply(`❌ No YouTube videos found for: \`${entry.query}\``, { parse_mode: 'Markdown' });
+        return;
+      }
+      let msgText = `🎥 *YouTube Search Results for: "${entry.query}"*\n\n`;
+      const keyboard = new InlineKeyboard();
+      results.forEach((r, idx) => {
+        msgText += `${idx + 1}. [${r.title}](${r.url})\n   ⏱️ Duration: \`${r.duration}\` | 👤 \`${r.uploader}\`\n\n`;
+        keyboard.text(`📥 Download #${idx + 1}`, `dl_yt:${r.id}`).row();
+      });
+      keyboard.text('💾 View in Search History', 'cloud_hist_page:0');
+      await ctx.reply(msgText, { parse_mode: 'Markdown', reply_markup: keyboard });
+    } else {
+      const results = await searchWeb(entry.type === 'shop' ? `${entry.query} store shop buy online` : entry.query, 5);
+      if (results.length === 0) {
+        await ctx.reply(`❌ No results found for: \`${entry.query}\``, { parse_mode: 'Markdown' });
+        return;
+      }
+      let msgText = `🌐 *Results for: "${entry.query}"*\n\n`;
+      results.slice(0, 4).forEach((r, idx) => {
+        msgText += `${idx + 1}. [${r.title}](${r.link})\n`;
+        if (r.snippet) msgText += `   _${r.snippet.slice(0, 150)}..._\n\n`;
+      });
+      const keyboard = new InlineKeyboard().text('💾 View in Search History', 'cloud_hist_page:0');
+      await ctx.reply(msgText, { parse_mode: 'Markdown', reply_markup: keyboard });
+    }
+    return;
+  }
+
+  // Download video from history: dl_hist:<id>
+  if (data.startsWith('dl_hist:')) {
+    const id = data.replace('dl_hist:', '');
+    const entry = getSearchHistoryEntry(id);
+    if (!entry || !entry.url) {
+      await ctx.answerCallbackQuery({ text: 'Video link not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({ text: 'Starting download...' });
+    const statusMsg = await ctx.reply('⏳ *Downloading video...* Please wait.', { parse_mode: 'Markdown' });
+
+    try {
+      const dlResult = await downloadMediaVideo(entry.url, TEMP_DOWNLOADS_DIR);
+      if (dlResult.isOverTelegramLimit) {
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          `⚠️ *Video is too large for Telegram upload (> 50 MB)*\nSize: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      await ctx.replyWithChatAction('upload_video');
+      const sentVideo = await ctx.replyWithVideo(new InputFile(dlResult.filePath), {
+        caption: `🎥 *${dlResult.fileName}*\n📦 Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB\n💾 Saved to Telegram Cloud Vault!`,
+        parse_mode: 'Markdown',
+      });
+
+      const fileId = sentVideo.video?.file_id || sentVideo.document?.file_id;
+      if (fileId) {
+        await saveCloudVaultEntry({
+          name: dlResult.fileName,
+          file_id: fileId,
+          ext: 'mp4',
+          category: 'media',
+          size: dlResult.fileSize,
+          date: Date.now(),
+        });
+      }
+
+      try {
+        await fsp.unlink(dlResult.filePath);
+      } catch {}
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    } catch (err) {
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `❌ *Download failed:* \`${err.message.slice(0, 150)}\``, {
+        parse_mode: 'Markdown',
+      });
+    }
+    return;
+  }
+
+  // Delete search entry: del_hist:<id>
+  if (data.startsWith('del_hist:')) {
+    const id = data.replace('del_hist:', '');
+    await deleteSearchHistoryEntry(id);
+    await ctx.answerCallbackQuery({ text: 'Entry removed from history.' });
+
+    const history = getAllSearchHistory();
+    if (history.length === 0) {
+      await ctx.editMessageText(
+        `🔍 *Search History is now empty.*\n\n` +
+        `Search again anytime with /youtube, /search, or /shop!`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard().text('◀️ Back to Cloud Hub', 'storage_cloud'),
+        }
+      );
+      return;
+    }
+
+    const { keyboard, totalPages, total } = buildSearchHistoryKeyboard(0);
+    await ctx.editMessageText(
+      `🔍 *Search & Research History (Cloud)*\n\n` +
+      `Total Saved Lookups: *${total}*\nPage 1 of ${totalPages}.\n\n` +
+      `Tap any search below to view details, re-run, or download:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Confirm clear all history
+  if (data === 'confirm_clear_hist') {
+    await ctx.answerCallbackQuery();
+    const keyboard = new InlineKeyboard()
+      .text('⚠️ Yes, Clear All', 'do_clear_hist')
+      .row()
+      .text('◀️ Cancel', 'cloud_hist_page:0');
+
+    await ctx.editMessageText(
+      `⚠️ *Are you sure you want to clear your entire search history?*\n\n` +
+      `This will remove all saved lookups. (Your saved files will NOT be affected.)`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }
+    );
+    return;
+  }
+
+  // Do clear all history
+  if (data === 'do_clear_hist') {
+    await clearAllSearchHistory();
+    await ctx.answerCallbackQuery({ text: 'Search history cleared!' });
+    await ctx.editMessageText(
+      `✅ *Search history cleared successfully!*\n\n` +
+      `Your files in Cloud Vault and Drive D are safe.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: new InlineKeyboard()
+          .text('📁 Browse Saved Files', 'cloud_files_cats')
+          .row()
+          .text('◀️ Back to Cloud Hub', 'storage_cloud'),
+      }
+    );
+    return;
+  }
+
+  // Download YouTube video from search result button: dl_yt:<id>
+  if (data.startsWith('dl_yt:')) {
+    const videoId = data.replace('dl_yt:', '');
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    await ctx.answerCallbackQuery({ text: 'Starting video download...' });
+    const statusMsg = await ctx.reply('⏳ *Downloading YouTube video...* Please wait a moment.', {
+      parse_mode: 'Markdown',
+    });
+
+    try {
+      const dlResult = await downloadMediaVideo(videoUrl, TEMP_DOWNLOADS_DIR);
+
+      if (dlResult.isOverTelegramLimit) {
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          `⚠️ *Video is too large for Telegram upload (> 50 MB)*\n\n` +
+          `Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB.\n` +
+          `Link: ${videoUrl}`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      await ctx.replyWithChatAction('upload_video');
+      const sentVideo = await ctx.replyWithVideo(new InputFile(dlResult.filePath), {
+        caption: `🎥 *${dlResult.fileName}*\n📦 Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB\n💾 Saved to Telegram Cloud Vault!`,
+        parse_mode: 'Markdown',
+      });
+
+      const fileId = sentVideo.video?.file_id || sentVideo.document?.file_id;
+      if (fileId) {
+        await saveCloudVaultEntry({
+          name: dlResult.fileName,
+          file_id: fileId,
+          ext: 'mp4',
+          category: 'media',
+          size: dlResult.fileSize,
+          date: Date.now(),
+        });
+      }
+
+      // Save to local Drive D if mode allows
+      const userMode = getUserStorageMode(ctx.from.id);
+      if (userMode === 'local' || userMode === 'nosave') {
+        try {
+          const mediaDir = path.join(STORAGE_DIR, 'media');
+          if (!fs.existsSync(mediaDir)) {
+            await fsp.mkdir(mediaDir, { recursive: true });
+          }
+          const destPath = path.join(mediaDir, dlResult.fileName);
+          await fsp.copyFile(dlResult.filePath, destPath);
+        } catch (copyErr) {
+          console.warn('Could not copy downloaded video to local Drive D:', copyErr.message);
+        }
+      }
+
+      try {
+        await fsp.unlink(dlResult.filePath);
+      } catch {}
+
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    } catch (err) {
+      console.error('Download error:', err);
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `❌ *Download failed:*\n\`${err.message.slice(0, 200)}\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+    return;
+  }
 
   // Open storage settings from inline button
   if (data === 'open_storage_settings') {
@@ -1403,7 +2424,7 @@ bot.on('callback_query:data', async (ctx) => {
       .row()
       .text('💻 Local Only (/nosave)', 'set_storage:nosave')
       .row()
-      .text('◀️ Back to Library', 'lib_sources');
+      .text('◀️ Back to Storage Hub', 'storage_main');
 
     await ctx.editMessageText(
       `⚙️ *Storage Destination Settings*\n\n` +
@@ -1439,7 +2460,7 @@ bot.on('callback_query:data', async (ctx) => {
       .row()
       .text('💻 Local Only (/nosave)', 'set_storage:nosave')
       .row()
-      .text('📚 Back to Library', 'lib_sources');
+      .text('⚙️ Back to Storage Hub', 'storage_main');
 
     await ctx.editMessageText(
       `✅ *Storage Mode Updated!*\n\n` +
@@ -1459,217 +2480,16 @@ bot.on('callback_query:data', async (ctx) => {
   if (data === 'lib_sources') {
     await ctx.answerCallbackQuery();
     const keyboard = buildSourcePickerKeyboard(ctx.from.id);
-    const currentMode = getUserStorageMode(ctx.from.id);
-    const modeLabels = {
-      local: '💻+☁️ Local & Cloud (Dual Save)',
-      cloud: '☁️ Cloud Only (No laptop space)',
-      nosave: '💻 Local Only (/nosave - No cloud save)',
-    };
-
     await ctx.editMessageText(
-      `📚 *Document Library*\n\n` +
-      `Choose a storage location to browse:\n\n` +
+      `📚 *Document & File Library*\n\n` +
+      `Choose a storage location to browse (Files organized by category, sorted A-Z):\n\n` +
       `• ☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
       `  Files uploaded via Telegram chat. Accessible 24/7 on your phone and any device.\n\n` +
       `• 💻 *Local Storage (Drive D)*\n` +
-      `  Physical files located in \`${STORAGE_DIR}\` on your laptop.\n\n` +
-      `⚙️ *Upload Destination:* ${modeLabels[currentMode]}`,
+      `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
-      }
-    );
-    return;
-  }
-
-  // Open Telegram Cloud Vault
-  if (data === 'lib_src:cloud' || data === 'lib_refresh:cloud') {
-    await ctx.answerCallbackQuery(data === 'lib_refresh:cloud' ? { text: 'Cloud Vault refreshed!' } : undefined);
-
-    if (cloudVault.length === 0) {
-      await ctx.editMessageText(
-        `☁️ *Telegram Cloud Vault is Empty*\n\n` +
-        `You haven't uploaded any files to Telegram yet.\n\n` +
-        `📤 *How to add files:*\n` +
-        `Simply send any **PDF**, **Python (.py)**, **Java (.java)**, or **C++ (.cpp)** file directly to this chat from your phone or desktop. It will be stored in your Cloud Vault automatically!`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: new InlineKeyboard()
-            .text('🔄 Refresh Vault', 'lib_refresh:cloud')
-            .row()
-            .text('💻 Switch to Local Storage', 'lib_src:local'),
-        }
-      );
-      return;
-    }
-
-    const { keyboard, totalPages } = buildLibraryKeyboard(cloudVault, 'cloud', 0);
-    await ctx.editMessageText(
-      `☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
-      `Accessible 24/7 on your phone & any device.\n\n` +
-      `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard,
-      }
-    );
-    return;
-  }
-
-  // Open Local Storage (Drive D)
-  if (data === 'lib_src:local' || data === 'lib_refresh:local') {
-    const files = await getStoredFiles();
-    cachedFilesList = files;
-    await ctx.answerCallbackQuery(data === 'lib_refresh:local' ? { text: 'Local storage refreshed!' } : undefined);
-
-    if (files.length === 0) {
-      await ctx.editMessageText(
-        `💻 *Local Storage (Drive D) is Empty*\n\n` +
-        `Folder: \`${STORAGE_DIR}\`\n\n` +
-        `⚠️ *Note:* If the bot is running in the cloud (on Render), it cannot access your physical laptop drive. Use **☁️ Telegram Cloud Vault** to access your files anywhere on your phone!\n\n` +
-        `If running locally on your laptop, copy your files into that folder.`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: new InlineKeyboard()
-            .text('🔄 Refresh Local', 'lib_refresh:local')
-            .row()
-            .text('☁️ Switch to Cloud Vault', 'lib_src:cloud'),
-        }
-      );
-      return;
-    }
-
-    const { keyboard, totalPages } = buildLibraryKeyboard(files, 'local', 0);
-    await ctx.editMessageText(
-      `💻 *Local Storage (Drive D)* (${files.length} file${files.length === 1 ? '' : 's'})\n` +
-      `Folder: \`${STORAGE_DIR}\`\n\n` +
-      `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard,
-      }
-    );
-    return;
-  }
-
-  // Pagination for either source: lib_page:<source>:<page>
-  if (data.startsWith('lib_page:')) {
-    const parts = data.split(':');
-    const source = parts[1];
-    const page = parseInt(parts[2], 10) || 0;
-
-    let files = [];
-    let title = '';
-    let subtitle = '';
-
-    if (source === 'cloud') {
-      files = cloudVault;
-      title = '☁️ *Telegram Cloud Vault*';
-      subtitle = 'Accessible 24/7 on your phone & any device.';
-    } else {
-      files = await getStoredFiles();
-      cachedFilesList = files;
-      title = '💻 *Local Storage (Drive D)*';
-      subtitle = `Folder: \`${STORAGE_DIR}\``;
-    }
-
-    const { keyboard, totalPages } = buildLibraryKeyboard(files, source, page);
-    await ctx.answerCallbackQuery();
-    await ctx.editMessageText(
-      `${title} (${files.length} file${files.length === 1 ? '' : 's'})\n` +
-      `${subtitle}\n\n` +
-      `Page ${page + 1} of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard,
-      }
-    );
-    return;
-  }
-
-  // Back to list: lib_back:<source>:<page>
-  if (data.startsWith('lib_back:')) {
-    const parts = data.split(':');
-    const source = parts[1] || 'cloud';
-    const page = parseInt(parts[2], 10) || 0;
-
-    let files = [];
-    let title = '';
-    let subtitle = '';
-
-    if (source === 'cloud') {
-      files = cloudVault;
-      title = '☁️ *Telegram Cloud Vault*';
-      subtitle = 'Accessible 24/7 on your phone & any device.';
-    } else {
-      files = await getStoredFiles();
-      cachedFilesList = files;
-      title = '💻 *Local Storage (Drive D)*';
-      subtitle = `Folder: \`${STORAGE_DIR}\``;
-    }
-
-    const { keyboard, totalPages } = buildLibraryKeyboard(files, source, page);
-    await ctx.answerCallbackQuery();
-    await ctx.editMessageText(
-      `${title} (${files.length} file${files.length === 1 ? '' : 's'})\n` +
-      `${subtitle}\n\n` +
-      `Page ${page + 1} of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard,
-      }
-    );
-    return;
-  }
-
-  // Select a file: lib_sel:<source>:<idx>
-  if (data.startsWith('lib_sel:')) {
-    const parts = data.split(':');
-    const source = parts[1];
-    const idx = parseInt(parts[2], 10);
-
-    let file = null;
-    if (source === 'cloud') {
-      file = cloudVault[idx];
-    } else {
-      if (!cachedFilesList || !cachedFilesList[idx]) {
-        cachedFilesList = await getStoredFiles();
-      }
-      file = cachedFilesList[idx];
-    }
-
-    if (!file) {
-      await ctx.answerCallbackQuery({ text: 'File not found!' });
-      return;
-    }
-
-    await ctx.answerCallbackQuery();
-    const page = Math.floor(idx / 5);
-    const actionKeyboard = new InlineKeyboard()
-      .text('🎲 3-Question Quiz', `lib_quiz:${source}:${idx}`)
-      .text('📝 Detailed Summary', `lib_sum:${source}:${idx}`)
-      .row()
-      .text('🔙 Back to List', `lib_back:${source}:${page}`);
-
-    if (source === 'cloud') {
-      actionKeyboard.text('🗑️ Delete', `lib_del:${idx}`);
-    }
-
-    actionKeyboard.row().text('📁 Change Storage Source', 'lib_sources');
-
-    const icon = file.ext === 'pdf' ? '📄' : CODE_EXTENSIONS.includes(file.ext) ? '💻' : '📝';
-    const dateStr = new Date(file.date || file.mtime).toLocaleString();
-    const sourceName = source === 'cloud' ? '☁️ Telegram Cloud Vault' : '💻 Local Storage (Drive D)';
-
-    await ctx.editMessageText(
-      `${icon} *Selected Document:*\n\`${file.name}\`\n\n` +
-      `📦 *Size:* ${formatBytes(file.size)}\n` +
-      `📅 *${source === 'cloud' ? 'Uploaded' : 'Modified'}:* ${dateStr}\n` +
-      `📂 *Source:* ${sourceName}\n\n` +
-      `What would you like to do with this file?`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: actionKeyboard,
       }
     );
     return;
@@ -1695,19 +2515,21 @@ bot.on('callback_query:data', async (ctx) => {
         {
           parse_mode: 'Markdown',
           reply_markup: new InlineKeyboard()
-            .text('🔄 Refresh Vault', 'lib_refresh:cloud')
+            .text('🔍 Search History', 'cloud_hist_page:0')
             .row()
-            .text('💻 Switch to Local Storage', 'lib_src:local'),
+            .text('💻 Switch to Local Storage', 'lib_src:local')
+            .row()
+            .text('◀️ Back to Cloud Hub', 'storage_cloud'),
         }
       );
       return;
     }
 
-    const { keyboard, totalPages } = buildLibraryKeyboard(cloudVault, 'cloud', 0);
+    const keyboard = buildCategoriesKeyboard(cloudVault, 'cloud');
     await ctx.editMessageText(
-      `☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
-      `Accessible 24/7 on your phone & any device.\n\n` +
-      `Page 1 of ${totalPages}. Select a file to quiz or summarize without re-uploading:`,
+      `☁️ *Telegram Cloud Vault — File Categories*\n\n` +
+      `Total Files: *${cloudVault.length}*\n\n` +
+      `Select a category below to browse (files are sorted alphabetically **A-Z**):`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
@@ -1745,7 +2567,7 @@ bot.on('callback_query:data', async (ctx) => {
       if (source === 'cloud') {
         content = await loadCloudDocumentContent(file.file_id, file.ext, file.name);
       } else {
-        content = await loadLocalDocumentContent(file.name);
+        content = await loadLocalDocumentContent(file.relPath || file.name);
       }
 
       userLastDocument.set(ctx.from.id, {
@@ -1794,7 +2616,7 @@ bot.on('callback_query:data', async (ctx) => {
       if (source === 'cloud') {
         content = await loadCloudDocumentContent(file.file_id, file.ext, file.name);
       } else {
-        content = await loadLocalDocumentContent(file.name);
+        content = await loadLocalDocumentContent(file.relPath || file.name);
       }
 
       userLastDocument.set(ctx.from.id, {
@@ -1834,14 +2656,41 @@ bot.on(['message:voice', 'message:audio'], handleVoiceMessage);
 bot.on('message:photo', handlePhotoMessage);
 
 bot.on('message:text', async (ctx) => {
-  const userMessage = ctx.message.text;
+  const userMessage = ctx.message.text.trim();
 
   if (userMessage.startsWith('/')) {
+    userPendingAction.delete(ctx.from.id);
     return;
   }
 
+  // Check if user is responding to an interactive prompt (/shop, /youtube, /search, /download)
+  if (userPendingAction.has(ctx.from.id)) {
+    const pending = userPendingAction.get(ctx.from.id);
+    userPendingAction.delete(ctx.from.id);
+
+    if (pending.action === 'shop') {
+      await handleShopSearch(ctx, userMessage);
+      return;
+    }
+    if (pending.action === 'youtube') {
+      await handleYoutubeSearch(ctx, userMessage);
+      return;
+    }
+    if (pending.action === 'search') {
+      await handleWebSearch(ctx, userMessage);
+      return;
+    }
+    if (pending.action === 'download') {
+      await handleDownload(ctx, userMessage);
+      return;
+    }
+  }
+
   await ctx.replyWithChatAction('typing');
-  await sendToClaudeWithHistory(ctx, userMessage);
+  enqueueUserMessage(ctx.from.id, {
+    type: 'text',
+    text: userMessage,
+  }, ctx);
 });
 
 bot.catch((err) => {
@@ -1901,11 +2750,22 @@ try {
   console.warn('Vault initialization note:', vaultErr.message);
 }
 
+// Initialize Search & Research History
+try {
+  await initSearchHistory();
+} catch (histErr) {
+  console.warn('History initialization note:', histErr.message);
+}
+
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 try {
   await bot.api.setMyCommands([
-    { command: 'library', description: 'Browse Cloud Vault & Drive D files' },
-    { command: 'storage', description: 'Choose upload storage (Cloud, Local, /nosave)' },
+    { command: 'library', description: 'Browse Cloud Vault & Drive D files (A-Z)' },
+    { command: 'storage', description: 'Cloud Hub (Saved Files & Search History)' },
+    { command: 'youtube', description: 'Search YouTube videos & download MP4' },
+    { command: 'search', description: 'AI web search for websites and articles' },
+    { command: 'shop', description: 'Search stores, shops, and products online' },
+    { command: 'download', description: 'Download YouTube or TikTok video' },
     { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
     { command: 'status', description: 'View system resources, loaded file & mode' },
     { command: 'clear', description: 'Clear chat messages (keeps loaded file)' },

@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { Bot, InputFile } from 'grammy';
 import fs from 'fs';
 import path from 'path';
+import { getFileCategory } from './search-service.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
 const rawAllowedId = (process.env.ALLOWED_USER_ID || '').trim();
@@ -24,38 +25,45 @@ if (!fs.existsSync(STORAGE_DIR)) {
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
 
-const SUPPORTED_EXTENSIONS = [
-  'py', 'java', 'cpp', 'cc', 'cxx', 'c', 'h', 'hpp', 'js', 'ts', 'cs', 'go', 'rs', 'html', 'css', 'sql',
-  'pdf', 'txt', 'md'
-];
+function getFilesRecursively(dir, maxDepth = 3, currentDepth = 0) {
+  const results = [];
+  if (currentDepth > maxDepth || !fs.existsSync(dir)) return results;
+
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'temp_downloads') {
+      continue;
+    }
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...getFilesRecursively(fullPath, maxDepth, currentDepth + 1));
+    } else if (entry.isFile()) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
 
 async function syncDriveDFiles() {
   console.log(`Scanning "${STORAGE_DIR}" for files...`);
-  const entries = fs.readdirSync(STORAGE_DIR, { withFileTypes: true });
-  const filesToSync = [];
+  const allFiles = getFilesRecursively(STORAGE_DIR);
 
-  for (const entry of entries) {
-    if (entry.isFile() && !entry.name.startsWith('.')) {
-      const ext = entry.name.split('.').pop().toLowerCase();
-      if (SUPPORTED_EXTENSIONS.includes(ext)) {
-        filesToSync.push(entry.name);
-      }
-    }
-  }
-
-  if (filesToSync.length === 0) {
-    console.log(`No supported files found in ${STORAGE_DIR}`);
+  if (allFiles.length === 0) {
+    console.log(`No files found in ${STORAGE_DIR}`);
     return;
   }
 
-  console.log(`Found ${filesToSync.length} file(s) to sync to Telegram Cloud Vault:`, filesToSync);
+  console.log(`Found ${allFiles.length} file(s) to sync to Telegram Cloud Vault.`);
 
-  for (const fileName of filesToSync) {
-    const filePath = path.join(STORAGE_DIR, fileName);
-    console.log(`Uploading ${fileName} to Telegram...`);
+  for (const fullPath of allFiles) {
+    const fileName = path.basename(fullPath);
+    const ext = fileName.split('.').pop().toLowerCase();
+    const cat = getFileCategory(ext);
+
+    console.log(`Uploading ${fileName} [Category: ${cat.label}] to Telegram...`);
     try {
-      await bot.api.sendDocument(allowedUserId, new InputFile(filePath), {
-        caption: `Synced from Drive D: ${fileName}`,
+      await bot.api.sendDocument(allowedUserId, new InputFile(fullPath), {
+        caption: `${cat.icon} Synced from Drive D: ${fileName}`,
       });
       console.log(`Successfully uploaded: ${fileName}`);
     } catch (err) {

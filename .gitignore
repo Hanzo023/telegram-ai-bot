@@ -4,4 +4,7 @@ node_modules/
 !.env.example
 *.log
 cloud_vault.json
+search_history.json
+temp_downloads/
+*.bak
 .claude/
