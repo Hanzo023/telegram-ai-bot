@@ -2119,11 +2119,28 @@ bot.on('callback_query:data', async (ctx) => {
     await ctx.answerCallbackQuery();
 
     if (files.length === 0) {
+      if (cloudVault.length > 0) {
+        // The bot is hosted on a cloud server (Render/Linux) where Drive D is remote,
+        // but the user's laptop files are synced to Telegram Cloud Vault!
+        const keyboard = buildCategoriesKeyboard(cloudVault, 'cloud');
+        await ctx.editMessageText(
+          `💻 *Drive D Files (Synced to Telegram Cloud Vault)*\n\n` +
+          `Your bot is running 24/7 on a cloud server (Render). Because cloud servers cannot directly open your physical laptop hard drive, **your files from Drive D are synced safely in your Cloud Vault!**\n\n` +
+          `Total Synced Files: *${cloudVault.length}*\n\n` +
+          `Select a category below to browse (files are sorted **A-Z**):`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: keyboard,
+          }
+        );
+        return;
+      }
+
       await ctx.editMessageText(
         `💻 *Local Storage (Drive D) is Empty*\n\n` +
         `Folder: \`${STORAGE_DIR}\`\n\n` +
-        `If running locally on your laptop, copy your files into that folder.\n` +
-        `You can also browse your **☁️ Telegram Cloud Vault** anytime!`,
+        `• If running locally on your laptop, copy your files into that folder.\n` +
+        `• If running on a cloud host (Render), run \`npm run sync\` on your laptop to sync files to your Cloud Vault!`,
         {
           parse_mode: 'Markdown',
           reply_markup: new InlineKeyboard()

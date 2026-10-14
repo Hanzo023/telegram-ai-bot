@@ -60,7 +60,7 @@ async function syncDriveDFiles() {
     const ext = fileName.split('.').pop().toLowerCase();
     const cat = getFileCategory(ext);
 
-    console.log(`Uploading ${fileName} [Category: ${cat.label}] to Telegram...`);
+    console.log(`Uploading ${fileName} [Category: ${cat.name}] to Telegram...`);
     try {
       await bot.api.sendDocument(allowedUserId, new InputFile(fullPath), {
         caption: `${cat.icon} Synced from Drive D: ${fileName}`,
