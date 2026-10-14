@@ -182,14 +182,66 @@ async function getYtDlpCommand() {
 }
 
 /**
- * Search YouTube using yt-dlp flat-playlist metadata extraction,
- * with graceful fallback to DuckDuckGo search.
+ * Search YouTube for videos using native direct extraction (fastest, reliable everywhere),
+ * with yt-dlp and DuckDuckGo fallbacks.
  */
-export async function searchYouTube(query, maxResults = 3) {
-  const sanitizedQuery = query.replace(/["\\]/g, ' ').trim();
-  const ytDlpCmd = await getYtDlpCommand();
+export async function searchYouTube(query, maxResults = 4) {
+  const sanitizedQuery = (query || '').replace(/["\\]/g, ' ').trim();
+  if (!sanitizedQuery) return [];
 
+  // Method 1: Direct native YouTube web scraping (0 dependencies, works on Render/Docker/every host)
   try {
+    const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(sanitizedQuery);
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    if (res.ok) {
+      const html = await res.text();
+      const match = html.match(/var ytInitialData = ({[\s\S]+?});<\/script>/);
+      if (match) {
+        const data = JSON.parse(match[1]);
+        const contents =
+          data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
+        const results = [];
+        if (Array.isArray(contents)) {
+          for (const sec of contents) {
+            const items = sec.itemSectionRenderer?.contents || [];
+            for (const it of items) {
+              const vr = it.videoRenderer;
+              if (vr && vr.videoId) {
+                const title = vr.title?.runs?.[0]?.text || 'YouTube Video';
+                const duration = vr.lengthText?.simpleText || 'Video';
+                const uploader = vr.ownerText?.runs?.[0]?.text || 'YouTube';
+                results.push({
+                  id: vr.videoId,
+                  title,
+                  url: `https://www.youtube.com/watch?v=${vr.videoId}`,
+                  duration,
+                  uploader,
+                });
+                if (results.length >= maxResults) break;
+              }
+            }
+            if (results.length >= maxResults) break;
+          }
+        }
+        if (results.length > 0) {
+          return results;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Native YouTube search warning:', err.message);
+  }
+
+  // Method 2: yt-dlp fallback
+  try {
+    const ytDlpCmd = await getYtDlpCommand();
     const cmd = `${ytDlpCmd} --default-search "ytsearch${maxResults}" --dump-json --no-warnings --flat-playlist "${sanitizedQuery}"`;
     const { stdout } = await execPromise(cmd, { timeout: 20000 });
     const lines = stdout.trim().split('\n').filter(Boolean);
@@ -221,7 +273,7 @@ export async function searchYouTube(query, maxResults = 3) {
     console.warn('yt-dlp YouTube search warning, trying web fallback:', err.message);
   }
 
-  // Graceful fallback using DuckDuckGo
+  // Method 3: Graceful fallback using DuckDuckGo
   try {
     const webResults = await searchWeb(`site:youtube.com/watch ${sanitizedQuery}`, maxResults);
     const results = [];

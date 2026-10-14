@@ -68,7 +68,7 @@ const userLastInteraction = new Map(); // userId -> timestamp of last message/ac
 const DOC_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active document session TTL
 const CONVERSATION_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes chat session TTL
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
-const userPendingAction = new Map(); // userId -> { action: 'shop'|'youtube'|'search'|'download' }
+const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download' }
 const botStartTime = Date.now();
 
 // Robust per-user message debouncer and concurrency queue
@@ -296,22 +296,21 @@ bot.use(async (ctx, next) => {
 
 bot.command('start', async (ctx) => {
   await ctx.reply(
-    'Hello! I\'m your personal AI assistant powered by Claude & Gemini.\n\n' +
+    'Hello! I\'m your personal AI assistant powered by Claude.\n\n' +
     'Just send me any message, photo, document, or link and I\'ll help you right away!\n\n' +
     '✨ *What I can do for you:*\n' +
     '• 📸 **Photos & Screenshots**: Send any image or screenshot to analyze, transcribe, or translate.\n' +
     '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
     '• 🎥 **YouTube Research**: Search videos and download MP4s directly into chat.\n' +
-    '• 🌐 **AI Web & Shop Research**: Look up websites, research topics, and find stores/products.\n' +
+    '• 🌐 **AI Research & Web Search**: Research any topic, find websites, and look up products powered by Claude.\n' +
     '• 📥 **Video Downloader**: Download YouTube or TikTok videos and save them to your Cloud Vault.\n' +
     '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
     '📌 *Commands:*\n' +
-    '/storage - Open Cloud Vault (Files & Search History) and upload settings\n' +
-    '/library - Browse saved files by category (A-Z)\n' +
-    '/youtube <term> - Search YouTube videos & download directly\n' +
-    '/search <query> - AI web search for websites and articles\n' +
-    '/shop <query> - Search stores, shops, and products online\n' +
+    '/search <query> - AI research & web search powered by Claude\n' +
+    '/youtube <query> - Search YouTube videos & download MP4 directly\n' +
     '/download <url> - Download YouTube or TikTok video\n' +
+    '/storage - Open Cloud Vault (Saved Files & Search History)\n' +
+    '/library - Browse saved files by category (A-Z)\n' +
     '/quiz - Generate an interactive quiz poll on loaded file or topic\n' +
     '/status - View system resources, loaded file & storage mode\n' +
     '/clear - Clear chat messages (keeps loaded file active)\n' +
@@ -455,7 +454,7 @@ async function handleYoutubeSearch(ctx, query) {
   if (!cleanQuery) return;
 
   await ctx.replyWithChatAction('typing');
-  const results = await searchYouTube(cleanQuery, 3);
+  const results = await searchYouTube(cleanQuery, 4);
   if (results.length === 0) {
     await ctx.reply(`❌ No YouTube videos found for: \`${cleanQuery}\``, { parse_mode: 'Markdown' });
     return;
@@ -471,23 +470,24 @@ async function handleYoutubeSearch(ctx, query) {
     topResults: results.map((r) => ({ title: r.title, link: r.url })),
   });
 
-  let msgText = `🎥 *YouTube Search Results for: "${cleanQuery}"*\n\n`;
+  let msgText = `🎥 *YouTube Search Results for:* "${cleanQuery}"\n\n`;
   const keyboard = new InlineKeyboard();
 
   results.forEach((r, idx) => {
-    msgText += `${idx + 1}. [${r.title}](${r.url})\n`;
-    msgText += `   ⏱️ Duration: \`${r.duration}\` | 👤 \`${r.uploader}\`\n\n`;
+    msgText += `*${idx + 1}.* [${r.title}](${r.url})\n`;
+    msgText += `   ⏱️ Duration: \`${r.duration}\` | 👤 Channel: \`${r.uploader}\`\n\n`;
     if (r.id) {
-      keyboard.text(`📥 Download #${idx + 1}`, `dl_yt:${r.id}`).row();
+      keyboard.text(`📥 Download #${idx + 1} (MP4)`, `dl_yt:${r.id}`).row();
     }
   });
 
-  msgText += `💡 _Tap any download button to download the video and save it to your Cloud Vault!_`;
+  msgText += `💡 _Tap any download button to download the video directly to chat and Cloud Vault!_`;
   keyboard.text('💾 View in Search History', 'cloud_hist_page:0');
 
   await ctx.reply(msgText, {
     parse_mode: 'Markdown',
     reply_markup: keyboard,
+    disable_web_page_preview: true,
   });
 }
 
@@ -496,68 +496,57 @@ async function handleWebSearch(ctx, query) {
   if (!cleanQuery) return;
 
   await ctx.replyWithChatAction('typing');
-  const results = await searchWeb(cleanQuery, 5);
+  const webResults = await searchWeb(cleanQuery, 5);
 
-  if (results.length === 0) {
-    await ctx.reply(`❌ No web results found for: \`${cleanQuery}\``, { parse_mode: 'Markdown' });
-    return;
+  // Use Claude directly to perform deep research and format a high-quality answer
+  let claudeResearch = '';
+  try {
+    const webContext =
+      webResults.length > 0
+        ? `Web Sources Found:\n` +
+          webResults.map((r, i) => `${i + 1}. ${r.title}\nLink: ${r.link}\nSnippet: ${r.snippet}`).join('\n\n')
+        : `No external search engine results were retrieved directly.`;
+
+    const prompt =
+      `The user is searching for: "${cleanQuery}".\n\n` +
+      `${webContext}\n\n` +
+      `Provide a comprehensive, accurate, and helpful research answer:\n` +
+      `1. Directly explain what "${cleanQuery}" is, its meaning, background, or solution.\n` +
+      `2. If products, shops, deals, or websites are relevant, recommend the best options.\n` +
+      `3. Format neatly with markdown bullet points and clear sections.\n` +
+      `4. Keep the explanation concise, high-value, and directly useful.`;
+
+    const response = await anthropic.messages.create({
+      model: anthropicModel,
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    claudeResearch = response.content?.[0]?.text || '';
+  } catch (err) {
+    console.error('Claude web research error:', err.message);
+  }
+
+  let msgText = `🌐 *Research Results for: "${cleanQuery}"*\n\n`;
+  if (claudeResearch) {
+    msgText += `${claudeResearch}\n\n`;
+  }
+
+  if (webResults.length > 0) {
+    msgText += `🔗 *Source Links:*\n`;
+    webResults.slice(0, 3).forEach((r, idx) => {
+      msgText += `• [${r.title}](${r.link})\n`;
+    });
+    msgText += `\n`;
   }
 
   // Save to search history
   await addSearchHistoryEntry({
     query: cleanQuery,
     type: 'web',
-    title: results[0].title,
-    url: results[0].link,
-    resultsCount: results.length,
-    topResults: results.map((r) => ({ title: r.title, link: r.link })),
-  });
-
-  let msgText = `🌐 *Web Search Results for: "${cleanQuery}"*\n\n`;
-  results.slice(0, 4).forEach((r, idx) => {
-    msgText += `${idx + 1}. [${r.title}](${r.link})\n`;
-    if (r.snippet) {
-      msgText += `   _${r.snippet.slice(0, 160)}..._\n\n`;
-    }
-  });
-
-  const keyboard = new InlineKeyboard()
-    .text('💾 View in Search History', 'cloud_hist_page:0');
-
-  await ctx.reply(msgText, {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard,
-  });
-}
-
-async function handleShopSearch(ctx, query) {
-  const cleanQuery = (query || '').trim();
-  if (!cleanQuery) return;
-
-  await ctx.replyWithChatAction('typing');
-  const results = await searchWeb(`${cleanQuery} store shop buy online`, 5);
-
-  if (results.length === 0) {
-    await ctx.reply(`❌ No shops found for: \`${cleanQuery}\``, { parse_mode: 'Markdown' });
-    return;
-  }
-
-  // Save to search history
-  await addSearchHistoryEntry({
-    query: cleanQuery,
-    type: 'shop',
-    title: results[0].title,
-    url: results[0].link,
-    resultsCount: results.length,
-    topResults: results.map((r) => ({ title: r.title, link: r.link })),
-  });
-
-  let msgText = `🛍️ *Store & Product Results for: "${cleanQuery}"*\n\n`;
-  results.slice(0, 4).forEach((r, idx) => {
-    msgText += `${idx + 1}. [${r.title}](${r.link})\n`;
-    if (r.snippet) {
-      msgText += `   _${r.snippet.slice(0, 160)}..._\n\n`;
-    }
+    title: webResults[0]?.title || cleanQuery,
+    url: webResults[0]?.link || '',
+    resultsCount: webResults.length,
+    topResults: webResults.map((r) => ({ title: r.title, link: r.link })),
   });
 
   const keyboard = new InlineKeyboard()
@@ -684,22 +673,6 @@ bot.command(['search', 'find'], async (ctx) => {
     return;
   }
   await handleWebSearch(ctx, query);
-});
-
-// Shop & Product Search Command
-bot.command('shop', async (ctx) => {
-  const query = ctx.message.text.replace(/^\/shop\s*/i, '').trim();
-  if (!query) {
-    userPendingAction.set(ctx.from.id, { action: 'shop' });
-    await ctx.reply(
-      '🛍️ *Shop & Product Search*\n\n' +
-      'What product or store are you looking for?\n' +
-      'Type it below (e.g. `phone`, `wireless mechanical keyboard`, `espresso machine`):',
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-  await handleShopSearch(ctx, query);
 });
 
 // Video Downloader Command (YouTube & TikTok)
@@ -1987,8 +1960,6 @@ function buildSearchHistoryKeyboard(page = 0) {
     const icon =
       item.type === 'youtube'
         ? '🎥'
-        : item.type === 'shop'
-        ? '🛍️'
         : item.type === 'download'
         ? '📥'
         : '🌐';
@@ -2330,9 +2301,9 @@ bot.on('callback_query:data', async (ctx) => {
         `🔍 *Search & Research History is Empty*\n\n` +
         `You haven't looked up anything yet.\n\n` +
         `💡 *Try these commands:*\n` +
-        `• \`/youtube <query>\` - Search YouTube videos\n` +
-        `• \`/search <query>\` - Search web & research\n` +
-        `• \`/shop <query>\` - Search shops & products\n\n` +
+        `• \`/youtube <query>\` - Search YouTube videos & download\n` +
+        `• \`/search <query>\` - AI research & web search\n` +
+        `• \`/download <url>\` - Download YouTube/TikTok video\n\n` +
         `All your searches and lookups will be saved here automatically!`,
         {
           parse_mode: 'Markdown',
@@ -2372,8 +2343,6 @@ bot.on('callback_query:data', async (ctx) => {
     const icon =
       entry.type === 'youtube'
         ? '🎥 YouTube Search'
-        : entry.type === 'shop'
-        ? '🛍️ Shop / Product Search'
         : entry.type === 'download'
         ? '📥 Video Download'
         : '🌐 Web Research';
@@ -2443,7 +2412,7 @@ bot.on('callback_query:data', async (ctx) => {
       keyboard.text('💾 View in Search History', 'cloud_hist_page:0');
       await ctx.reply(msgText, { parse_mode: 'Markdown', reply_markup: keyboard });
     } else {
-      const results = await searchWeb(entry.type === 'shop' ? `${entry.query} store shop buy online` : entry.query, 5);
+      const results = await searchWeb(entry.query, 5);
       if (results.length === 0) {
         await ctx.reply(`❌ No results found for: \`${entry.query}\``, { parse_mode: 'Markdown' });
         return;
@@ -2523,7 +2492,7 @@ bot.on('callback_query:data', async (ctx) => {
     if (history.length === 0) {
       await ctx.editMessageText(
         `🔍 *Search History is now empty.*\n\n` +
-        `Search again anytime with /youtube, /search, or /shop!`,
+        `Search again anytime with /youtube or /search!`,
         {
           parse_mode: 'Markdown',
           reply_markup: new InlineKeyboard().text('◀️ Back to Cloud Hub', 'storage_cloud'),
@@ -2916,15 +2885,11 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
-  // Check if user is responding to an interactive prompt (/shop, /youtube, /search, /download)
+  // Check if user is responding to an interactive prompt (/youtube, /search, /download)
   if (userPendingAction.has(ctx.from.id)) {
     const pending = userPendingAction.get(ctx.from.id);
     userPendingAction.delete(ctx.from.id);
 
-    if (pending.action === 'shop') {
-      await handleShopSearch(ctx, userMessage);
-      return;
-    }
     if (pending.action === 'youtube') {
       await handleYoutubeSearch(ctx, userMessage);
       return;
@@ -3013,19 +2978,18 @@ try {
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 try {
   await bot.api.setMyCommands([
+    { command: 'search', description: 'AI research & web search powered by Claude' },
+    { command: 'youtube', description: 'Search YouTube videos & download MP4' },
+    { command: 'download', description: 'Download YouTube or TikTok video' },
     { command: 'library', description: 'Browse Cloud Vault & Drive D files (A-Z)' },
     { command: 'storage', description: 'Cloud Hub (Saved Files & Search History)' },
-    { command: 'youtube', description: 'Search YouTube videos & download MP4' },
-    { command: 'search', description: 'AI web search for websites and articles' },
-    { command: 'shop', description: 'Search stores, shops, and products online' },
-    { command: 'download', description: 'Download YouTube or TikTok video' },
     { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
     { command: 'status', description: 'View system resources, loaded file & mode' },
     { command: 'clear', description: 'Clear chat messages (keeps loaded file)' },
-    { command: 'clearall', description: 'Clear all chat & unload file (folder safe)' },
-    { command: 'nosave', description: 'Save new files to Drive D only (no cloud upload)' },
-    { command: 'cloud', description: 'Save new files to Cloud Vault only (0 laptop space)' },
-    { command: 'local', description: 'Save new files to both Drive D and Cloud Vault' },
+    { command: 'clearall', description: 'Clear all chat & unload file safely' },
+    { command: 'nosave', description: 'Save new files to Drive D only' },
+    { command: 'cloud', description: 'Save new files to Cloud Vault only' },
+    { command: 'local', description: 'Save to both Drive D and Cloud Vault' },
     { command: 'start', description: 'Show welcome message and help' },
   ]);
   console.log('Commands registered with Telegram');
