@@ -55,8 +55,8 @@ const anthropic = new Anthropic({
 const anthropicModel =
   process.env.ANTHROPIC_MODEL ||
   (process.env.ANTHROPIC_BASE_URL && !process.env.ANTHROPIC_BASE_URL.includes('anthropic.com')
-    ? 'claude-haiku-4-5-20251001'
-    : 'claude-3-5-haiku-20241022');
+    ? 'claude-sonnet-4-5'
+    : 'claude-3-5-sonnet-20241022');
 
 const googleAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,

@@ -1,10 +1,10 @@
 # Telegram AI Bot
 
-A personal Telegram bot powered by Claude 4.5 Haiku for AI-assisted conversations.
+A personal Telegram bot powered by Claude 3.5 Sonnet for AI-assisted conversations.
 
 ## Features
 
-- Direct integration with Claude 4.5 Haiku via Anthropic API
+- Direct integration with Claude 3.5 Sonnet via Anthropic API
 - Conversation history management (maintains context across messages)
 - User authentication (only specified user can interact)
 - Simple command interface
