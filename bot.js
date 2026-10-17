@@ -43,7 +43,14 @@ try {
   console.warn('Storage directory initialization note:', dirErr.message);
 }
 
-const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
+const telegramToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+if (!telegramToken) {
+  console.error('❌ FATAL: TELEGRAM_BOT_TOKEN is missing or empty in environment variables!');
+  console.error('Please configure TELEGRAM_BOT_TOKEN in your hosting provider settings (e.g. Render dashboard).');
+  process.exit(1);
+}
+
+const bot = new Bot(telegramToken);
 // Robust extraction of all allowed Telegram IDs from ALLOWED_USER_IDS and/or ALLOWED_USER_ID
 // Handles comma-separated, space-separated, quotes, brackets, and multiple variables
 const combinedAllowedRaw = [process.env.ALLOWED_USER_IDS, process.env.ALLOWED_USER_ID]
@@ -3248,6 +3255,15 @@ bot.catch((err) => {
   console.error('[Bot Error]:', sanitizeError(err.error || err));
 });
 
+// Process-wide unhandled rejection / exception listeners to prevent container crashes on transient errors
+process.on('unhandledRejection', (reason) => {
+  console.error('[Unhandled Rejection]:', sanitizeError(reason));
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[Uncaught Exception]:', sanitizeError(err));
+});
+
 const PORT = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
@@ -3330,5 +3346,42 @@ try {
   console.warn('Failed to register Telegram commands:', err.message);
 }
 
-bot.start();
-console.log('Bot is running...');
+async function startBotWithRetry() {
+  let attempt = 0;
+  while (!isShuttingDown) {
+    try {
+      console.log('Starting Telegram bot polling...');
+      await bot.start({
+        drop_pending_updates: false,
+        onStart: (botInfo) => {
+          console.log(`✅ Telegram bot @${botInfo.username} is running and polling for updates!`);
+        },
+      });
+      break;
+    } catch (err) {
+      if (isShuttingDown) break;
+      attempt++;
+      const errMsg = err?.message || String(err);
+      const isConflict =
+        err?.error_code === 409 ||
+        errMsg.includes('409') ||
+        errMsg.includes('Conflict') ||
+        errMsg.includes('terminated by other getUpdates request');
+
+      if (isConflict) {
+        console.warn(
+          `⚠️ [Polling Conflict] Telegram 409 Conflict (attempt ${attempt}): Another bot instance is currently active (e.g. previous Render container shutting down). Waiting 5s before retrying...`
+        );
+      } else {
+        console.error(`❌ [Polling Error] (attempt ${attempt}):`, sanitizeError(err));
+        console.warn('Retrying polling in 5s...');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+  }
+}
+
+// Start polling asynchronously with automatic retry so health check stays alive and rolling deploys succeed
+startBotWithRetry().catch((err) => {
+  console.error('Fatal polling loop error:', sanitizeError(err));
+});
