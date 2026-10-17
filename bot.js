@@ -43,7 +43,6 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify({
     status: 'ok',
     bot: 'running',
-    path: req.url,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   }));
@@ -59,6 +58,13 @@ try {
   }
   if (!fs.existsSync(TEMP_DOWNLOADS_DIR)) {
     fs.mkdirSync(TEMP_DOWNLOADS_DIR, { recursive: true });
+  } else {
+    // Purge orphaned temporary files from previous runs
+    fsp.readdir(TEMP_DOWNLOADS_DIR).then((files) => {
+      for (const f of files) {
+        fsp.unlink(path.join(TEMP_DOWNLOADS_DIR, f)).catch(() => {});
+      }
+    }).catch(() => {});
   }
 } catch (dirErr) {
   console.warn('Storage directory initialization note:', dirErr.message);
@@ -83,7 +89,7 @@ const allowedUserIds = new Set(allowedIdMatches.map((id) => parseInt(id, 10)));
 // Primary user ID for admin/vault backup operations (defaults to the first ID in the list)
 const allowedUserId = allowedUserIds.values().next().value || null;
 
-console.log(`[Config] Authorized Telegram User IDs: [${Array.from(allowedUserIds).join(', ')}]`);
+console.log(`[Config] Authorized Telegram User IDs configured (${allowedUserIds.size} user(s) authorized)`);
 if (allowedUserIds.size === 0) {
   console.warn('⚠️ WARNING: No valid ALLOWED_USER_ID configured! All incoming messages will be rejected.');
 }
@@ -111,8 +117,29 @@ const userLastInteraction = new Map(); // userId -> timestamp of last message/ac
 const DOC_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active document session TTL
 const CONVERSATION_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes chat session TTL
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
-const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download'|'image'|'video' }
+const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download'|'image'|'video', timestamp: number }
+const userCachedFilesList = new Map(); // userId -> array of cached library files
 const botStartTime = Date.now();
+
+// Periodic background memory sweeper to prune stale sessions (unref'd so process exits cleanly)
+const SESSION_SWEEPER_INTERVAL_MS = 15 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, lastTime] of userLastInteraction.entries()) {
+    if (now - lastTime > CONVERSATION_SESSION_TIMEOUT_MS) {
+      conversationHistory.delete(userId);
+      userLastDocument.delete(userId);
+      userCachedFilesList.delete(userId);
+      userPendingAction.delete(userId);
+      userLastInteraction.delete(userId);
+    }
+  }
+  for (const [userId, pending] of userPendingAction.entries()) {
+    if (pending.timestamp && now - pending.timestamp > 5 * 60 * 1000) {
+      userPendingAction.delete(userId);
+    }
+  }
+}, SESSION_SWEEPER_INTERVAL_MS).unref();
 
 // Robust per-user message debouncer and concurrency queue
 // Eliminates duplicate replies, handles multi-part message bursts (text + photo + comment),
@@ -206,7 +233,7 @@ async function triggerUserQueueExecution(userId) {
   try {
     await processUserBatch(userId, itemsToProcess, ctx);
   } catch (err) {
-    console.error(`Error processing user message batch for ${userId}:`, err);
+    console.error(`Error processing user message batch for ${userId}:`, sanitizeError(err));
   } finally {
     q.isProcessing = false;
     if (q.items.length === 0) {
@@ -222,7 +249,7 @@ async function triggerUserQueueExecution(userId) {
       } else {
         // Debounce period already completed while Claude was generating; trigger next turn immediately
         triggerUserQueueExecution(userId).catch((err) => {
-          console.error(`Error in chained user queue execution for ${userId}:`, err);
+          console.error(`Error in chained user queue execution for ${userId}:`, sanitizeError(err));
         });
       }
     } else {
@@ -382,6 +409,8 @@ async function handleClearAll(ctx) {
   conversationHistory.delete(userId);
   userLastDocument.delete(userId);
   userLastInteraction.delete(userId);
+  userPendingAction.delete(userId);
+  userCachedFilesList.delete(userId);
 
   await ctx.reply(
     '✅ *All chat history & loaded documents cleared!*\n\n' +
@@ -397,6 +426,7 @@ async function handleClearAll(ctx) {
 bot.command('clear', async (ctx) => {
   const userId = ctx.from.id;
   clearUserQueue(userId);
+  userPendingAction.delete(userId);
   const arg = ctx.message.text.replace(/^\/clear\s*/i, '').trim().toLowerCase();
 
   if (arg === 'all' || arg === 'doc' || arg === 'file') {
@@ -577,7 +607,7 @@ async function handleWebSearch(ctx, query) {
     });
     claudeResearch = response.content?.[0]?.text || '';
   } catch (err) {
-    console.error('Claude web research error:', err.message);
+    console.error('Claude web research error:', sanitizeError(err));
   }
 
   let msgText = `🌐 *Research Results for: "${cleanQuery}"*\n\n`;
@@ -748,7 +778,7 @@ async function generateGeminiImage(prompt) {
       }
     }
   } catch (fbErr) {
-    console.error('Fallback image generator error:', fbErr);
+    console.error('Fallback image generator error:', sanitizeError(fbErr));
   }
 
   throw lastGeminiErr || new Error('Image generation failed. Please verify your prompt or API quota.');
@@ -788,7 +818,7 @@ async function handleImageGeneration(ctx, rawPrompt) {
   }
 
   if (!prompt) {
-    userPendingAction.set(ctx.from.id, { action: 'image' });
+    userPendingAction.set(ctx.from.id, { action: 'image', timestamp: Date.now() });
     await ctx.reply(
       '🎨 *Gemini Nano Banana Image Generator*\n\n' +
       'What picture would you like to generate?\n' +
@@ -811,7 +841,6 @@ async function handleImageGeneration(ctx, rawPrompt) {
 
   try {
     const result = await generateGeminiImage(prompt);
-    clearInterval(typingInterval);
 
     await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
@@ -826,7 +855,6 @@ async function handleImageGeneration(ctx, rawPrompt) {
       parse_mode: 'Markdown',
     });
   } catch (err) {
-    clearInterval(typingInterval);
     console.error('Image generation error:', sanitizeError(err));
     await ctx.api.editMessageText(
       ctx.chat.id,
@@ -835,6 +863,8 @@ async function handleImageGeneration(ctx, rawPrompt) {
       `Please check your prompt or API key permissions.`,
       { parse_mode: 'Markdown' }
     );
+  } finally {
+    clearInterval(typingInterval);
   }
 }
 
@@ -851,7 +881,7 @@ async function handleVideoGeneration(ctx, rawPrompt) {
   }
 
   if (!prompt) {
-    userPendingAction.set(ctx.from.id, { action: 'video' });
+    userPendingAction.set(ctx.from.id, { action: 'video', timestamp: Date.now() });
     await ctx.reply(
       '🎬 *Gemini Veo Video Generator*\n\n' +
       'What video would you like to generate?\n' +
@@ -874,7 +904,6 @@ async function handleVideoGeneration(ctx, rawPrompt) {
 
   try {
     await generateGeminiVideo(prompt);
-    clearInterval(typingInterval);
 
     await ctx.api.editMessageText(
       ctx.chat.id,
@@ -885,7 +914,6 @@ async function handleVideoGeneration(ctx, rawPrompt) {
       { parse_mode: 'Markdown' }
     );
   } catch (err) {
-    clearInterval(typingInterval);
     console.error('Video generation error:', sanitizeError(err));
     await ctx.api.editMessageText(
       ctx.chat.id,
@@ -893,6 +921,8 @@ async function handleVideoGeneration(ctx, rawPrompt) {
       `❌ *Video generation note:*\n${sanitizeError(err).slice(0, 400)}`,
       { parse_mode: 'Markdown' }
     );
+  } finally {
+    clearInterval(typingInterval);
   }
 }
 
@@ -910,7 +940,7 @@ bot.command(['video', 'genvideo', 'makevideo'], async (ctx) => {
 bot.command('youtube', async (ctx) => {
   const query = ctx.message.text.replace(/^\/youtube\s*/i, '').trim();
   if (!query) {
-    userPendingAction.set(ctx.from.id, { action: 'youtube' });
+    userPendingAction.set(ctx.from.id, { action: 'youtube', timestamp: Date.now() });
     await ctx.reply(
       '🎥 *YouTube Search*\n\n' +
       'What YouTube video or music are you searching for?\n' +
@@ -926,7 +956,7 @@ bot.command('youtube', async (ctx) => {
 bot.command(['search', 'find'], async (ctx) => {
   const query = ctx.message.text.replace(/^\/(search|find)\s*/i, '').trim();
   if (!query) {
-    userPendingAction.set(ctx.from.id, { action: 'search' });
+    userPendingAction.set(ctx.from.id, { action: 'search', timestamp: Date.now() });
     await ctx.reply(
       '🌐 *AI Web & Research Search*\n\n' +
       'What would you like to search on the web?\n' +
@@ -942,7 +972,7 @@ bot.command(['search', 'find'], async (ctx) => {
 bot.command(['download', 'dl'], async (ctx) => {
   const url = ctx.message.text.replace(/^\/(download|dl)\s*/i, '').trim();
   if (!url || !url.startsWith('http')) {
-    userPendingAction.set(ctx.from.id, { action: 'download' });
+    userPendingAction.set(ctx.from.id, { action: 'download', timestamp: Date.now() });
     await ctx.reply(
       '📥 *Video Downloader (YouTube & TikTok)*\n\n' +
       'Send or paste the video link you want to download below:',
@@ -1054,7 +1084,7 @@ async function parseDocumentBuffer(buffer, fileExtension, fileName = '') {
         );
         text = geminiRes.text ? geminiRes.text.trim() : '';
       } catch (ocrErr) {
-        console.error('Gemini PDF OCR fallback error:', ocrErr);
+        console.error('Gemini PDF OCR fallback error:', sanitizeError(ocrErr));
       }
     }
 
@@ -1489,7 +1519,7 @@ async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 
     }
     return files;
   } catch (err) {
-    console.error('Error reading storage directory:', err);
+    console.error('Error reading storage directory:', sanitizeError(err));
     return [];
   }
 }
@@ -1661,7 +1691,7 @@ async function bundleCodeWithGemini(claudeResponseText, userPrompt) {
     const text = (res.text || '').trim();
     return text || null;
   } catch (err) {
-    console.error('Gemini code bundling fallback error:', err);
+    console.error('Gemini code bundling fallback error:', sanitizeError(err));
     return null;
   }
 }
@@ -1779,23 +1809,18 @@ async function handleGameAndCodeDelivery(ctx, assistantMessage, userContent) {
 
   const safeFileName = path.basename(fileName).replace(/[\/\\]/g, '') || 'game.html';
 
-  // 5. Write to temporary file and send via Telegram document
-  if (!fs.existsSync(TEMP_DOWNLOADS_DIR)) {
-    await fsp.mkdir(TEMP_DOWNLOADS_DIR, { recursive: true });
-  }
-  const tempFilePath = path.join(TEMP_DOWNLOADS_DIR, safeFileName);
-
+  // 5. Package as in-memory Buffer and send via Telegram document (no disk collision, no race conditions)
   try {
-    await fsp.writeFile(tempFilePath, safeCode, 'utf8');
+    const fileBuffer = Buffer.from(safeCode, 'utf8');
 
     await ctx.replyWithChatAction('upload_document');
     try {
-      await ctx.replyWithDocument(new InputFile(tempFilePath, safeFileName), {
+      await ctx.replyWithDocument(new InputFile(fileBuffer, safeFileName), {
         caption: `🎮 *${safeFileName.replace(/_/g, ' ')}*\nReady to play! Open or run this file on your device.`,
         parse_mode: 'Markdown',
       });
     } catch {
-      await ctx.replyWithDocument(new InputFile(tempFilePath, safeFileName), {
+      await ctx.replyWithDocument(new InputFile(fileBuffer, safeFileName), {
         caption: `🎮 ${safeFileName}\nReady to play! Open or run this file on your device.`,
       });
     }
@@ -1818,10 +1843,8 @@ async function handleGameAndCodeDelivery(ctx, assistantMessage, userContent) {
 
     return true;
   } catch (err) {
-    console.error('Error delivering game/code file to Telegram:', err);
+    console.error('Error delivering game/code file to Telegram:', sanitizeError(err));
     return false;
-  } finally {
-    await fsp.unlink(tempFilePath).catch(() => {});
   }
 }
 
@@ -2047,7 +2070,7 @@ bot.on('message:document', async (ctx) => {
       );
     }
   } catch (error) {
-    console.error('Error processing document:', error);
+    console.error('Error processing document:', sanitizeError(error));
     await ctx.reply(
       '❌ Sorry, I encountered an error saving or reading the file. Please try again.',
       { parse_mode: 'Markdown' }
@@ -2368,7 +2391,7 @@ bot.command('quiz', async (ctx) => {
     const quizList = await generateQuizQuestions(contextText);
     await sendQuizPolls(ctx, quizList);
   } catch (err) {
-    console.error('Error generating quiz polls:', err);
+    console.error('Error generating quiz polls:', sanitizeError(err));
     await ctx.reply(
       '❌ Sorry, I had trouble creating the quiz questions. Please try again or specify a topic like `/quiz python basics`.',
       { parse_mode: 'Markdown' }
@@ -2376,8 +2399,7 @@ bot.command('quiz', async (ctx) => {
   }
 });
 
-// Isolated per-user cached files map to prevent cross-user state leaks
-const userCachedFilesList = new Map();
+// Helper functions for isolated per-user cached files
 function getUserCachedFiles(userId) {
   return userCachedFilesList.get(userId) || null;
 }
@@ -2845,8 +2867,8 @@ bot.on('callback_query:data', async (ctx) => {
         });
       }
     } catch (sendErr) {
-      console.error('Error sending file to chat:', sendErr);
-      await ctx.reply(`❌ Could not send file: ${sendErr.message}`);
+      console.error('Error sending file to chat:', sanitizeError(sendErr));
+      await ctx.reply(`❌ Could not send file: ${sanitizeError(sendErr).slice(0, 200)}`);
     }
     return;
   }
@@ -3371,7 +3393,7 @@ bot.on('callback_query:data', async (ctx) => {
       const quizList = await generateQuizQuestions(contextText);
       await sendQuizPolls(ctx, quizList);
     } catch (err) {
-      console.error('Error generating quiz from library file:', err);
+      console.error('Error generating quiz from library file:', sanitizeError(err));
       await ctx.reply('❌ Sorry, I encountered an error reading the file or generating quiz questions.');
     }
     return;
@@ -3439,7 +3461,7 @@ bot.on('callback_query:data', async (ctx) => {
 
       await sendToClaudeWithHistory(ctx, prompt);
     } catch (err) {
-      console.error('Error summarizing library file:', err);
+      console.error('Error summarizing library file:', sanitizeError(err));
       await ctx.reply('❌ Sorry, I encountered an error reading or summarizing the file.');
     }
     return;
@@ -3462,25 +3484,28 @@ bot.on('message:text', async (ctx) => {
     const pending = userPendingAction.get(ctx.from.id);
     userPendingAction.delete(ctx.from.id);
 
-    if (pending.action === 'youtube') {
-      await handleYoutubeSearch(ctx, userMessage);
-      return;
-    }
-    if (pending.action === 'search') {
-      await handleWebSearch(ctx, userMessage);
-      return;
-    }
-    if (pending.action === 'download') {
-      await handleDownload(ctx, userMessage);
-      return;
-    }
-    if (pending.action === 'image') {
-      await handleImageGeneration(ctx, userMessage);
-      return;
-    }
-    if (pending.action === 'video') {
-      await handleVideoGeneration(ctx, userMessage);
-      return;
+    const isStale = pending.timestamp && (Date.now() - pending.timestamp > 5 * 60 * 1000);
+    if (!isStale) {
+      if (pending.action === 'youtube') {
+        await handleYoutubeSearch(ctx, userMessage);
+        return;
+      }
+      if (pending.action === 'search') {
+        await handleWebSearch(ctx, userMessage);
+        return;
+      }
+      if (pending.action === 'download') {
+        await handleDownload(ctx, userMessage);
+        return;
+      }
+      if (pending.action === 'image') {
+        await handleImageGeneration(ctx, userMessage);
+        return;
+      }
+      if (pending.action === 'video') {
+        await handleVideoGeneration(ctx, userMessage);
+        return;
+      }
     }
   }
 
@@ -3540,7 +3565,7 @@ const shutdown = (signal) => {
   try {
     bot.stop();
   } catch (err) {
-    console.error('Error stopping bot:', err);
+    console.error('Error stopping bot:', sanitizeError(err));
   }
 
   server.close(() => {

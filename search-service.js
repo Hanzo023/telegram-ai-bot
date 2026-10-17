@@ -186,7 +186,7 @@ async function getYtDlpCommand() {
  * with yt-dlp and DuckDuckGo fallbacks.
  */
 export async function searchYouTube(query, maxResults = 4) {
-  const sanitizedQuery = (query || '').replace(/["\\]/g, ' ').trim();
+  const sanitizedQuery = (query || '').replace(/["\\`$;|&><\r\n\t]/g, ' ').trim();
   if (!sanitizedQuery) return [];
 
   // Method 1: Direct native YouTube web scraping (0 dependencies, works on Render/Docker/every host)
@@ -306,7 +306,17 @@ export async function downloadMediaVideo(url, targetDir) {
     await fsp.mkdir(targetDir, { recursive: true });
   }
 
-  const cleanUrl = url.trim().replace(/["\\]/g, '');
+  let parsedUrl;
+  try {
+    parsedUrl = new URL((url || '').trim());
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      throw new Error('Invalid URL protocol');
+    }
+  } catch {
+    throw new Error('Invalid URL provided for video download.');
+  }
+
+  const cleanUrl = parsedUrl.href.replace(/["\\`$;|&><]/g, '');
   const timestamp = Date.now();
   const filePrefix = `video_${timestamp}`;
   const outTemplate = path.join(targetDir, `${filePrefix}_%(title).40s.%(ext)s`);
