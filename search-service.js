@@ -6,6 +6,15 @@ import { promises as fsp } from 'fs';
 
 const execPromise = util.promisify(exec);
 
+export function sanitizeError(err) {
+  if (!err) return '';
+  const msg = typeof err === 'string' ? err : err.message || String(err);
+  return msg
+    .replace(/(?:bot)?\d{8,11}:[A-Za-z0-9_-]{35}/g, '[REDACTED_TOKEN]')
+    .replace(/sk-(?:ant-)?[a-zA-Z0-9_\-]{20,}/g, '[REDACTED_TOKEN]')
+    .replace(/(?:AIza[0-9A-Za-z-_]{35}|AQ\.[A-Za-z0-9_\-]{30,})/g, '[REDACTED_TOKEN]');
+}
+
 // Standard Category Definitions
 export const FILE_CATEGORIES = {
   pdf: { id: 'pdf', name: '📄 PDF Documents', folder: 'pdf', icon: '📄' },
@@ -125,6 +134,7 @@ export async function searchWeb(query, maxResults = 5) {
   try {
     const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
     const res = await fetch(url, {
+      signal: AbortSignal.timeout(15000),
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -161,7 +171,7 @@ export async function searchWeb(query, maxResults = 5) {
 
     return results;
   } catch (err) {
-    console.error('Error during web search:', err.message);
+    console.error('Error during web search:', sanitizeError(err));
     return [];
   }
 }
@@ -193,6 +203,7 @@ export async function searchYouTube(query, maxResults = 4) {
   try {
     const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(sanitizedQuery);
     const res = await fetch(url, {
+      signal: AbortSignal.timeout(15000),
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -236,7 +247,7 @@ export async function searchYouTube(query, maxResults = 4) {
       }
     }
   } catch (err) {
-    console.warn('Native YouTube search warning:', err.message);
+    console.warn('Native YouTube search warning:', sanitizeError(err));
   }
 
   // Method 2: yt-dlp fallback
@@ -270,7 +281,7 @@ export async function searchYouTube(query, maxResults = 4) {
       return results;
     }
   } catch (err) {
-    console.warn('yt-dlp YouTube search warning, trying web fallback:', err.message);
+    console.warn('yt-dlp YouTube search warning, trying web fallback:', sanitizeError(err));
   }
 
   // Method 3: Graceful fallback using DuckDuckGo
@@ -292,7 +303,7 @@ export async function searchYouTube(query, maxResults = 4) {
     }
     return results;
   } catch (fallbackErr) {
-    console.error('All YouTube search methods failed:', fallbackErr.message);
+    console.error('All YouTube search methods failed:', sanitizeError(fallbackErr));
     return [];
   }
 }

@@ -67,7 +67,7 @@ try {
     }).catch(() => {});
   }
 } catch (dirErr) {
-  console.warn('Storage directory initialization note:', dirErr.message);
+  console.warn('Storage directory initialization note:', sanitizeError(dirErr));
 }
 
 const telegramToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
@@ -699,7 +699,7 @@ async function handleDownload(ctx, rawUrl) {
         const destPath = path.join(mediaDir, dlResult.fileName);
         await fsp.copyFile(dlResult.filePath, destPath);
       } catch (copyErr) {
-        console.warn('Could not copy downloaded video to local Drive D:', copyErr.message);
+        console.warn('Could not copy downloaded video to local Drive D:', sanitizeError(copyErr));
       }
     }
 
@@ -764,7 +764,10 @@ async function generateGeminiImage(prompt) {
   try {
     const encoded = encodeURIComponent(prompt.slice(0, 500));
     const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 100000)}`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'TelegramAIBot/1.0' } });
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(20000),
+      headers: { 'User-Agent': 'TelegramAIBot/1.0' },
+    });
     if (res.ok) {
       const arrayBuffer = await res.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
@@ -1053,7 +1056,7 @@ async function parseDocumentBuffer(buffer, fileExtension, fileName = '') {
       const result = await parser.getText();
       text = result.text ? result.text.trim() : '';
     } catch (pdfErr) {
-      console.warn('PDFParse extraction failed, trying Gemini OCR fallback:', pdfErr.message);
+      console.warn('PDFParse extraction failed, trying Gemini OCR fallback:', sanitizeError(pdfErr));
     }
 
     // If text extraction yielded nothing (e.g. scanned document, images of pages, or custom font encoding),
@@ -1168,7 +1171,7 @@ async function findDuplicateDocument(rawHash, textHash, currentFileName) {
       }
     }
   } catch (err) {
-    console.warn('Duplicate check in local storage notice:', err.message);
+    console.warn('Duplicate check in local storage notice:', sanitizeError(err));
   }
 
   return null;
@@ -1239,7 +1242,7 @@ async function extractDocumentContent(file, ctx, fileExtension) {
             localFileHashes.set(safeFileName, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
           }
         } catch (saveErr) {
-          console.warn('Could not auto-save file to Drive D storage:', saveErr.message);
+          console.warn('Could not auto-save file to Drive D storage:', sanitizeError(saveErr));
         }
       }
 
@@ -1259,7 +1262,7 @@ async function extractDocumentContent(file, ctx, fileExtension) {
           });
           console.log(`Saved document to Telegram Cloud Vault [${cat.name}]: ${safeFileName}`);
         } catch (vaultErr) {
-          console.warn('Could not save file to Telegram Cloud Vault:', vaultErr.message);
+          console.warn('Could not save file to Telegram Cloud Vault:', sanitizeError(vaultErr));
         }
       }
     }
@@ -1274,7 +1277,7 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       targetMode,
     };
   } catch (error) {
-    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+    const sanitizedMsg = sanitizeError(error);
     console.error('Error extracting document content:', sanitizedMsg);
     throw new Error(sanitizedMsg);
   }
@@ -1296,7 +1299,7 @@ async function persistCloudVault() {
   try {
     await fsp.writeFile(VAULT_FILE, JSON.stringify(cloudVault, null, 2), 'utf-8');
   } catch (err) {
-    console.warn('Failed to write cloud_vault.json to disk:', err.message);
+    console.warn('Failed to write cloud_vault.json to disk:', sanitizeError(err));
   }
 
   // Backup sync to Telegram pinned message so it survives Render ephemeral container resets
@@ -1355,7 +1358,7 @@ async function persistCloudVault() {
         } catch {}
       }
     } catch (syncErr) {
-      console.warn('Note: Telegram Cloud Vault sync note:', syncErr.message);
+      console.warn('Note: Telegram Cloud Vault sync note:', sanitizeError(syncErr));
     }
   }
 }
@@ -1388,7 +1391,7 @@ async function restoreVaultFromTelegram() {
       }
     }
   } catch (err) {
-    console.warn('Note: Cloud Vault sync from Telegram pinned message skipped:', err.message);
+    console.warn('Note: Cloud Vault sync from Telegram pinned message skipped:', sanitizeError(err));
   }
   return false;
 }
@@ -1404,7 +1407,7 @@ async function initCloudVault() {
       }
     }
   } catch (err) {
-    console.warn('Could not read cloud_vault.json:', err.message);
+    console.warn('Could not read cloud_vault.json:', sanitizeError(err));
   }
 
   // If local file is empty or missing, attempt to restore from Telegram pinned sync
@@ -1465,7 +1468,7 @@ async function loadCloudDocumentContent(fileId, fileExtension, fileName = '') {
     const buffer = await response.arrayBuffer();
     return await parseDocumentBuffer(buffer, fileExtension, fileName);
   } catch (error) {
-    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+    const sanitizedMsg = sanitizeError(error);
     console.error('Error loading cloud document:', sanitizedMsg);
     throw new Error(sanitizedMsg);
   }
@@ -3163,7 +3166,7 @@ bot.on('callback_query:data', async (ctx) => {
           await fsp.copyFile(dlResult.filePath, destPath);
           localSavedPath = destPath;
         } catch (copyErr) {
-          console.warn('Could not copy downloaded video to local Drive D:', copyErr.message);
+          console.warn('Could not copy downloaded video to local Drive D:', sanitizeError(copyErr));
         }
       }
 
@@ -3585,14 +3588,14 @@ process.once('SIGTERM', () => shutdown('SIGTERM'));
 try {
   await initCloudVault();
 } catch (vaultErr) {
-  console.warn('Vault initialization note:', vaultErr.message);
+  console.warn('Vault initialization note:', sanitizeError(vaultErr));
 }
 
 // Initialize Search & Research History
 try {
   await initSearchHistory();
 } catch (histErr) {
-  console.warn('History initialization note:', histErr.message);
+  console.warn('History initialization note:', sanitizeError(histErr));
 }
 
 // Register commands with Telegram so they appear in autocomplete menu when typing /
@@ -3616,7 +3619,7 @@ try {
   ]);
   console.log('Commands registered with Telegram');
 } catch (err) {
-  console.warn('Failed to register Telegram commands:', err.message);
+  console.warn('Failed to register Telegram commands:', sanitizeError(err));
 }
 
 async function startBotWithRetry() {
