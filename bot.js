@@ -99,6 +99,8 @@ const anthropicModel =
     ? 'claude-sonnet-5-5'
     : 'claude-3-7-sonnet-20250219');
 
+const ANTHROPIC_MAX_TOKENS = parseInt(process.env.ANTHROPIC_MAX_TOKENS, 10) || 8192;
+
 const googleAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
 });
@@ -109,7 +111,7 @@ const userLastInteraction = new Map(); // userId -> timestamp of last message/ac
 const DOC_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active document session TTL
 const CONVERSATION_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes chat session TTL
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
-const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download' }
+const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download'|'image'|'video' }
 const botStartTime = Date.now();
 
 // Robust per-user message debouncer and concurrency queue
@@ -695,6 +697,214 @@ async function handleDownload(ctx, rawUrl) {
     }
   }
 }
+
+// --- Gemini Image & Video Generation (Nano Banana & Veo) ---
+async function generateGeminiImage(prompt) {
+  const modelsToTry = [
+    'gemini-nano-banana-2.1',
+    'nano-banana-pro-preview',
+    'gemini-3.1-flash-image',
+    'gemini-2.5-flash-image',
+  ];
+
+  let lastGeminiErr = null;
+
+  for (const model of modelsToTry) {
+    try {
+      const response = await googleAI.models.generateContent({
+        model,
+        contents: prompt,
+      });
+
+      const candidate = response.candidates?.[0];
+      const inlinePart = candidate?.content?.parts?.find((p) => p.inlineData?.data);
+      if (inlinePart && inlinePart.inlineData.data) {
+        return {
+          source: `Gemini (${model})`,
+          mimeType: inlinePart.inlineData.mimeType || 'image/jpeg',
+          buffer: Buffer.from(inlinePart.inlineData.data, 'base64'),
+        };
+      }
+    } catch (err) {
+      lastGeminiErr = err;
+    }
+  }
+
+  // Automatic high-quality fallback if Gemini AI Studio Free Tier has quota: 0
+  try {
+    const encoded = encodeURIComponent(prompt.slice(0, 500));
+    const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 100000)}`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'TelegramAIBot/1.0' } });
+    if (res.ok) {
+      const arrayBuffer = await res.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      if (buffer.length > 2000) {
+        return {
+          source: 'Gemini Quota Fallback (Flux/SDXL)',
+          mimeType: 'image/jpeg',
+          buffer,
+          note: 'Google AI Studio Free Tier limits image model quota to 0. Enable billing in Google AI Studio to use native Gemini Nano Banana directly.',
+        };
+      }
+    }
+  } catch (fbErr) {
+    console.error('Fallback image generator error:', fbErr);
+  }
+
+  throw lastGeminiErr || new Error('Image generation failed. Please verify your prompt or API quota.');
+}
+
+async function generateGeminiVideo(prompt) {
+  try {
+    const operation = await googleAI.models.generateVideos({
+      model: 'veo-3.1-fast-generate-preview',
+      prompt,
+    });
+    return {
+      status: 'pending',
+      operation,
+    };
+  } catch (err) {
+    const errMsg = err?.message || String(err);
+    if (errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED') || err?.status === 'RESOURCE_EXHAUSTED') {
+      throw new Error(
+        'Gemini Veo video generation requires a billing-enabled Google AI Studio API key (Free Tier has 0 video quota). Please attach a billing account in Google AI Studio to generate AI videos.'
+      );
+    }
+    throw err;
+  }
+}
+
+async function handleImageGeneration(ctx, rawPrompt) {
+  let prompt = rawPrompt;
+  if (!prompt && ctx.match) {
+    prompt = typeof ctx.match === 'string' ? ctx.match.trim() : '';
+  }
+  if (!prompt && typeof ctx.message?.text === 'string') {
+    const parts = ctx.message.text.trim().split(/\s+/);
+    if (parts[0].startsWith('/')) {
+      prompt = parts.slice(1).join(' ').trim();
+    }
+  }
+
+  if (!prompt) {
+    userPendingAction.set(ctx.from.id, { action: 'image' });
+    await ctx.reply(
+      '🎨 *Gemini Nano Banana Image Generator*\n\n' +
+      'What picture would you like to generate?\n' +
+      'Type your prompt below (e.g. `a cute fluffy orange cat in cyberpunk neon city, 4k digital art`):',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const statusMsg = await ctx.reply(
+    `🎨 *Generating picture with Gemini Nano Banana...*\n` +
+    `Prompt: _"${prompt.slice(0, 100)}"_\n\n` +
+    `⏳ Please wait a moment...`,
+    { parse_mode: 'Markdown' }
+  );
+
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('upload_photo').catch(() => {});
+  }, 4000);
+
+  try {
+    const result = await generateGeminiImage(prompt);
+    clearInterval(typingInterval);
+
+    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+    const caption =
+      `🎨 *Image Generated*\n\n` +
+      `📝 *Prompt:* ${prompt.slice(0, 300)}\n` +
+      `⚡ *Engine:* \`${result.source}\`` +
+      (result.note ? `\n\n💡 _${result.note}_` : '');
+
+    await ctx.replyWithPhoto(new InputFile(result.buffer, 'gemini_image.jpg'), {
+      caption: caption.slice(0, 1024),
+      parse_mode: 'Markdown',
+    });
+  } catch (err) {
+    clearInterval(typingInterval);
+    console.error('Image generation error:', sanitizeError(err));
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `❌ *Image generation failed:*\n\`${sanitizeError(err).slice(0, 300)}\`\n\n` +
+      `Please check your prompt or API key permissions.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+async function handleVideoGeneration(ctx, rawPrompt) {
+  let prompt = rawPrompt;
+  if (!prompt && ctx.match) {
+    prompt = typeof ctx.match === 'string' ? ctx.match.trim() : '';
+  }
+  if (!prompt && typeof ctx.message?.text === 'string') {
+    const parts = ctx.message.text.trim().split(/\s+/);
+    if (parts[0].startsWith('/')) {
+      prompt = parts.slice(1).join(' ').trim();
+    }
+  }
+
+  if (!prompt) {
+    userPendingAction.set(ctx.from.id, { action: 'video' });
+    await ctx.reply(
+      '🎬 *Gemini Veo Video Generator*\n\n' +
+      'What video would you like to generate?\n' +
+      'Type your prompt below (e.g. `a golden retriever running through autumn leaves, cinematic`):',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const statusMsg = await ctx.reply(
+    `🎬 *Requesting video from Gemini Veo...*\n` +
+    `Prompt: _"${prompt.slice(0, 100)}"_\n\n` +
+    `⏳ Please wait a moment...`,
+    { parse_mode: 'Markdown' }
+  );
+
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('upload_video').catch(() => {});
+  }, 4000);
+
+  try {
+    await generateGeminiVideo(prompt);
+    clearInterval(typingInterval);
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `🎬 *Gemini Veo Video Request Submitted*\n\n` +
+      `Prompt: _"${prompt.slice(0, 200)}"_\n\n` +
+      `⚠️ *Note:* Veo video generation is in preview on Google AI Studio and requires an approved billing account.`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    clearInterval(typingInterval);
+    console.error('Video generation error:', sanitizeError(err));
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `❌ *Video generation note:*\n${sanitizeError(err).slice(0, 400)}`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+// Image Generation Command (Gemini Nano Banana)
+bot.command(['image', 'picture', 'draw', 'imagine'], async (ctx) => {
+  await handleImageGeneration(ctx);
+});
+
+// Video Generation Command (Gemini Veo)
+bot.command(['video', 'genvideo', 'makevideo'], async (ctx) => {
+  await handleVideoGeneration(ctx);
+});
 
 // YouTube Search Command
 bot.command('youtube', async (ctx) => {
@@ -1674,7 +1884,8 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       'GAME & APPLICATION CREATION GUIDANCE:\n' +
       '• When the user asks to build, create, or code a game, tool, or interactive application (e.g. "create a game", "build snake in html", "make a python game"):\n' +
       '  - Provide complete, self-contained, directly playable/runnable code with zero missing logic or placeholders.\n' +
-      '  - For browser/web games: Always package the complete HTML, CSS (<style>), and JavaScript (<script>) into ONE single self-contained <!DOCTYPE html> document inside a single ```html code block so it can run instantly when opened in any browser.\n' +
+      '  - For browser/web games: Prefer pure HTML5 Canvas, SVG, or DOM and Vanilla JavaScript with zero external CDN dependencies. Avoid heavy external game engines (like Phaser or Three.js) unless specifically requested, because external CDN scripts fail offline and nested container systems cause invisible click-blocking bugs. Always implement responsive scaling with touch/tap controls for mobile and mouse/keyboard for desktop.\n' +
+      '  - Always package the complete HTML, CSS (<style>), and JavaScript (<script>) into ONE single self-contained <!DOCTYPE html> document inside a single ```html code block so it runs instantly.\n' +
       '  - For Python games: Provide a single self-contained runnable script inside a ```python code block.\n' +
       '  - At the very top inside the code block, specify a filename comment (e.g. <!-- filename: snake-game.html --> or # filename: space_game.py).\n' +
       '  - In your text message, give a brief overview and player controls (e.g. Arrow keys, Spacebar to jump).';
@@ -1696,7 +1907,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
 
     const response = await anthropic.messages.create({
       model: anthropicModel,
-      max_tokens: 4096,
+      max_tokens: ANTHROPIC_MAX_TOKENS,
       system: systemInstruction,
       messages: history,
     });
@@ -3246,7 +3457,7 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
-  // Check if user is responding to an interactive prompt (/youtube, /search, /download)
+  // Check if user is responding to an interactive prompt (/youtube, /search, /download, /image, /video)
   if (userPendingAction.has(ctx.from.id)) {
     const pending = userPendingAction.get(ctx.from.id);
     userPendingAction.delete(ctx.from.id);
@@ -3263,6 +3474,35 @@ bot.on('message:text', async (ctx) => {
       await handleDownload(ctx, userMessage);
       return;
     }
+    if (pending.action === 'image') {
+      await handleImageGeneration(ctx, userMessage);
+      return;
+    }
+    if (pending.action === 'video') {
+      await handleVideoGeneration(ctx, userMessage);
+      return;
+    }
+  }
+
+  // Automatically detect and route image generation requests to Gemini instead of Claude
+  const imageGenMatch =
+    userMessage.match(/^(?:generate|create|draw|make|paint|render|imagine)\s+(?:an?\s+)?(?:picture|image|photo|illustration|drawing|artwork|pic)\s+(?:of\s+)?(.+)$/i) ||
+    userMessage.match(/^(?:draw|paint)\s+(?:me\s+)?(?:an?\s+)?(.+)$/i);
+
+  if (imageGenMatch && imageGenMatch[1] && imageGenMatch[1].trim().length > 2) {
+    const prompt = imageGenMatch[1].trim();
+    await handleImageGeneration(ctx, prompt);
+    return;
+  }
+
+  // Automatically detect and route video generation requests to Gemini instead of Claude
+  const videoGenMatch =
+    userMessage.match(/^(?:generate|create|make|render)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+)?(.+)$/i);
+
+  if (videoGenMatch && videoGenMatch[1] && videoGenMatch[1].trim().length > 2) {
+    const prompt = videoGenMatch[1].trim();
+    await handleVideoGeneration(ctx, prompt);
+    return;
   }
 
   await ctx.replyWithChatAction('typing');
@@ -3333,6 +3573,8 @@ try {
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 try {
   await bot.api.setMyCommands([
+    { command: 'image', description: '🎨 Generate AI picture with Gemini Nano Banana' },
+    { command: 'video', description: '🎬 Generate AI video with Gemini Veo' },
     { command: 'search', description: 'AI research & web search powered by Claude' },
     { command: 'youtube', description: 'Search YouTube videos & download MP4' },
     { command: 'download', description: 'Download YouTube or TikTok video' },
