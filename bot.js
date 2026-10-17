@@ -32,6 +32,27 @@ const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T0733
 const VAULT_FILE = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
 const TEMP_DOWNLOADS_DIR = path.resolve('./temp_downloads');
 
+const PORT = parseInt(process.env.PORT, 10) || 10000;
+const server = http.createServer((req, res) => {
+  // Always return 200 OK for any path (/, /health, /health/, /healthz, etc.) so Render health checks always pass
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-cache',
+    'Connection': 'close',
+  });
+  res.end(JSON.stringify({
+    status: 'ok',
+    bot: 'running',
+    path: req.url,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  }));
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`[HTTP Server] Health check server immediately listening on 0.0.0.0:${PORT}`);
+});
+
 try {
   if (!fs.existsSync(STORAGE_DIR)) {
     fs.mkdirSync(STORAGE_DIR, { recursive: true });
@@ -3262,21 +3283,6 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (err) => {
   console.error('[Uncaught Exception]:', sanitizeError(err));
-});
-
-const PORT = process.env.PORT || 10000;
-const server = http.createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', uptime: Math.floor(process.uptime()) }));
-  } else {
-    res.writeHead(404);
-    res.end();
-  }
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Health check server listening on 0.0.0.0:${PORT}`);
 });
 
 let isShuttingDown = false;
