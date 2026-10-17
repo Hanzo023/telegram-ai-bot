@@ -44,8 +44,15 @@ try {
 }
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
-const rawAllowedId = (process.env.ALLOWED_USER_ID || '').trim();
-const allowedUserId = rawAllowedId ? parseInt(rawAllowedId, 10) : null;
+const rawAllowedIds = (process.env.ALLOWED_USER_IDS || process.env.ALLOWED_USER_ID || '').trim();
+const allowedUserIds = new Set(
+  rawAllowedIds
+    .split(/[,;\s]+/)
+    .map((id) => parseInt(id, 10))
+    .filter((id) => !isNaN(id))
+);
+// Primary user ID for admin/vault operations (defaults to the first ID in the list)
+const allowedUserId = allowedUserIds.values().next().value || null;
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -287,7 +294,7 @@ const MEDIA_EXTENSIONS = ['mp4', 'webm', 'mkv', 'mov', 'avi', 'mp3', 'm4a', 'ogg
 const SUPPORTED_EXTENSIONS = [...TEXT_EXTENSIONS, ...IMAGE_EXTENSIONS, ...MEDIA_EXTENSIONS];
 
 bot.use(async (ctx, next) => {
-  if (!allowedUserId || ctx.from?.id !== allowedUserId) {
+  if (allowedUserIds.size === 0 || !allowedUserIds.has(ctx.from?.id)) {
     console.log(`Rejected message from unauthorized user: ${ctx.from?.id}`);
     return;
   }

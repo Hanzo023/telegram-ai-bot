@@ -5,8 +5,8 @@ import path from 'path';
 import { getFileCategory } from './search-service.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
-const rawAllowedId = (process.env.ALLOWED_USER_ID || '').trim();
-const allowedUserId = rawAllowedId ? parseInt(rawAllowedId, 10) : null;
+const rawAllowedId = (process.env.ALLOWED_USER_IDS || process.env.ALLOWED_USER_ID || '').trim();
+const allowedUserId = rawAllowedId ? parseInt(rawAllowedId.split(/[,;\s]+/)[0], 10) : null;
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   console.error('Error: TELEGRAM_BOT_TOKEN not found in environment');
