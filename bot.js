@@ -44,15 +44,21 @@ try {
 }
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
-const rawAllowedIds = (process.env.ALLOWED_USER_IDS || process.env.ALLOWED_USER_ID || '').trim();
-const allowedUserIds = new Set(
-  rawAllowedIds
-    .split(/[,;\s]+/)
-    .map((id) => parseInt(id, 10))
-    .filter((id) => !isNaN(id))
-);
-// Primary user ID for admin/vault operations (defaults to the first ID in the list)
+// Robust extraction of all allowed Telegram IDs from ALLOWED_USER_IDS and/or ALLOWED_USER_ID
+// Handles comma-separated, space-separated, quotes, brackets, and multiple variables
+const combinedAllowedRaw = [process.env.ALLOWED_USER_IDS, process.env.ALLOWED_USER_ID]
+  .filter(Boolean)
+  .join(',');
+const allowedIdMatches = combinedAllowedRaw.match(/-?\d+/g) || [];
+const allowedUserIds = new Set(allowedIdMatches.map((id) => parseInt(id, 10)));
+
+// Primary user ID for admin/vault backup operations (defaults to the first ID in the list)
 const allowedUserId = allowedUserIds.values().next().value || null;
+
+console.log(`[Config] Authorized Telegram User IDs: [${Array.from(allowedUserIds).join(', ')}]`);
+if (allowedUserIds.size === 0) {
+  console.warn('⚠️ WARNING: No valid ALLOWED_USER_ID configured! All incoming messages will be rejected.');
+}
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -294,8 +300,15 @@ const MEDIA_EXTENSIONS = ['mp4', 'webm', 'mkv', 'mov', 'avi', 'mp3', 'm4a', 'ogg
 const SUPPORTED_EXTENSIONS = [...TEXT_EXTENSIONS, ...IMAGE_EXTENSIONS, ...MEDIA_EXTENSIONS];
 
 bot.use(async (ctx, next) => {
-  if (allowedUserIds.size === 0 || !allowedUserIds.has(ctx.from?.id)) {
-    console.log(`Rejected message from unauthorized user: ${ctx.from?.id}`);
+  const fromId = ctx.from?.id;
+  const chatId = ctx.chat?.id;
+
+  const isAuthorized =
+    (fromId != null && allowedUserIds.has(Number(fromId))) ||
+    (chatId != null && allowedUserIds.has(Number(chatId)));
+
+  if (allowedUserIds.size === 0 || !isAuthorized) {
+    console.log(`[AUTH] Rejected message from unauthorized user: ${fromId ?? 'unknown'} (chat: ${chatId ?? 'unknown'})`);
     return;
   }
   await next();
