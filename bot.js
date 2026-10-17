@@ -375,11 +375,13 @@ bot.use(async (ctx, next) => {
   await next();
 });
 
-bot.command('start', async (ctx) => {
+bot.command(['start', 'help'], async (ctx) => {
   await ctx.reply(
     'Hello! I\'m your personal AI assistant powered by Claude.\n\n' +
     'Just send me any message, photo, document, or link and I\'ll help you right away!\n\n' +
     '✨ *What I can do for you:*\n' +
+    '• 🎨 **AI Image Generation**: Create pictures with Gemini Nano Banana using `/image`.\n' +
+    '• 🎬 **AI Video Generation**: Create videos with Gemini Veo using `/video`.\n' +
     '• 📸 **Photos & Screenshots**: Send any image or screenshot to analyze, transcribe, or translate.\n' +
     '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
     '• 🎥 **YouTube Research**: Search videos and download MP4s directly into chat.\n' +
@@ -387,6 +389,8 @@ bot.command('start', async (ctx) => {
     '• 📥 **Video Downloader**: Download YouTube or TikTok videos and save them to your Cloud Vault.\n' +
     '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
     '📌 *Commands:*\n' +
+    '/image <prompt> - 🎨 Generate pictures with Gemini Nano Banana\n' +
+    '/video <prompt> - 🎬 Generate videos with Gemini Veo\n' +
     '/search <query> - AI research & web search powered by Claude\n' +
     '/youtube <query> - Search YouTube videos & download MP4 directly\n' +
     '/download <url> - Download YouTube or TikTok video\n' +
@@ -1914,7 +1918,12 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       '  - Always package the complete HTML, CSS (<style>), and JavaScript (<script>) into ONE single self-contained <!DOCTYPE html> document inside a single ```html code block so it runs instantly.\n' +
       '  - For Python games: Provide a single self-contained runnable script inside a ```python code block.\n' +
       '  - At the very top inside the code block, specify a filename comment (e.g. <!-- filename: snake-game.html --> or # filename: space_game.py).\n' +
-      '  - In your text message, give a brief overview and player controls (e.g. Arrow keys, Spacebar to jump).';
+      '  - In your text message, give a brief overview and player controls (e.g. Arrow keys, Spacebar to jump).\n\n' +
+      'AI IMAGE & VIDEO GENERATION GUIDANCE:\n' +
+      '• You do NOT generate pictures, images, or videos directly in chat.\n' +
+      '• Image and video generation are handled exclusively by dedicated bot commands:\n' +
+      '  - If the user asks you to generate, create, make, or draw pictures or images, instruct them to use `/image <prompt>` (powered by Gemini Nano Banana).\n' +
+      '  - If the user asks you to generate or create videos, instruct them to use `/video <prompt>` (powered by Gemini Veo).';
 
     if (activeDoc && !isMultimodal) {
       const docExcerpt =
@@ -3512,24 +3521,51 @@ bot.on('message:text', async (ctx) => {
     }
   }
 
-  // Automatically detect and route image generation requests to Gemini instead of Claude
-  const imageGenMatch =
-    userMessage.match(/^(?:generate|create|draw|make|paint|render|imagine)\s+(?:an?\s+)?(?:picture|image|photo|illustration|drawing|artwork|pic)\s+(?:of\s+)?(.+)$/i) ||
-    userMessage.match(/^(?:draw|paint)\s+(?:me\s+)?(?:an?\s+)?(.+)$/i);
+  // Intercept natural language requests to generate pictures, videos, or "generate something" without the command,
+  // and instruct the user to use /image or /video instead.
+  const imageRequestMatch =
+    userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:generate|create|draw|make|paint|render|imagine)\s+(?:an?\s+)?(?:picture|image|photo|illustration|drawing|artwork|pic)s?(?:\s+(?:of|for|about)\s+(.+))?)$/i) ||
+    userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:draw|paint)\s+(?:me\s+)?(?:an?\s+)?(.+))$/i) ||
+    userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:generate|make|create)\s+(?:me\s+)?(?:a\s+)?pic(?:ture)?(?:s)?(?:\s+(?:of|for|about)\s+(.+))?)$/i);
 
-  if (imageGenMatch && imageGenMatch[1] && imageGenMatch[1].trim().length > 2) {
-    const prompt = imageGenMatch[1].trim();
-    await handleImageGeneration(ctx, prompt);
+  if (imageRequestMatch) {
+    const promptArg = (imageRequestMatch[1] || '').trim();
+    const example = promptArg ? `/image ${promptArg}` : '/image a cute fluffy cat in neon city, 4k digital art';
+    await ctx.reply(
+      '🎨 *To generate pictures, please use the `/image` command!*\n\n' +
+      `👉 Type:\n\`${example}\`\n\n` +
+      `💡 _You can also type \`/image\` and I will ask you for a prompt._`,
+      { parse_mode: 'Markdown' }
+    );
     return;
   }
 
-  // Automatically detect and route video generation requests to Gemini instead of Claude
-  const videoGenMatch =
-    userMessage.match(/^(?:generate|create|make|render)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+)?(.+)$/i);
+  const videoRequestMatch =
+    userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:generate|create|make|render)\s+(?:an?\s+)?(?:video|clip|animation|movie)s?(?:\s+(?:of|for|about)\s+(.+))?)$/i);
 
-  if (videoGenMatch && videoGenMatch[1] && videoGenMatch[1].trim().length > 2) {
-    const prompt = videoGenMatch[1].trim();
-    await handleVideoGeneration(ctx, prompt);
+  if (videoRequestMatch) {
+    const promptArg = (videoRequestMatch[1] || '').trim();
+    const example = promptArg ? `/video ${promptArg}` : '/video a golden retriever running through autumn leaves';
+    await ctx.reply(
+      '🎬 *To generate videos, please use the `/video` command!*\n\n' +
+      `👉 Type:\n\`${example}\`\n\n` +
+      `💡 _You can also type \`/video\` and I will ask you for a prompt._`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const generalGenMatch =
+    userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:generate|create|make)\s+(?:something|smth|stuff))$/i);
+
+  if (generalGenMatch) {
+    await ctx.reply(
+      '💡 *To generate pictures or videos, please use their commands:*\n\n' +
+      '• 🎨 *Pictures:* Use `/image <prompt>` (powered by Gemini Nano Banana)\n' +
+      '• 🎬 *Videos:* Use `/video <prompt>` (powered by Gemini Veo)\n\n' +
+      'Example:\n`/image a cozy cabin in snowy mountains, 4k digital art`',
+      { parse_mode: 'Markdown' }
+    );
     return;
   }
 
@@ -3599,28 +3635,36 @@ try {
 }
 
 // Register commands with Telegram so they appear in autocomplete menu when typing /
-try {
-  await bot.api.setMyCommands([
-    { command: 'image', description: '🎨 Generate AI picture with Gemini Nano Banana' },
-    { command: 'video', description: '🎬 Generate AI video with Gemini Veo' },
-    { command: 'search', description: 'AI research & web search powered by Claude' },
-    { command: 'youtube', description: 'Search YouTube videos & download MP4' },
-    { command: 'download', description: 'Download YouTube or TikTok video' },
-    { command: 'library', description: 'Browse Cloud Vault & Drive D files (A-Z)' },
-    { command: 'storage', description: 'Cloud Hub (Saved Files & Search History)' },
-    { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
-    { command: 'status', description: 'View system resources, loaded file & mode' },
-    { command: 'clear', description: 'Clear chat messages (keeps loaded file)' },
-    { command: 'clearall', description: 'Clear all chat & unload file safely' },
-    { command: 'nosave', description: 'Save new files to Drive D only' },
-    { command: 'cloud', description: 'Save new files to Cloud Vault only' },
-    { command: 'local', description: 'Save to both Drive D and Cloud Vault' },
-    { command: 'start', description: 'Show welcome message and help' },
-  ]);
-  console.log('Commands registered with Telegram');
-} catch (err) {
-  console.warn('Failed to register Telegram commands:', sanitizeError(err));
+const botCommands = [
+  { command: 'image', description: '🎨 Generate pictures with Gemini Nano Banana' },
+  { command: 'video', description: '🎬 Generate videos with Gemini Veo' },
+  { command: 'search', description: 'AI research & web search powered by Claude' },
+  { command: 'youtube', description: 'Search YouTube videos & download MP4' },
+  { command: 'download', description: 'Download YouTube or TikTok video' },
+  { command: 'library', description: 'Browse Cloud Vault & Drive D files (A-Z)' },
+  { command: 'storage', description: 'Cloud Hub (Saved Files & Search History)' },
+  { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
+  { command: 'status', description: 'View system resources, loaded file & mode' },
+  { command: 'clear', description: 'Clear chat messages (keeps loaded file)' },
+  { command: 'clearall', description: 'Clear all chat & unload file safely' },
+  { command: 'nosave', description: 'Save new files to Drive D only' },
+  { command: 'cloud', description: 'Save new files to Cloud Vault only' },
+  { command: 'local', description: 'Save to both Drive D and Cloud Vault' },
+  { command: 'start', description: 'Show welcome message and help' },
+  { command: 'help', description: 'Show list of commands and guide' },
+];
+
+async function registerTelegramCommands() {
+  try {
+    await bot.api.setMyCommands(botCommands);
+    await bot.api.setMyCommands(botCommands, { scope: { type: 'all_private_chats' } });
+    console.log('Commands successfully registered with Telegram (default + all_private_chats scopes)');
+  } catch (err) {
+    console.warn('Failed to register Telegram commands:', sanitizeError(err));
+  }
 }
+
+await registerTelegramCommands();
 
 async function startBotWithRetry() {
   let attempt = 0;
@@ -3629,8 +3673,9 @@ async function startBotWithRetry() {
       console.log('Starting Telegram bot polling...');
       await bot.start({
         drop_pending_updates: false,
-        onStart: (botInfo) => {
+        onStart: async (botInfo) => {
           console.log(`✅ Telegram bot @${botInfo.username} is running and polling for updates!`);
+          await registerTelegramCommands().catch(() => {});
         },
       });
       break;
