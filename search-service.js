@@ -253,7 +253,7 @@ export async function searchYouTube(query, maxResults = 4) {
   // Method 2: yt-dlp fallback
   try {
     const ytDlpCmd = await getYtDlpCommand();
-    const cmd = `${ytDlpCmd} --default-search "ytsearch${maxResults}" --dump-json --no-warnings --flat-playlist "${sanitizedQuery}"`;
+    const cmd = `${ytDlpCmd} --extractor-args "youtube:player_client=android" --no-check-certificates --geo-bypass --default-search "ytsearch${maxResults}" --dump-json --no-warnings --flat-playlist "${sanitizedQuery}"`;
     const { stdout } = await execPromise(cmd, { timeout: 20000 });
     const lines = stdout.trim().split('\n').filter(Boolean);
     const results = [];
@@ -334,16 +334,45 @@ export async function downloadMediaVideo(url, targetDir) {
 
   const ytDlpCmd = await getYtDlpCommand();
 
-  // yt-dlp format selection:
-  // Prefer mp4 under 40MB, fallback to best under 45MB, or best height <= 720
-  const cmd = `${ytDlpCmd} -f "bv*[filesize<40M]+ba[filesize<8M]/b[filesize<45M]/best[height<=720][ext=mp4]/best[ext=mp4]/best" --merge-output-format mp4 --no-playlist -o "${outTemplate}" "${cleanUrl}"`;
+  // Robust options for datacenter IPs (e.g. Render/AWS/GCP):
+  // 1. extractor-args "youtube:player_client=android" bypasses YouTube's bot sign-in requirement
+  // 2. format selection: 720p or best under Telegram's 50MB limit
+  // 3. no-check-certificates and geo-bypass prevent TLS and regional blocks
+  const baseFlags = [
+    '--no-playlist',
+    '--no-check-certificates',
+    '--geo-bypass',
+    '--merge-output-format mp4',
+    '--extractor-args "youtube:player_client=android"',
+    '--socket-timeout 30',
+  ].join(' ');
+
+  const primaryFormat = '-f "best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/best"';
+  const fallbackFormat = '-f "18/best[height<=480]/best"';
+
+  const primaryCmd = `${ytDlpCmd} ${baseFlags} ${primaryFormat} -o "${outTemplate}" "${cleanUrl}"`;
 
   console.log(`Starting media download for: ${cleanUrl} via ${ytDlpCmd}`);
-  await execPromise(cmd, { timeout: 180000 }); // 3 min timeout
+  try {
+    await execPromise(primaryCmd, { timeout: 180000 }); // 3 min timeout
+  } catch (primaryErr) {
+    console.warn('Primary download format failed, trying universal 360p fallback:', sanitizeError(primaryErr));
+    const fallbackCmd = `${ytDlpCmd} ${baseFlags} ${fallbackFormat} -o "${outTemplate}" "${cleanUrl}"`;
+    try {
+      await execPromise(fallbackCmd, { timeout: 180000 });
+    } catch (fbErr) {
+      const stderr = fbErr.stderr || fbErr.stdout || fbErr.message || '';
+      const matchError = stderr.match(/ERROR:\s*([^\n\r]+)/i);
+      const cleanErrorMsg = matchError ? matchError[1].trim() : (stderr.split('\n').filter(Boolean).pop() || 'Video download failed.');
+      throw new Error(cleanErrorMsg);
+    }
+  }
 
-  // Find the downloaded file
+  // Find the downloaded file (excluding in-progress or partial files)
   const files = await fsp.readdir(targetDir);
-  const downloadedFileName = files.find((f) => f.startsWith(filePrefix));
+  const downloadedFileName = files.find(
+    (f) => f.startsWith(filePrefix) && !f.endsWith('.part') && !f.endsWith('.ytdl')
+  );
 
   if (!downloadedFileName) {
     throw new Error('Downloaded video file could not be located.');
