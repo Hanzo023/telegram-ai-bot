@@ -117,7 +117,7 @@ const userLastInteraction = new Map(); // userId -> timestamp of last message/ac
 const DOC_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active document session TTL
 const CONVERSATION_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes chat session TTL
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
-const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download'|'image'|'video', timestamp: number }
+const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download'|'image', timestamp: number }
 const userCachedFilesList = new Map(); // userId -> array of cached library files
 const botStartTime = Date.now();
 
@@ -381,7 +381,6 @@ bot.command(['start', 'help'], async (ctx) => {
     'Just send me any message, photo, document, or link and I\'ll help you right away!\n\n' +
     '✨ *What I can do for you:*\n' +
     '• 🎨 **AI Image Generation**: Create pictures with Gemini Nano Banana using `/image`.\n' +
-    '• 🎬 **AI Video Generation**: Create videos with Gemini Veo using `/video`.\n' +
     '• 📸 **Photos & Screenshots**: Send any image or screenshot to analyze, transcribe, or translate.\n' +
     '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
     '• 🎥 **YouTube Research**: Search videos and download MP4s directly into chat.\n' +
@@ -390,7 +389,6 @@ bot.command(['start', 'help'], async (ctx) => {
     '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
     '📌 *Commands:*\n' +
     '/image <prompt> - 🎨 Generate pictures with Gemini Nano Banana\n' +
-    '/video <prompt> - 🎬 Generate videos with Gemini Veo\n' +
     '/search <query> - AI research & web search powered by Claude\n' +
     '/youtube <query> - Search YouTube videos & download MP4 directly\n' +
     '/download <url> - Download YouTube or TikTok video\n' +
@@ -732,7 +730,7 @@ async function handleDownload(ctx, rawUrl) {
   }
 }
 
-// --- Gemini Image & Video Generation (Nano Banana & Veo) ---
+// --- Gemini Image Generation (Nano Banana) ---
 async function generateGeminiImage(prompt) {
   const modelsToTry = [
     'gemini-nano-banana-2.1',
@@ -789,27 +787,6 @@ async function generateGeminiImage(prompt) {
   }
 
   throw lastGeminiErr || new Error('Image generation failed. Please verify your prompt or API quota.');
-}
-
-async function generateGeminiVideo(prompt) {
-  try {
-    const operation = await googleAI.models.generateVideos({
-      model: 'veo-3.1-fast-generate-preview',
-      prompt,
-    });
-    return {
-      status: 'pending',
-      operation,
-    };
-  } catch (err) {
-    const errMsg = err?.message || String(err);
-    if (errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED') || err?.status === 'RESOURCE_EXHAUSTED') {
-      throw new Error(
-        'Gemini Veo video generation requires a billing-enabled Google AI Studio API key (Free Tier has 0 video quota). Please attach a billing account in Google AI Studio to generate AI videos.'
-      );
-    }
-    throw err;
-  }
 }
 
 async function handleImageGeneration(ctx, rawPrompt) {
@@ -875,72 +852,9 @@ async function handleImageGeneration(ctx, rawPrompt) {
   }
 }
 
-async function handleVideoGeneration(ctx, rawPrompt) {
-  let prompt = rawPrompt;
-  if (!prompt && ctx.match) {
-    prompt = typeof ctx.match === 'string' ? ctx.match.trim() : '';
-  }
-  if (!prompt && typeof ctx.message?.text === 'string') {
-    const parts = ctx.message.text.trim().split(/\s+/);
-    if (parts[0].startsWith('/')) {
-      prompt = parts.slice(1).join(' ').trim();
-    }
-  }
-
-  if (!prompt) {
-    userPendingAction.set(ctx.from.id, { action: 'video', timestamp: Date.now() });
-    await ctx.reply(
-      '🎬 *Gemini Veo Video Generator*\n\n' +
-      'What video would you like to generate?\n' +
-      'Type your prompt below (e.g. `a golden retriever running through autumn leaves, cinematic`):',
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-
-  const statusMsg = await ctx.reply(
-    `🎬 *Requesting video from Gemini Veo...*\n` +
-    `Prompt: _"${prompt.slice(0, 100)}"_\n\n` +
-    `⏳ Please wait a moment...`,
-    { parse_mode: 'Markdown' }
-  );
-
-  const typingInterval = setInterval(() => {
-    ctx.replyWithChatAction('upload_video').catch(() => {});
-  }, 4000);
-
-  try {
-    await generateGeminiVideo(prompt);
-
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      `🎬 *Gemini Veo Video Request Submitted*\n\n` +
-      `Prompt: _"${prompt.slice(0, 200)}"_\n\n` +
-      `⚠️ *Note:* Veo video generation is in preview on Google AI Studio and requires an approved billing account.`,
-      { parse_mode: 'Markdown' }
-    );
-  } catch (err) {
-    console.error('Video generation error:', sanitizeError(err));
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      `❌ *Video generation note:*\n${sanitizeError(err).slice(0, 400)}`,
-      { parse_mode: 'Markdown' }
-    );
-  } finally {
-    clearInterval(typingInterval);
-  }
-}
-
 // Image Generation Command (Gemini Nano Banana)
 bot.command(['image', 'picture', 'draw', 'imagine'], async (ctx) => {
   await handleImageGeneration(ctx);
-});
-
-// Video Generation Command (Gemini Veo)
-bot.command(['video', 'genvideo', 'makevideo'], async (ctx) => {
-  await handleVideoGeneration(ctx);
 });
 
 // YouTube Search Command
@@ -1919,11 +1833,11 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       '  - For Python games: Provide a single self-contained runnable script inside a ```python code block.\n' +
       '  - At the very top inside the code block, specify a filename comment (e.g. <!-- filename: snake-game.html --> or # filename: space_game.py).\n' +
       '  - In your text message, give a brief overview and player controls (e.g. Arrow keys, Spacebar to jump).\n\n' +
-      'AI IMAGE & VIDEO GENERATION GUIDANCE:\n' +
-      '• You do NOT generate pictures, images, or videos directly in chat.\n' +
-      '• Image and video generation are handled exclusively by dedicated bot commands:\n' +
+      'AI IMAGE GENERATION GUIDANCE:\n' +
+      '• You do NOT generate pictures or images directly in chat.\n' +
+      '• Image generation is handled exclusively by the dedicated bot command:\n' +
       '  - If the user asks you to generate, create, make, or draw pictures or images, instruct them to use `/image <prompt>` (powered by Gemini Nano Banana).\n' +
-      '  - If the user asks you to generate or create videos, instruct them to use `/video <prompt>` (powered by Gemini Veo).';
+      '  - If the user asks about generating videos, let them know AI video generation is not supported and they can generate pictures using `/image <prompt>`.';
 
     if (activeDoc && !isMultimodal) {
       const docExcerpt =
@@ -3514,15 +3428,11 @@ bot.on('message:text', async (ctx) => {
         await handleImageGeneration(ctx, userMessage);
         return;
       }
-      if (pending.action === 'video') {
-        await handleVideoGeneration(ctx, userMessage);
-        return;
-      }
     }
   }
 
   // Intercept natural language requests to generate pictures, videos, or "generate something" without the command,
-  // and instruct the user to use /image or /video instead.
+  // and instruct the user to use /image instead.
   const imageRequestMatch =
     userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:generate|create|draw|make|paint|render|imagine)\s+(?:an?\s+)?(?:picture|image|photo|illustration|drawing|artwork|pic)s?(?:\s+(?:of|for|about)\s+(.+))?)$/i) ||
     userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:draw|paint)\s+(?:me\s+)?(?:an?\s+)?(.+))$/i) ||
@@ -3544,12 +3454,10 @@ bot.on('message:text', async (ctx) => {
     userMessage.match(/^(?:(?:can\s+you\s+|please\s+)?(?:generate|create|make|render)\s+(?:an?\s+)?(?:video|clip|animation|movie)s?(?:\s+(?:of|for|about)\s+(.+))?)$/i);
 
   if (videoRequestMatch) {
-    const promptArg = (videoRequestMatch[1] || '').trim();
-    const example = promptArg ? `/video ${promptArg}` : '/video a golden retriever running through autumn leaves';
     await ctx.reply(
-      '🎬 *To generate videos, please use the `/video` command!*\n\n' +
-      `👉 Type:\n\`${example}\`\n\n` +
-      `💡 _You can also type \`/video\` and I will ask you for a prompt._`,
+      '🎬 *AI Video Generation is currently disabled.*\n\n' +
+      '💡 You can generate pictures with Gemini Nano Banana using `/image <prompt>`!\n\n' +
+      'Example:\n`/image a cozy cabin in snowy mountains, 4k digital art`',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -3560,9 +3468,8 @@ bot.on('message:text', async (ctx) => {
 
   if (generalGenMatch) {
     await ctx.reply(
-      '💡 *To generate pictures or videos, please use their commands:*\n\n' +
-      '• 🎨 *Pictures:* Use `/image <prompt>` (powered by Gemini Nano Banana)\n' +
-      '• 🎬 *Videos:* Use `/video <prompt>` (powered by Gemini Veo)\n\n' +
+      '🎨 *Looking to generate pictures?*\n\n' +
+      'Use the `/image <prompt>` command (powered by Gemini Nano Banana)!\n\n' +
       'Example:\n`/image a cozy cabin in snowy mountains, 4k digital art`',
       { parse_mode: 'Markdown' }
     );
@@ -3637,7 +3544,6 @@ try {
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 const botCommands = [
   { command: 'image', description: '🎨 Generate pictures with Gemini Nano Banana' },
-  { command: 'video', description: '🎬 Generate videos with Gemini Veo' },
   { command: 'search', description: 'AI research & web search powered by Claude' },
   { command: 'youtube', description: 'Search YouTube videos & download MP4' },
   { command: 'download', description: 'Download YouTube or TikTok video' },
