@@ -16,6 +16,8 @@ import {
   searchWeb,
   searchYouTube,
   downloadMediaVideo,
+  formatDownloadErrorMessage,
+  cleanupTemporaryCookies,
 } from './search-service.js';
 
 import {
@@ -720,7 +722,7 @@ async function handleDownload(ctx, rawUrl) {
     await ctx.api.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
-      `❌ *Download failed:*\n\`${sanitizeError(err).slice(0, 200)}\`\n\nPlease check the link and try again.`,
+      formatDownloadErrorMessage(err),
       { parse_mode: 'Markdown' }
     );
   } finally {
@@ -1546,6 +1548,7 @@ function sanitizeAndCheckSecrets(text, context = 'content') {
     'STORAGE_DIR',
     'ALLOWED_USER_ID',
     'ALLOWED_USER_IDS',
+    'YOUTUBE_COOKIES',
   ];
 
   for (const envKey of secretEnvKeys) {
@@ -2983,9 +2986,12 @@ bot.on('callback_query:data', async (ctx) => {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
     } catch (err) {
       console.error('History download error:', sanitizeError(err));
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `❌ *Download failed:* \`${sanitizeError(err).slice(0, 150)}\``, {
-        parse_mode: 'Markdown',
-      });
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        formatDownloadErrorMessage(err),
+        { parse_mode: 'Markdown' }
+      );
     } finally {
       if (dlResult?.filePath) {
         await fsp.unlink(dlResult.filePath).catch(() => {});
@@ -3130,7 +3136,7 @@ bot.on('callback_query:data', async (ctx) => {
       await ctx.api.editMessageText(
         ctx.chat.id,
         statusMsg.message_id,
-        `❌ *Download failed:*\n\`${sanitizeError(err).slice(0, 200)}\``,
+        formatDownloadErrorMessage(err),
         { parse_mode: 'Markdown' }
       );
     } finally {
@@ -3405,7 +3411,7 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
-  // Check if user is responding to an interactive prompt (/youtube, /search, /download, /image, /video)
+  // Check if user is responding to an interactive prompt (/youtube, /search, /download, /image)
   if (userPendingAction.has(ctx.from.id)) {
     const pending = userPendingAction.get(ctx.from.id);
     userPendingAction.delete(ctx.from.id);
@@ -3513,6 +3519,8 @@ const shutdown = (signal) => {
   } catch (err) {
     console.error('Error stopping bot:', sanitizeError(err));
   }
+
+  cleanupTemporaryCookies().catch(() => {});
 
   server.close(() => {
     console.log('Health check server closed');

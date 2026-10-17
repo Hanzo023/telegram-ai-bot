@@ -1,18 +1,24 @@
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import util from 'util';
 import path from 'path';
 import fs from 'fs';
 import { promises as fsp } from 'fs';
+import os from 'os';
 
 const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 
 export function sanitizeError(err) {
   if (!err) return '';
   const msg = typeof err === 'string' ? err : err.message || String(err);
-  return msg
+  let res = msg
     .replace(/(?:bot)?\d{8,11}:[A-Za-z0-9_-]{35}/g, '[REDACTED_TOKEN]')
     .replace(/sk-(?:ant-)?[a-zA-Z0-9_\-]{20,}/g, '[REDACTED_TOKEN]')
     .replace(/(?:AIza[0-9A-Za-z-_]{35}|AQ\.[A-Za-z0-9_\-]{30,})/g, '[REDACTED_TOKEN]');
+  if (process.env.YOUTUBE_COOKIES && process.env.YOUTUBE_COOKIES.length >= 8) {
+    res = res.split(process.env.YOUTUBE_COOKIES.trim()).join('[REDACTED_SECRET]');
+  }
+  return res;
 }
 
 // Standard Category Definitions
@@ -176,19 +182,67 @@ export async function searchWeb(query, maxResults = 5) {
   }
 }
 
-let cachedYtDlpCmd = null;
+let cachedYtDlpRunner = null;
 
-async function getYtDlpCommand() {
-  if (cachedYtDlpCmd) return cachedYtDlpCmd;
-  const candidates = ['yt-dlp', 'python -m yt_dlp', 'python3 -m yt_dlp'];
-  for (const cmd of candidates) {
+export async function getYtDlpRunner() {
+  if (cachedYtDlpRunner) return cachedYtDlpRunner;
+  const candidates = [
+    { bin: 'yt-dlp', args: [] },
+    { bin: 'python3', args: ['-m', 'yt_dlp'] },
+    { bin: 'python', args: ['-m', 'yt_dlp'] },
+  ];
+  for (const c of candidates) {
     try {
-      await execPromise(`${cmd} --version`, { timeout: 3000 });
-      cachedYtDlpCmd = cmd;
-      return cmd;
+      await execFilePromise(c.bin, [...c.args, '--version'], { timeout: 4000 });
+      cachedYtDlpRunner = c;
+      return c;
     } catch {}
   }
-  return 'python -m yt_dlp';
+  cachedYtDlpRunner = { bin: 'yt-dlp', args: [] };
+  return cachedYtDlpRunner;
+}
+
+let cachedCookiePath = null;
+
+export async function getCookiesFilePath() {
+  // 1. Check if cookies.txt exists in root directory
+  const rootCookiePath = path.join(process.cwd(), 'cookies.txt');
+  if (fs.existsSync(rootCookiePath)) {
+    return rootCookiePath;
+  }
+
+  // 2. Check cached cookie path
+  if (cachedCookiePath && fs.existsSync(cachedCookiePath)) {
+    return cachedCookiePath;
+  }
+
+  // 3. Check if YOUTUBE_COOKIES is defined in environment variables
+  const envCookies = process.env.YOUTUBE_COOKIES;
+  if (envCookies && envCookies.trim()) {
+    const tmpCookiePath = path.join(os.tmpdir(), 'yt_cookies.txt');
+    let content = envCookies.trim();
+    // Auto-detect base64 encoded cookies
+    if (!content.includes('# Netscape') && !content.includes('\t')) {
+      try {
+        const decoded = Buffer.from(content, 'base64').toString('utf8');
+        if (decoded.includes('# Netscape') || decoded.includes('\t')) {
+          content = decoded;
+        }
+      } catch {}
+    }
+    await fsp.writeFile(tmpCookiePath, content, { encoding: 'utf8', mode: 0o600 });
+    cachedCookiePath = tmpCookiePath;
+    return tmpCookiePath;
+  }
+
+  return null;
+}
+
+export async function cleanupTemporaryCookies() {
+  if (cachedCookiePath && fs.existsSync(cachedCookiePath)) {
+    await fsp.unlink(cachedCookiePath).catch(() => {});
+    cachedCookiePath = null;
+  }
 }
 
 /**
@@ -252,9 +306,25 @@ export async function searchYouTube(query, maxResults = 4) {
 
   // Method 2: yt-dlp fallback
   try {
-    const ytDlpCmd = await getYtDlpCommand();
-    const cmd = `${ytDlpCmd} --extractor-args "youtube:player_client=android" --no-check-certificates --geo-bypass --default-search "ytsearch${maxResults}" --dump-json --no-warnings --flat-playlist "${sanitizedQuery}"`;
-    const { stdout } = await execPromise(cmd, { timeout: 20000 });
+    const runner = await getYtDlpRunner();
+    const cookiePath = await getCookiesFilePath();
+    const ytArgs = [
+      ...runner.args,
+      '--no-check-certificates',
+      '--geo-bypass',
+      '--default-search', `ytsearch${maxResults}`,
+      '--dump-json',
+      '--no-warnings',
+      '--flat-playlist',
+    ];
+    if (cookiePath && fs.existsSync(cookiePath)) {
+      ytArgs.push('--cookies', cookiePath);
+    } else {
+      ytArgs.push('--extractor-args', 'youtube:player_client=android,ios,mweb');
+    }
+    ytArgs.push(sanitizedQuery);
+
+    const { stdout } = await execFilePromise(runner.bin, ytArgs, { timeout: 20000 });
     const lines = stdout.trim().split('\n').filter(Boolean);
     const results = [];
 
@@ -328,44 +398,111 @@ export async function downloadMediaVideo(url, targetDir) {
   }
 
   const cleanUrl = parsedUrl.href.replace(/["\\`$;|&><]/g, '');
+  const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(cleanUrl);
   const timestamp = Date.now();
   const filePrefix = `video_${timestamp}`;
   const outTemplate = path.join(targetDir, `${filePrefix}_%(title).40s.%(ext)s`);
 
-  const ytDlpCmd = await getYtDlpCommand();
+  const runner = await getYtDlpRunner();
+  const cookiePath = await getCookiesFilePath();
 
-  // Robust options for datacenter IPs (e.g. Render/AWS/GCP):
-  // 1. extractor-args "youtube:player_client=android" bypasses YouTube's bot sign-in requirement
-  // 2. format selection: 720p or best under Telegram's 50MB limit
-  // 3. no-check-certificates and geo-bypass prevent TLS and regional blocks
-  const baseFlags = [
+  // Base options for datacenter IPs and cloud hosting
+  const baseArgs = [
+    ...runner.args,
     '--no-playlist',
     '--no-check-certificates',
     '--geo-bypass',
-    '--merge-output-format mp4',
-    '--extractor-args "youtube:player_client=android"',
-    '--socket-timeout 30',
-  ].join(' ');
+    '--no-progress',
+    '--socket-timeout', '30',
+  ];
 
-  const primaryFormat = '-f "best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/best"';
-  const fallbackFormat = '-f "18/best[height<=480]/best"';
+  if (cookiePath && fs.existsSync(cookiePath)) {
+    baseArgs.push('--cookies', cookiePath);
+  } else if (isYouTube) {
+    baseArgs.push(
+      '--extractor-args', 'youtube:player_client=android,ios,mweb',
+      '--add-header', 'User-Agent:Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+      '--add-header', 'Accept-Language:en-US,en;q=0.9'
+    );
+  }
 
-  const primaryCmd = `${ytDlpCmd} ${baseFlags} ${primaryFormat} -o "${outTemplate}" "${cleanUrl}"`;
+  console.log(`Starting media download for: ${cleanUrl} (cookies: ${Boolean(cookiePath)})`);
 
-  console.log(`Starting media download for: ${cleanUrl} via ${ytDlpCmd}`);
+  const execOpts = { timeout: 180000, maxBuffer: 10 * 1024 * 1024 };
+  let lastError = null;
+
+  // Step 1: Attempt primary format (720p MP4 or best under 50MB)
   try {
-    await execPromise(primaryCmd, { timeout: 180000 }); // 3 min timeout
+    const primaryArgs = [
+      ...baseArgs,
+      '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/best',
+      '--merge-output-format', 'mp4',
+      '-o', outTemplate,
+      cleanUrl,
+    ];
+    await execFilePromise(runner.bin, primaryArgs, execOpts);
   } catch (primaryErr) {
-    console.warn('Primary download format failed, trying universal 360p fallback:', sanitizeError(primaryErr));
-    const fallbackCmd = `${ytDlpCmd} ${baseFlags} ${fallbackFormat} -o "${outTemplate}" "${cleanUrl}"`;
+    lastError = primaryErr;
+    console.warn('Primary download format failed, trying 360p fallback:', sanitizeError(primaryErr));
+
+    // Step 2: Fallback to universal 360p (itag 18)
     try {
-      await execPromise(fallbackCmd, { timeout: 180000 });
+      const fallbackArgs = [
+        ...baseArgs,
+        '-f', '18/best[height<=480]/best',
+        '--merge-output-format', 'mp4',
+        '-o', outTemplate,
+        cleanUrl,
+      ];
+      await execFilePromise(runner.bin, fallbackArgs, execOpts);
+      lastError = null;
     } catch (fbErr) {
-      const stderr = fbErr.stderr || fbErr.stdout || fbErr.message || '';
-      const matchError = stderr.match(/ERROR:\s*([^\n\r]+)/i);
-      const cleanErrorMsg = matchError ? matchError[1].trim() : (stderr.split('\n').filter(Boolean).pop() || 'Video download failed.');
-      throw new Error(cleanErrorMsg);
+      lastError = fbErr;
+      console.warn('Fallback download failed:', sanitizeError(fbErr));
+
+      // Step 3: If YouTube and no cookies, try forcing iOS client as last resort
+      if (isYouTube && !cookiePath) {
+        try {
+          const iosArgs = [
+            ...runner.args,
+            '--no-playlist',
+            '--no-check-certificates',
+            '--geo-bypass',
+            '--no-progress',
+            '--extractor-args', 'youtube:player_client=ios',
+            '-f', 'best[ext=mp4]/18/best',
+            '-o', outTemplate,
+            cleanUrl,
+          ];
+          await execFilePromise(runner.bin, iosArgs, execOpts);
+          lastError = null;
+        } catch (iosErr) {
+          lastError = iosErr;
+        }
+      }
     }
+  }
+
+  if (lastError) {
+    // Clean up any incomplete or partial files matching this download's filePrefix
+    try {
+      const leftoverFiles = await fsp.readdir(targetDir);
+      for (const f of leftoverFiles) {
+        if (f.startsWith(filePrefix)) {
+          await fsp.unlink(path.join(targetDir, f)).catch(() => {});
+        }
+      }
+    } catch {}
+
+    const stderr = lastError.stderr || lastError.stdout || lastError.message || '';
+    if (/sign in to confirm you(?:'|’|&#39;)?re not a bot/i.test(stderr) || /cookies/i.test(stderr)) {
+      throw new Error(
+        "YOUTUBE_BOT_PROTECTION: YouTube requires account cookies to download on cloud servers (Render)."
+      );
+    }
+    const matchError = stderr.match(/ERROR:\s*([^\n\r]+)/i);
+    const cleanErrorMsg = matchError ? matchError[1].trim() : (stderr.split('\n').filter(Boolean).pop() || 'Video download failed.');
+    throw new Error(sanitizeError(cleanErrorMsg));
   }
 
   // Find the downloaded file (excluding in-progress or partial files)
@@ -375,6 +512,14 @@ export async function downloadMediaVideo(url, targetDir) {
   );
 
   if (!downloadedFileName) {
+    try {
+      const leftoverFiles = await fsp.readdir(targetDir);
+      for (const f of leftoverFiles) {
+        if (f.startsWith(filePrefix)) {
+          await fsp.unlink(path.join(targetDir, f)).catch(() => {});
+        }
+      }
+    } catch {}
     throw new Error('Downloaded video file could not be located.');
   }
 
@@ -387,4 +532,22 @@ export async function downloadMediaVideo(url, targetDir) {
     fileSize: stats.size,
     isOverTelegramLimit: stats.size > 50 * 1024 * 1024,
   };
+}
+
+export function formatDownloadErrorMessage(err) {
+  const msg = typeof err === 'string' ? err : err?.message || String(err || '');
+  if (/sign in to confirm you(?:'|’|&#39;)?re not a bot/i.test(msg) || /YOUTUBE_BOT_PROTECTION/i.test(msg) || /--cookies/i.test(msg)) {
+    return (
+      `⚠️ *YouTube Cloud Server Protection*\n\n` +
+      `YouTube blocks automated downloads from cloud servers (Render) without account cookies.\n\n` +
+      `💡 *How to enable YouTube downloads in 1 minute:*\n` +
+      `1️⃣ Install the *Get cookies.txt LOCALLY* extension on your browser (Chrome/Edge/Firefox).\n` +
+      `2️⃣ Open YouTube, click the extension icon, and copy the cookie text.\n` +
+      `3️⃣ In Render Dashboard ➔ *Environment* ➔ Add Environment Variable:\n` +
+      `   *Key:* \`YOUTUBE_COOKIES\`\n` +
+      `   *Value:* *(paste cookie text)*\n\n` +
+      `Once saved, Render will restart and YouTube downloads will work permanently! 🚀`
+    );
+  }
+  return `❌ *Download failed:*\n\`${sanitizeError(msg).slice(0, 200)}\`\n\nPlease check the link and try again.`;
 }

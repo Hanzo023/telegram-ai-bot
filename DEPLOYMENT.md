@@ -36,6 +36,7 @@ In the **Environment Variables** section on Render, add the variables from your 
 - `ANTHROPIC_API_KEY`: `your_anthropic_api_key`
 - `ANTHROPIC_BASE_URL`: `https://api.anthropic.com` (or your custom proxy URL)
 - `GEMINI_API_KEY`: `your_gemini_api_key`
+- `YOUTUBE_COOKIES`: *(Optional)* Netscape format cookies text from the *Get cookies.txt LOCALLY* browser extension to bypass YouTube datacenter bot checks on Render.
 
 Click **Deploy Web Service**.
 
