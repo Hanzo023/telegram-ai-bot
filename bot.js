@@ -1308,6 +1308,249 @@ function sanitizeConversationHistory(history, hasActiveDoc = false) {
   }
 }
 
+function extractCodeBlocks(text) {
+  if (!text || typeof text !== 'string') return [];
+  const codeBlockRegex = /```([a-zA-Z0-9_+-]*)\r?\n([\s\S]*?)```/g;
+  const blocks = [];
+  let match;
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    blocks.push({
+      lang: (match[1] || '').trim().toLowerCase(),
+      code: match[2],
+      fullMatch: match[0],
+      startIndex: match.index,
+      endIndex: match.index + match[0].length,
+    });
+  }
+  return blocks;
+}
+
+function sanitizeAndCheckSecrets(text, context = 'content') {
+  if (!text || typeof text !== 'string') return { safeText: text, wasClean: true };
+  let safeText = text;
+  let wasClean = true;
+
+  const secretEnvKeys = [
+    'TELEGRAM_BOT_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'GEMINI_API_KEY',
+    'GOOGLE_API_KEY',
+    'STORAGE_DIR',
+  ];
+
+  for (const envKey of secretEnvKeys) {
+    const val = (process.env[envKey] || '').trim();
+    if (val.length >= 8 && safeText.includes(val)) {
+      wasClean = false;
+      console.warn(`[SECURITY ALERT] Prevented leak of ${envKey} in ${context}`);
+      safeText = safeText.split(val).join('[REDACTED_SECRET]');
+    }
+  }
+
+  const secretPatterns = [
+    /bot\d+:[A-Za-z0-9_-]{35}/g,
+    /sk-[a-zA-Z0-9_\-]{24,}/g,
+    /AIza[0-9A-Za-z-_]{35}/g,
+  ];
+
+  for (const pat of secretPatterns) {
+    if (pat.test(safeText)) {
+      wasClean = false;
+      console.warn(`[SECURITY ALERT] Prevented secret pattern match in ${context}`);
+      safeText = safeText.replace(pat, '[REDACTED_TOKEN]');
+    }
+  }
+
+  return { safeText, wasClean };
+}
+
+async function bundleCodeWithGemini(claudeResponseText, userPrompt) {
+  if (!googleAI) return null;
+  const prompt =
+    `The user asked: "${userPrompt}"\n\n` +
+    `Another AI provided the following game/application code and explanation, but it is split into separate snippets or requires manual assembly:\n\n` +
+    `"""\n${claudeResponseText}\n"""\n\n` +
+    `Task: Group, combine, and bundle all the code into ONE single, complete, fully-functional, self-contained, directly runnable file (for browser games, merge into one <!DOCTYPE html> with inline <style> and <script>; for Python, merge into one runnable .py script).\n` +
+    `Rules:\n` +
+    `1. Do NOT omit any logic, functions, styles, or features.\n` +
+    `2. Return ONLY the code inside a single markdown code block with the language identifier (e.g. \`\`\`html or \`\`\`python).\n` +
+    `3. On the very first line inside the code block, include a filename comment (e.g. <!-- filename: game.html --> or # filename: game.py).\n` +
+    `4. Do not include conversational intro or outro.`;
+
+  try {
+    const res = await callGeminiWithRetry(() =>
+      googleAI.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+      })
+    );
+    const text = (res.text || '').trim();
+    return text || null;
+  } catch (err) {
+    console.error('Gemini code bundling fallback error:', err);
+    return null;
+  }
+}
+
+async function handleGameAndCodeDelivery(ctx, assistantMessage, userContent) {
+  const userPromptText =
+    typeof userContent === 'string'
+      ? userContent
+      : Array.isArray(userContent)
+      ? userContent.map((p) => p.text || '').join(' ')
+      : '';
+
+  const blocks = extractCodeBlocks(assistantMessage);
+  if (blocks.length === 0) return false;
+
+  const isGameQuery = /\b(game|play|playable|arcade|rpg|puzzle|pong|snake|tetris|flappy|tictactoe|pacman|minesweeper|runner|chess|checkers)\b/i.test(
+    userPromptText
+  );
+  const isAppQuery =
+    /\b(build|make|create|write|code|generate)\b/i.test(userPromptText) &&
+    /\b(app|application|script|tool|program|webpage|page|calculator|clock)\b/i.test(userPromptText);
+  const asksSaveToFile = /(save\s+(this\s+)?(as|in|into|to)\s+(a\s+)?(file|index\.html|game\.html|\.html|\.py|\.js))/i.test(
+    assistantMessage
+  );
+  const hasFullHtmlDoc =
+    /<!DOCTYPE\s+html/i.test(assistantMessage) ||
+    (/<html[\s>]/i.test(assistantMessage) && /<\/html>/i.test(assistantMessage));
+
+  if (!isGameQuery && !isAppQuery && !asksSaveToFile && !hasFullHtmlDoc) {
+    return false;
+  }
+
+  // 1. Check if Claude already provided a complete self-contained file:
+  let finalCode = null;
+  let codeLang = 'html';
+
+  const completeHtmlBlock = blocks.find(
+    (b) =>
+      (b.lang === 'html' || b.code.includes('<!DOCTYPE') || (b.code.includes('<html') && b.code.includes('</html>'))) &&
+      b.code.includes('<script') &&
+      b.code.length >= 250
+  );
+
+  const completePyBlock = blocks.find(
+    (b) =>
+      (b.lang === 'python' || b.lang === 'py') &&
+      (b.code.includes('def ') || b.code.includes('if __name__') || b.code.includes('import ') || b.code.includes('while ')) &&
+      b.code.length >= 200
+  );
+
+  if (completeHtmlBlock) {
+    finalCode = completeHtmlBlock.code;
+    codeLang = 'html';
+  } else if (completePyBlock) {
+    finalCode = completePyBlock.code;
+    codeLang = 'python';
+  } else if (blocks.length === 1 && blocks[0].code.length >= 250) {
+    finalCode = blocks[0].code;
+    codeLang = blocks[0].lang || 'html';
+  }
+
+  // 2. If Claude was NOT able to provide a single complete file (fragmented snippets or multi-part code):
+  // Fall back to Gemini 3.8 Flash to bundle and group into a single file
+  if (!finalCode && googleAI) {
+    console.log('Claude output requires code bundling; invoking Gemini 3.8 Flash to group into a single file...');
+    const geminiBundled = await bundleCodeWithGemini(assistantMessage, userPromptText);
+    if (geminiBundled) {
+      const geminiBlocks = extractCodeBlocks(geminiBundled);
+      if (geminiBlocks.length > 0) {
+        finalCode = geminiBlocks[0].code;
+        codeLang = geminiBlocks[0].lang || 'html';
+      } else if (geminiBundled.includes('<!DOCTYPE') || geminiBundled.includes('<html')) {
+        finalCode = geminiBundled;
+        codeLang = 'html';
+      }
+    }
+  }
+
+  // Fallback to largest block if Gemini is unavailable
+  if (!finalCode) {
+    const largestBlock = blocks.reduce((prev, curr) => (curr.code.length > prev.code.length ? curr : prev), blocks[0]);
+    finalCode = largestBlock.code;
+    codeLang = largestBlock.lang || 'html';
+  }
+
+  // 3. Security Check: ensure NO secrets or tokens leak into the file or message
+  const { safeText: safeCode, wasClean: codeClean } = sanitizeAndCheckSecrets(finalCode, 'generated_file');
+  if (!codeClean) {
+    console.warn('[SECURITY] Scrubbed secret pattern from generated file.');
+  }
+
+  // 4. Derive an appropriate filename
+  let fileName = '';
+  const commentNameMatch = safeCode.match(/(?:<!--|[\/\*#])\s*filename:\s*([\w.-]+)/i);
+  if (commentNameMatch && commentNameMatch[1]) {
+    fileName = commentNameMatch[1].trim();
+  } else if (codeLang === 'html' || safeCode.includes('<!DOCTYPE') || safeCode.includes('<html')) {
+    const titleMatch = safeCode.match(/<title>(.*?)<\/title>/i);
+    if (titleMatch && titleMatch[1]) {
+      const slug = titleMatch[1]
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      fileName = slug ? `${slug}.html` : 'game.html';
+    } else {
+      fileName = 'game.html';
+    }
+  } else if (codeLang === 'python' || codeLang === 'py') {
+    fileName = 'game.py';
+  } else if (codeLang === 'javascript' || codeLang === 'js') {
+    fileName = 'game.js';
+  } else {
+    fileName = `game.${codeLang || 'html'}`;
+  }
+
+  const safeFileName = path.basename(fileName).replace(/[\/\\]/g, '') || 'game.html';
+
+  // 5. Write to temporary file and send via Telegram document
+  if (!fs.existsSync(TEMP_DOWNLOADS_DIR)) {
+    await fsp.mkdir(TEMP_DOWNLOADS_DIR, { recursive: true });
+  }
+  const tempFilePath = path.join(TEMP_DOWNLOADS_DIR, safeFileName);
+
+  try {
+    await fsp.writeFile(tempFilePath, safeCode, 'utf8');
+
+    await ctx.replyWithChatAction('upload_document');
+    try {
+      await ctx.replyWithDocument(new InputFile(tempFilePath, safeFileName), {
+        caption: `🎮 *${safeFileName.replace(/_/g, ' ')}*\nReady to play! Open or run this file on your device.`,
+        parse_mode: 'Markdown',
+      });
+    } catch {
+      await ctx.replyWithDocument(new InputFile(tempFilePath, safeFileName), {
+        caption: `🎮 ${safeFileName}\nReady to play! Open or run this file on your device.`,
+      });
+    }
+
+    // 6. Clean companion message for chat: replace the giant raw code blocks with a clean callout
+    let companionText = assistantMessage;
+    for (const b of blocks) {
+      companionText = companionText.replace(
+        b.fullMatch,
+        `\n\n📦 *Game code packaged into the attached file above! Open or run \`${safeFileName}\` to play.*`
+      );
+    }
+    companionText = companionText.trim();
+    if (!companionText || companionText.length < 5) {
+      companionText = `🎮 *Your game has been created and sent as a file above!* Simply open or run \`${safeFileName}\` to play.`;
+    }
+
+    const { safeText: safeCompanionText } = sanitizeAndCheckSecrets(companionText, 'companion_message');
+    await sendLongMessage(ctx, safeCompanionText);
+
+    return true;
+  } catch (err) {
+    console.error('Error delivering game/code file to Telegram:', err);
+    return false;
+  } finally {
+    await fsp.unlink(tempFilePath).catch(() => {});
+  }
+}
+
 async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   const userId = ctx.from.id;
   const q = getUserQueue(userId);
@@ -1363,7 +1606,14 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       '  - If something in an image is unclear or cannot be determined, directly state what is unclear about the image itself. NEVER speculate about unrelated files or previous coding tasks.\n\n' +
       'STRICT CONTEXT ACCURACY:\n' +
       '• NEVER assume or hallucinate the existence of external files, documents, or "Python file" unless one is explicitly loaded and provided in this prompt.\n' +
-      '• Do not invent references to code files, programming scripts, or past files when responding to photos, screenshots, or general chat questions.';
+      '• Do not invent references to code files, programming scripts, or past files when responding to photos, screenshots, or general chat questions.\n\n' +
+      'GAME & APPLICATION CREATION GUIDANCE:\n' +
+      '• When the user asks to build, create, or code a game, tool, or interactive application (e.g. "create a game", "build snake in html", "make a python game"):\n' +
+      '  - Provide complete, self-contained, directly playable/runnable code with zero missing logic or placeholders.\n' +
+      '  - For browser/web games: Always package the complete HTML, CSS (<style>), and JavaScript (<script>) into ONE single self-contained <!DOCTYPE html> document inside a single ```html code block so it can run instantly when opened in any browser.\n' +
+      '  - For Python games: Provide a single self-contained runnable script inside a ```python code block.\n' +
+      '  - At the very top inside the code block, specify a filename comment (e.g. <!-- filename: snake-game.html --> or # filename: space_game.py).\n' +
+      '  - In your text message, give a brief overview and player controls (e.g. Arrow keys, Spacebar to jump).';
 
     if (activeDoc && !isMultimodal) {
       const docExcerpt =
@@ -1382,7 +1632,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
 
     const response = await anthropic.messages.create({
       model: anthropicModel,
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: systemInstruction,
       messages: history,
     });
@@ -1426,7 +1676,11 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       }
     }
 
-    await sendLongMessage(ctx, assistantMessage);
+    const deliveredAsFile = await handleGameAndCodeDelivery(ctx, assistantMessage, content);
+    if (!deliveredAsFile) {
+      const { safeText: safeAssistantMsg } = sanitizeAndCheckSecrets(assistantMessage, 'chat_reply');
+      await sendLongMessage(ctx, safeAssistantMsg);
+    }
   } catch (error) {
     clearInterval(typingInterval);
     console.error('Error calling Claude API:', error.status, error.message);
