@@ -32,6 +32,7 @@ import {
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
 const VAULT_FILE = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
+const CONVERSATION_HISTORY_FILE = process.env.CONVERSATION_HISTORY_FILE || path.resolve('./conversation_history.json');
 const TEMP_DOWNLOADS_DIR = path.resolve('./temp_downloads');
 
 const PORT = parseInt(process.env.PORT, 10) || 10000;
@@ -117,16 +118,132 @@ const conversationHistory = new Map();
 const userLastDocument = new Map();
 const userLastInteraction = new Map(); // userId -> timestamp of last message/activity
 const DOC_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active document session TTL
-const CONVERSATION_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes chat session TTL
+const CONVERSATION_SESSION_TIMEOUT_HOURS = parseFloat(process.env.CONVERSATION_SESSION_TIMEOUT_HOURS) || 24;
+const CONVERSATION_SESSION_TIMEOUT_MS = CONVERSATION_SESSION_TIMEOUT_HOURS * 60 * 60 * 1000; // 24 hours chat session TTL
+const MAX_HISTORY_MESSAGES = parseInt(process.env.MAX_HISTORY_MESSAGES, 10) || 50; // up to 25 full conversation turns
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
 const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download'|'image', timestamp: number }
 const userCachedFilesList = new Map(); // userId -> array of cached library files
 const botStartTime = Date.now();
 
+let persistConversationHistoryTimer = null;
+
+function scheduleConversationHistoryPersistence() {
+  if (persistConversationHistoryTimer) return;
+  persistConversationHistoryTimer = setTimeout(async () => {
+    persistConversationHistoryTimer = null;
+    await persistConversationHistory();
+  }, 1000).unref();
+}
+
+function serializeHistoryForDisk(history) {
+  if (!Array.isArray(history)) return [];
+  return history.slice(-MAX_HISTORY_MESSAGES).map((msg) => {
+    if (typeof msg.content === 'string') {
+      return { role: msg.role, content: msg.content };
+    }
+    if (Array.isArray(msg.content)) {
+      const textChunks = [];
+      for (const part of msg.content) {
+        if (part && part.type === 'text' && part.text) {
+          textChunks.push(part.text);
+        } else if (part && part.type === 'image') {
+          textChunks.push('[Attached image previously analyzed in chat]');
+        }
+      }
+      return { role: msg.role, content: textChunks.join('\n\n') || '[Attached content]' };
+    }
+    return { role: msg.role, content: String(msg.content || '') };
+  });
+}
+
+async function persistConversationHistory() {
+  try {
+    const sessionsObj = {};
+    const now = Date.now();
+    for (const [userId, history] of conversationHistory.entries()) {
+      const lastActive = userLastInteraction.get(userId) || now;
+      if (now - lastActive > CONVERSATION_SESSION_TIMEOUT_MS) {
+        continue;
+      }
+      if (Array.isArray(history) && history.length > 0) {
+        sessionsObj[userId] = {
+          lastInteraction: lastActive,
+          history: serializeHistoryForDisk(history),
+        };
+      }
+    }
+    const tempFile = `${CONVERSATION_HISTORY_FILE}.tmp`;
+    await fsp.writeFile(tempFile, JSON.stringify({ version: 1, sessions: sessionsObj }, null, 2), 'utf-8');
+    await fsp.rename(tempFile, CONVERSATION_HISTORY_FILE);
+  } catch (err) {
+    console.warn('Failed to persist conversation_history.json:', sanitizeError(err));
+  }
+}
+
+function persistConversationHistorySync() {
+  try {
+    const sessionsObj = {};
+    const now = Date.now();
+    for (const [userId, history] of conversationHistory.entries()) {
+      const lastActive = userLastInteraction.get(userId) || now;
+      if (now - lastActive > CONVERSATION_SESSION_TIMEOUT_MS) {
+        continue;
+      }
+      if (Array.isArray(history) && history.length > 0) {
+        sessionsObj[userId] = {
+          lastInteraction: lastActive,
+          history: serializeHistoryForDisk(history),
+        };
+      }
+    }
+    fs.writeFileSync(CONVERSATION_HISTORY_FILE, JSON.stringify({ version: 1, sessions: sessionsObj }, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Failed to write conversation_history.json on shutdown:', sanitizeError(err));
+  }
+}
+
+async function initConversationHistory() {
+  try {
+    if (fs.existsSync(CONVERSATION_HISTORY_FILE)) {
+      const raw = await fsp.readFile(CONVERSATION_HISTORY_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const sessions = parsed?.sessions || parsed;
+      if (sessions && typeof sessions === 'object') {
+        const now = Date.now();
+        let loadedCount = 0;
+        for (const [userIdStr, sessionData] of Object.entries(sessions)) {
+          const uId = Number(userIdStr);
+          if (!uId) continue;
+          const lastActive = sessionData?.lastInteraction || 0;
+          if (now - lastActive > CONVERSATION_SESSION_TIMEOUT_MS) {
+            continue;
+          }
+          const hist = Array.isArray(sessionData.history) ? sessionData.history : [];
+          if (hist.length > 0) {
+            while (hist.length > 0 && hist[0].role !== 'user') {
+              hist.shift();
+            }
+            if (hist.length > 0) {
+              conversationHistory.set(uId, hist);
+              userLastInteraction.set(uId, lastActive);
+              loadedCount++;
+            }
+          }
+        }
+        console.log(`Loaded conversation history for ${loadedCount} active user(s) from disk.`);
+      }
+    }
+  } catch (err) {
+    console.warn('Could not read conversation_history.json:', sanitizeError(err));
+  }
+}
+
 // Periodic background memory sweeper to prune stale sessions (unref'd so process exits cleanly)
 const SESSION_SWEEPER_INTERVAL_MS = 15 * 60 * 1000;
 setInterval(() => {
   const now = Date.now();
+  let historyChanged = false;
   for (const [userId, lastTime] of userLastInteraction.entries()) {
     if (now - lastTime > CONVERSATION_SESSION_TIMEOUT_MS) {
       conversationHistory.delete(userId);
@@ -134,12 +251,16 @@ setInterval(() => {
       userCachedFilesList.delete(userId);
       userPendingAction.delete(userId);
       userLastInteraction.delete(userId);
+      historyChanged = true;
     }
   }
   for (const [userId, pending] of userPendingAction.entries()) {
     if (pending.timestamp && now - pending.timestamp > 5 * 60 * 1000) {
       userPendingAction.delete(userId);
     }
+  }
+  if (historyChanged) {
+    scheduleConversationHistoryPersistence();
   }
 }, SESSION_SWEEPER_INTERVAL_MS).unref();
 
@@ -415,6 +536,7 @@ async function handleClearAll(ctx) {
   userLastInteraction.delete(userId);
   userPendingAction.delete(userId);
   userCachedFilesList.delete(userId);
+  scheduleConversationHistoryPersistence();
 
   await ctx.reply(
     '✅ *All chat history & loaded documents cleared!*\n\n' +
@@ -440,6 +562,7 @@ bot.command('clear', async (ctx) => {
 
   conversationHistory.delete(userId);
   userLastInteraction.delete(userId);
+  scheduleConversationHistoryPersistence();
 
   const activeDoc = await getOrAutoLoadDocument(userId);
   if (activeDoc) {
@@ -1781,9 +1904,10 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   const now = Date.now();
   const lastActive = userLastInteraction.get(userId) || 0;
   if (lastActive > 0 && now - lastActive > CONVERSATION_SESSION_TIMEOUT_MS) {
-    // 30-minute idle expiration: reset conversation history and loaded document
+    // Session expiration: reset conversation history and loaded document
     conversationHistory.delete(userId);
     userLastDocument.delete(userId);
+    scheduleConversationHistoryPersistence();
   }
   userLastInteraction.set(userId, now);
 
@@ -1800,6 +1924,11 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   const activeDoc = await getOrAutoLoadDocument(userId);
   const history = conversationHistory.get(userId);
 
+  // Guarantee history starts with a user message for Anthropic API requirements
+  while (history.length > 0 && history[0].role !== 'user') {
+    history.shift();
+  }
+
   // Sanitize prior turns in history so stale/hallucinated Python references don't poison new queries
   sanitizeConversationHistory(history, !!activeDoc);
 
@@ -1815,6 +1944,10 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   try {
     let systemInstruction =
       'You are a helpful, expert AI assistant. Keep responses direct, clear, and thoughtful.\n\n' +
+      'CONVERSATION CONTINUITY & MEMORY:\n' +
+      '• You maintain an ongoing, full-context conversation with this user.\n' +
+      '• Read and consider the ENTIRE previous dialogue in `messages` to understand the full context.\n' +
+      '• When the user asks follow-up questions, refers to "earlier", "what you said", pronouns ("it", "they", "that"), or builds upon previous topics, seamlessly draw upon the context of the entire conversation without asking them to re-explain.\n\n' +
       'LANGUAGE & TRANSLATION GUIDANCE:\n' +
       '• When the user asks to translate or shares phonetic phrases, romaji, lyrics, slang, or foreign words (e.g. Japanese, Khmer, Spanish, French, etc.):\n' +
       '  - Never give flat refusals or say you cannot translate simply because spelling or romanization is informal, phonetic, or approximate.\n' +
@@ -1877,9 +2010,15 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       content: assistantMessage,
     });
 
-    if (history.length > 20) {
+    while (history.length > MAX_HISTORY_MESSAGES) {
       history.splice(0, 2);
     }
+    while (history.length > 0 && history[0].role !== 'user') {
+      history.shift();
+    }
+
+    // Persist conversation history to disk
+    scheduleConversationHistoryPersistence();
 
     // Prune older base64 image payloads to save tokens, but ALWAYS preserve the most recent image
     // so follow-up questions ("what does this mean?", "explain this error") retain visual context.
@@ -1912,6 +2051,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
     console.error('Error calling Claude API:', error.status, sanitizeError(error));
 
     history.pop();
+    scheduleConversationHistoryPersistence();
 
     await ctx.reply(
       '❌ Sorry, I encountered an error processing your request. Please try again.',
@@ -3520,6 +3660,12 @@ const shutdown = (signal) => {
     console.error('Error stopping bot:', sanitizeError(err));
   }
 
+  try {
+    persistConversationHistorySync();
+  } catch (err) {
+    console.error('Error flushing conversation history on shutdown:', sanitizeError(err));
+  }
+
   cleanupTemporaryCookies().catch(() => {});
 
   server.close(() => {
@@ -3547,6 +3693,13 @@ try {
   await initSearchHistory();
 } catch (histErr) {
   console.warn('History initialization note:', sanitizeError(histErr));
+}
+
+// Initialize Persistent Conversation History
+try {
+  await initConversationHistory();
+} catch (convErr) {
+  console.warn('Conversation history initialization note:', sanitizeError(convErr));
 }
 
 // Register commands with Telegram so they appear in autocomplete menu when typing /

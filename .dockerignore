@@ -4,5 +4,9 @@ node_modules
 !.env.example
 *.log
 cloud_vault.json
+search_history.json
+conversation_history.json
+conversation_history.json.tmp
+temp_downloads/
 .git
 .claude

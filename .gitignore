@@ -5,6 +5,8 @@ node_modules/
 *.log
 cloud_vault.json
 search_history.json
+conversation_history.json
+conversation_history.json.tmp
 temp_downloads/
 *.bak
 .claude/
