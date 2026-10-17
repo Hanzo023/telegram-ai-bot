@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mystic Quest - Fixed</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #0b0c10;
+            color: #fff;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        #game-container {
+            width: 100%;
+            height: 100%;
+            max-width: 600px;
+            max-height: 1000px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        canvas {
+            display: block;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+    </style>
+    <!-- Phaser 3 library -->
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+</head>
+<body>
+    <div id="game-container"></div>
+
+    <script>
+        // Boot Scene
+        class BootScene extends Phaser.Scene {
+            constructor() {
+                super('Boot');
+            }
+
+            create() {
+                this.scene.start('MainMenu');
+            }
+        }
+
+        // Main Menu Scene
+        class MainMenuScene extends Phaser.Scene {
+            constructor() {
+                super('MainMenu');
+            }
+
+            create() {
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                // Background
+                this.add.rectangle(width / 2, height / 2, width, height, 0x141824);
+
+                // Title
+                this.add.text(width / 2, height / 3.2, 'MYSTIC QUEST', {
+                    fontSize: '64px',
+                    fontFamily: 'Impact, sans-serif',
+                    color: '#00d4ff',
+                    align: 'center',
+                }).setOrigin(0.5);
+
+                // Subtitle
+                this.add.text(width / 2, height / 2.5, '⚔️ An Epic Adventure Awaits ⚔️', {
+                    fontSize: '28px',
+                    fontFamily: 'Arial',
+                    color: '#e0e0e0',
+                    align: 'center'
+                }).setOrigin(0.5);
+
+                // Play Button
+                const playButton = this.add.rectangle(width / 2, height / 1.7, 320, 90, 0x00d4ff)
+                    .setInteractive({ useHandCursor: true })
+                    .on('pointerover', () => playButton.setFillStyle(0x38ef7d))
+                    .on('pointerout', () => playButton.setFillStyle(0x00d4ff))
+                    .on('pointerdown', () => this.scene.start('Game'));
+
+                this.add.text(width / 2, height / 1.7, 'START GAME', {
+                    fontSize: '36px',
+                    fontFamily: 'Arial',
+                    color: '#000000',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                // Instructions
+                this.add.text(width / 2, height * 0.85, 'Explore • Speak with NPCs • Defeat Beasts • Restore the Crystal', {
+                    fontSize: '20px',
+                    fontFamily: 'Arial',
+                    color: '#8fa0b5',
+                    align: 'center',
+                    wordWrap: { width: width - 80 }
+                }).setOrigin(0.5);
+            }
+        }
+
+        // Main Game Scene
+        class GameScene extends Phaser.Scene {
+            constructor() {
+                super('Game');
+            }
+
+            create() {
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                // Game state
+                this.currentArea = 'village';
+                this.inventory = { key: false, crystal: false, herb: false };
+                this.quests = { 
+                    findKey: true, 
+                    defeatEnemy: false, 
+                    getHerb: false, 
+                    findCrystal: false 
+                };
+                this.enemyDefeated = false;
+
+                // Interactive elements tracking arrays to solve Phaser container invisible hit-test bug
+                this.villageInteractives = [];
+                this.forestInteractives = [];
+                this.templeInteractives = [];
+
+                // Create areas
+                this.areas = {};
+                this.createVillageArea();
+                this.createForestArea();
+                this.createTempleArea();
+
+                // Create HUD UI
+                this.createUI();
+
+                // Show village initially and enable only village interactives
+                this.showArea('village');
+            }
+
+            createVillageArea() {
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                this.areas.village = this.add.container(0, 0);
+
+                // Sky
+                this.areas.village.add(this.add.rectangle(width / 2, height / 2, width, height, 0x5c94fc));
+
+                // Sun
+                this.areas.village.add(this.add.circle(width - 120, 150, 60, 0xffeb3b));
+
+                // Ground
+                this.areas.village.add(this.add.rectangle(width / 2, height - 250, width, 500, 0x8b7355));
+
+                // Houses
+                const house1 = this.add.rectangle(180, height - 420, 220, 240, 0x8b4513);
+                const roof1 = this.add.triangle(180, height - 570, 0, 100, 110, 0, 220, 100, 0xa0522d);
+                this.areas.village.add([house1, roof1]);
+
+                const house2 = this.add.rectangle(width - 180, height - 390, 240, 220, 0xa0522d);
+                const roof2 = this.add.triangle(width - 180, height - 530, 0, 100, 120, 0, 240, 100, 0x8b4513);
+                this.areas.village.add([house2, roof2]);
+
+                // Elder NPC
+                const elder = this.add.text(200, height - 480, '👴', {
+                    fontSize: '90px',
+                    padding: { x: 10, y: 10 }
+                }).setOrigin(0.5);
+                elder.on('pointerdown', () => this.startDialogue('elder'));
+
+                const elderLabel = this.add.text(200, height - 390, 'Elder', {
+                    fontSize: '22px',
+                    fontFamily: 'Arial',
+                    color: '#ffffff',
+                    backgroundColor: 'rgba(0,0,0,0.7)',
+                    padding: { x: 12, y: 4 },
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+                this.areas.village.add([elder, elderLabel]);
+                this.villageInteractives.push(elder);
+
+                // Merchant NPC
+                const merchant = this.add.text(width - 200, height - 440, '🧙', {
+                    fontSize: '90px',
+                    padding: { x: 10, y: 10 }
+                }).setOrigin(0.5);
+                merchant.on('pointerdown', () => this.startDialogue('merchant'));
+
+                const merchantLabel = this.add.text(width - 200, height - 360, 'Alchemist', {
+                    fontSize: '22px',
+                    fontFamily: 'Arial',
+                    color: '#ffffff',
+                    backgroundColor: 'rgba(0,0,0,0.7)',
+                    padding: { x: 12, y: 4 },
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+                this.areas.village.add([merchant, merchantLabel]);
+                this.villageInteractives.push(merchant);
+
+                // Key item (hidden in village)
+                const key = this.add.text(width / 2, height - 320, '🔑', {
+                    fontSize: '65px'
+                }).setOrigin(0.5);
+                key.on('pointerdown', () => {
+                    if (!this.inventory.key) {
+                        this.inventory.key = true;
+                        key.setVisible(false);
+                        this.villageInteractives = this.villageInteractives.filter(i => i !== key);
+                        this.showNotification('✨ Found the Ancient Key! ✨');
+                        this.quests.findKey = false;
+                        this.quests.defeatEnemy = true;
+                        this.quests.getHerb = true;
+                        this.quests.findCrystal = true;
+                        this.updateQuestUI();
+                    }
+                });
+                this.areas.village.add(key);
+                this.keyItem = key;
+                this.villageInteractives.push(key);
+
+                // Exit to forest
+                const forestExitBtn = this.add.rectangle(width / 2, height - 90, 340, 70, 0x11998e, 0.95);
+                const forestExitText = this.add.text(width / 2, height - 90, '🌲 ENTER FOREST →', {
+                    fontSize: '26px',
+                    fontFamily: 'Arial',
+                    color: '#ffffff',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+                const forestExit = this.add.container(0, 0, [forestExitBtn, forestExitText]);
+                forestExitBtn.setInteractive({ useHandCursor: true });
+                forestExitBtn.on('pointerdown', () => this.showArea('forest'));
+
+                this.areas.village.add(forestExit);
+                this.villageInteractives.push(forestExitBtn);
+            }
+
+            createForestArea() {
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                this.areas.forest = this.add.container(0, 0);
+
+                // Background
+                this.areas.forest.add(this.add.rectangle(width / 2, height / 2, width, height, 0x0f381e));
+
+                // Forest Trees
+                const treePositions = [
+                    [100, 300], [280, 260], [width - 150, 280], 
+                    [width - 320, 340], [150, 520], [width - 120, 560]
+                ];
+                treePositions.forEach(([x, y]) => {
+                    this.areas.forest.add(this.add.text(x, y, '🌲', { fontSize: '110px' }).setOrigin(0.5));
+                });
+
+                // Enemy Dark Beast
+                const enemy = this.add.text(width / 2, height / 2, '👹', {
+                    fontSize: '110px'
+                }).setOrigin(0.5);
+                enemy.on('pointerdown', () => this.battleEnemy());
+
+                const enemyLabel = this.add.text(width / 2, height / 2 + 80, '⚔️ Dark Beast (Tap to Fight)', {
+                    fontSize: '22px',
+                    fontFamily: 'Arial',
+                    color: '#ff4d4d',
+                    backgroundColor: 'rgba(0,0,0,0.8)',
+                    padding: { x: 12, y: 6 },
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                this.areas.forest.add([enemy, enemyLabel]);
+                this.enemySprite = enemy;
+                this.enemyLabelSprite = enemyLabel;
+                this.forestInteractives.push(enemy);
+
+                // Healing Herb
+                const herb = this.add.text(180, height - 320, '🌿', {
+                    fontSize: '75px'
+                }).setOrigin(0.5);
+                herb.on('pointerdown', () => {
+                    if (!this.inventory.herb) {
+                        this.inventory.herb = true;
+                        herb.setVisible(false);
+                        this.forestInteractives = this.forestInteractives.filter(i => i !== herb);
+                        this.showNotification('🌿 Collected Healing Herb!');
+                        this.quests.getHerb = false;
+                        this.updateQuestUI();
+                        this.checkGameCompletion();
+                    }
+                });
+                this.areas.forest.add(herb);
+                this.herbSprite = herb;
+                this.forestInteractives.push(herb);
+
+                // Back to village
+                const backBtn = this.add.rectangle(140, 110, 200, 55, 0x333333, 0.9);
+                const backText = this.add.text(140, 110, '← VILLAGE', {
+                    fontSize: '22px',
+                    fontFamily: 'Arial',
+                    color: '#00d4ff',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+                const backContainer = this.add.container(0, 0, [backBtn, backText]);
+                backBtn.setInteractive({ useHandCursor: true });
+                backBtn.on('pointerdown', () => this.showArea('village'));
+                this.areas.forest.add(backContainer);
+                this.forestInteractives.push(backBtn);
+
+                // Exit to temple
+                const templeExitBtn = this.add.rectangle(width / 2, height - 90, 360, 70, 0x8a2387, 0.95);
+                const templeExitText = this.add.text(width / 2, height - 90, '🏛️ ENTER TEMPLE →', {
+                    fontSize: '26px',
+                    fontFamily: 'Arial',
+                    color: '#ffd700',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+                const templeExit = this.add.container(0, 0, [templeExitBtn, templeExitText]);
+                templeExitBtn.setInteractive({ useHandCursor: true });
+                templeExitBtn.on('pointerdown', () => {
+                    if (this.inventory.key) {
+                        this.showArea('temple');
+                    } else {
+                        this.showNotification('🔒 Temple is locked! Find the key in the Village first.');
+                    }
+                });
+                this.areas.forest.add(templeExit);
+                this.forestInteractives.push(templeExitBtn);
+            }
+
+            createTempleArea() {
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                this.areas.temple = this.add.container(0, 0);
+
+                // Temple interior
+                this.areas.temple.add(this.add.rectangle(width / 2, height / 2, width, height, 0x1f1135));
+
+                // Pillars & altar
+                const pillar1 = this.add.rectangle(120, height / 2, 80, height * 0.8, 0x4a3b60);
+                const pillar2 = this.add.rectangle(width - 120, height / 2, 80, height * 0.8, 0x4a3b60);
+                const altar = this.add.rectangle(width / 2, height / 2 + 100, 320, 160, 0x38294a);
+                this.areas.temple.add([pillar1, pillar2, altar]);
+
+                // Mystic Crystal
+                const crystal = this.add.text(width / 2, height / 2 - 40, '💎', {
+                    fontSize: '130px'
+                }).setOrigin(0.5);
+                crystal.on('pointerdown', () => {
+                    if (!this.inventory.crystal) {
+                        this.inventory.crystal = true;
+                        crystal.setVisible(false);
+                        crystalLabel.setVisible(false);
+                        this.templeInteractives = this.templeInteractives.filter(i => i !== crystal);
+                        this.showNotification('✨ You acquired the Mystic Crystal! ✨');
+                        this.quests.findCrystal = false;
+                        this.updateQuestUI();
+                        this.checkGameCompletion();
+                    }
+                });
+
+                const crystalLabel = this.add.text(width / 2, height / 2 + 70, 'Mystic Crystal (Tap to Collect)', {
+                    fontSize: '22px',
+                    fontFamily: 'Arial',
+                    color: '#00d4ff',
+                    backgroundColor: 'rgba(0,0,0,0.8)',
+                    padding: { x: 14, y: 6 },
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                this.areas.temple.add([crystal, crystalLabel]);
+                this.crystalSprite = crystal;
+                this.crystalLabelSprite = crystalLabel;
+                this.templeInteractives.push(crystal);
+
+                // Back to forest
+                const backForestBtn = this.add.rectangle(140, 110, 200, 55, 0x333333, 0.9);
+                const backForestText = this.add.text(140, 110, '← FOREST', {
+                    fontSize: '22px',
+                    fontFamily: 'Arial',
+                    color: '#38ef7d',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+                const backForestContainer = this.add.container(0, 0, [backForestBtn, backForestText]);
+                backForestBtn.setInteractive({ useHandCursor: true });
+                backForestBtn.on('pointerdown', () => this.showArea('forest'));
+                this.areas.temple.add(backForestContainer);
+                this.templeInteractives.push(backForestBtn);
+            }
+
+            showArea(areaName) {
+                // 1. Hide all containers
+                Object.keys(this.areas).forEach(key => {
+                    this.areas[key].setVisible(false);
+                });
+
+                // 2. CRITICAL FIX: Disable interactivity on all other areas to prevent phantom invisible clicks
+                [...this.villageInteractives, ...this.forestInteractives, ...this.templeInteractives].forEach(item => {
+                    if (item && item.disableInteractive) item.disableInteractive();
+                });
+
+                // 3. Show target area and re-enable ONLY its interactives
+                if (this.areas[areaName]) {
+                    this.areas[areaName].setVisible(true);
+                    this.currentArea = areaName;
+
+                    const activeList = this[`${areaName}Interactives`] || [];
+                    activeList.forEach(item => {
+                        if (item && item.setInteractive) item.setInteractive({ useHandCursor: true });
+                    });
+
+                    this.updateLocationUI();
+                }
+            }
+
+            startDialogue(npc) {
+                let message = '';
+                if (npc === 'elder') {
+                    if (!this.inventory.key) {
+                        message = 'Welcome, brave adventurer! An ancient Key lies hidden right here on the village ground. Find it so you can open the Sealed Temple!';
+                    } else if (!this.inventory.crystal) {
+                        message = 'Splendid! You found the Key. Head eastward into the Dark Forest, vanquish the beast, and claim the Mystic Crystal from the Temple.';
+                    } else {
+                        message = 'Unbelievable! You restored the Mystic Crystal! Peace returns to our realm. You are our champion!';
+                    }
+                } else if (npc === 'merchant') {
+                    if (!this.inventory.herb) {
+                        message = 'Greetings! The villagers are ill and need the wild Healing Herb from the Dark Forest. Please harvest one for us!';
+                    } else {
+                        message = 'Thank you for the herb! My potions are brewing. Best of luck on your sacred quest!';
+                    }
+                }
+                this.showDialogue(message);
+            }
+
+            showDialogue(message) {
+                if (this.dialogueBox) this.dialogueBox.destroy();
+
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                const dialogueBox = this.add.container(0, 0);
+
+                // Backdrop blocker
+                const blocker = this.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.6)
+                    .setInteractive();
+
+                const bg = this.add.rectangle(width / 2, height - 320, width - 80, 240, 0x141824, 0.98);
+                bg.setStrokeStyle(3, 0x00d4ff);
+
+                const text = this.add.text(width / 2, height - 340, message, {
+                    fontSize: '24px',
+                    fontFamily: 'Arial',
+                    color: '#ffffff',
+                    wordWrap: { width: width - 140 },
+                    align: 'center',
+                    lineSpacing: 8
+                }).setOrigin(0.5);
+
+                const closeBtn = this.add.rectangle(width / 2, height - 230, 220, 50, 0x00d4ff)
+                    .setInteractive({ useHandCursor: true });
+                const closeText = this.add.text(width / 2, height - 230, 'CONTINUE', {
+                    fontSize: '20px',
+                    fontFamily: 'Arial',
+                    color: '#000000',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                closeBtn.on('pointerdown', () => dialogueBox.destroy());
+
+                dialogueBox.add([blocker, bg, text, closeBtn, closeText]);
+                dialogueBox.setDepth(2000);
+                this.dialogueBox = dialogueBox;
+            }
+
+            battleEnemy() {
+                if (this.enemyDefeated) return;
+
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                const battleBox = this.add.container(0, 0);
+
+                const blocker = this.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.7)
+                    .setInteractive();
+
+                const bg = this.add.rectangle(width / 2, height / 2, width - 80, 420, 0x3d0c02, 0.98);
+                bg.setStrokeStyle(4, 0xff4d4d);
+
+                const title = this.add.text(width / 2, height / 2 - 120, '👹 DARK BEAST ATTACKS! 👹', {
+                    fontSize: '32px',
+                    fontFamily: 'Impact',
+                    color: '#ff4d4d',
+                    align: 'center'
+                }).setOrigin(0.5);
+
+                let beastHp = 3;
+                const hpText = this.add.text(width / 2, height / 2 - 50, `Beast Health: ❤️❤️❤️ (${beastHp}/3)`, {
+                    fontSize: '24px',
+                    fontFamily: 'Arial',
+                    color: '#ffffff',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                const attackBtn = this.add.rectangle(width / 2, height / 2 + 50, 260, 70, 0xffcc00)
+                    .setInteractive({ useHandCursor: true });
+                const attackText = this.add.text(width / 2, height / 2 + 50, '⚔️ STRIKE!', {
+                    fontSize: '28px',
+                    fontFamily: 'Arial',
+                    color: '#000000',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                attackBtn.on('pointerdown', () => {
+                    beastHp--;
+                    if (beastHp > 0) {
+                        hpText.setText(`Beast Health: ${'❤️'.repeat(beastHp)} (${beastHp}/3)`);
+                        this.cameras.main.shake(120, 0.01);
+                    } else {
+                        this.enemyDefeated = true;
+                        if (this.enemySprite) this.enemySprite.destroy();
+                        if (this.enemyLabelSprite) this.enemyLabelSprite.destroy();
+                        battleBox.destroy();
+                        this.showNotification('🎉 Dark Beast Defeated! 🎉');
+                        this.quests.defeatEnemy = false;
+                        this.updateQuestUI();
+                        this.checkGameCompletion();
+                    }
+                });
+
+                battleBox.add([blocker, bg, title, hpText, attackBtn, attackText]);
+                battleBox.setDepth(2000);
+            }
+
+            createUI() {
+                const width = this.cameras.main.width;
+                this.uiContainer = this.add.container(0, 0).setDepth(100);
+
+                // Location header
+                this.locationText = this.add.text(width / 2, 45, '📍 VILLAGE', {
+                    fontSize: '26px',
+                    fontFamily: 'Arial',
+                    color: '#00d4ff',
+                    backgroundColor: 'rgba(0,0,0,0.85)',
+                    padding: { x: 24, y: 10 },
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                // Quest & inventory HUD
+                this.hudText = this.add.text(25, 90, '', {
+                    fontSize: '18px',
+                    fontFamily: 'Arial',
+                    color: '#ffffff',
+                    backgroundColor: 'rgba(0,0,0,0.75)',
+                    padding: { x: 16, y: 10 },
+                    lineSpacing: 6
+                });
+
+                this.uiContainer.add([this.locationText, this.hudText]);
+                this.updateLocationUI();
+                this.updateQuestUI();
+            }
+
+            updateLocationUI() {
+                const names = {
+                    village: '📍 PEACEFUL VILLAGE',
+                    forest: '🌲 DARK FORBIDDEN FOREST',
+                    temple: '🏛️ ANCIENT CRYSTAL TEMPLE'
+                };
+                if (this.locationText) this.locationText.setText(names[this.currentArea] || 'UNKNOWN');
+            }
+
+            updateQuestUI() {
+                const q = [];
+                if (this.quests.findKey) q.push('• Find the Key (Village ground)');
+                if (this.quests.getHerb) q.push('• Gather Healing Herb (Forest)');
+                if (this.quests.defeatEnemy) q.push('• Slay Dark Beast (Forest)');
+                if (this.quests.findCrystal) q.push('• Recover Mystic Crystal (Temple)');
+
+                const items = [];
+                if (this.inventory.key) items.push('🔑 Key');
+                if (this.inventory.herb) items.push('🌿 Herb');
+                if (this.inventory.crystal) items.push('💎 Crystal');
+
+                this.hudText.setText(
+                    `📜 Quests:\n${q.length > 0 ? q.join('\n') : '  ✅ All Quests Completed!'}\n\n` +
+                    `🎒 Bag: ${items.length > 0 ? items.join(' | ') : '(Empty)'}`
+                );
+            }
+
+            showNotification(msg) {
+                const width = this.cameras.main.width;
+                const notif = this.add.text(width / 2, 170, msg, {
+                    fontSize: '22px',
+                    fontFamily: 'Arial',
+                    color: '#38ef7d',
+                    backgroundColor: '#000000',
+                    padding: { x: 20, y: 10 },
+                    fontStyle: 'bold'
+                }).setOrigin(0.5).setDepth(3000);
+
+                this.tweens.add({
+                    targets: notif,
+                    alpha: 0,
+                    y: 120,
+                    duration: 2400,
+                    onComplete: () => notif.destroy()
+                });
+            }
+
+            checkGameCompletion() {
+                if (this.inventory.crystal && this.inventory.herb && this.inventory.key && this.enemyDefeated) {
+                    this.time.delayedCall(600, () => this.showVictoryScreen());
+                }
+            }
+
+            showVictoryScreen() {
+                const width = this.cameras.main.width;
+                const height = this.cameras.main.height;
+
+                const victoryBox = this.add.container(0, 0).setDepth(4000);
+
+                const bg = this.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.95);
+                const trophy = this.add.text(width / 2, height / 3.5, '🏆 VICTORY! 🏆', {
+                    fontSize: '54px',
+                    fontFamily: 'Impact',
+                    color: '#ffd700'
+                }).setOrigin(0.5);
+
+                const msg = this.add.text(width / 2, height / 2, 
+                    'You completed every quest!\nThe Dark Beast is slain,\nthe villagers are healed,\nand the Mystic Crystal is restored!', {
+                    fontSize: '24px',
+                    fontFamily: 'Arial',
+                    color: '#ffffff',
+                    align: 'center',
+                    lineSpacing: 8
+                }).setOrigin(0.5);
+
+                const restartBtn = this.add.rectangle(width / 2, height * 0.72, 280, 70, 0x38ef7d)
+                    .setInteractive({ useHandCursor: true });
+                const restartText = this.add.text(width / 2, height * 0.72, 'PLAY AGAIN', {
+                    fontSize: '28px',
+                    fontFamily: 'Arial',
+                    color: '#000000',
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+
+                restartBtn.on('pointerdown', () => {
+                    victoryBox.destroy();
+                    this.scene.restart();
+                });
+
+                victoryBox.add([bg, trophy, msg, restartBtn, restartText]);
+            }
+        }
+
+        const config = {
+            type: Phaser.AUTO,
+            width: 720,
+            height: 1280,
+            parent: 'game-container',
+            scale: {
+                mode: Phaser.Scale.FIT,
+                autoCenter: Phaser.Scale.CENTER_BOTH
+            },
+            scene: [BootScene, MainMenuScene, GameScene]
+        };
+
+        const game = new Phaser.Game(config);
+    </script>
+</body>
+</html>
