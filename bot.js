@@ -179,6 +179,9 @@ async function triggerUserQueueExecution(userId) {
     console.error(`Error processing user message batch for ${userId}:`, err);
   } finally {
     q.isProcessing = false;
+    if (q.items.length === 0) {
+      q.latestCtx = null;
+    }
 
     // After completing the turn, check if subsequent messages arrived while Claude was responding
     if (q.activeDownloads > 0) {
@@ -208,6 +211,7 @@ function clearUserQueue(userId) {
       q.timer = null;
     }
     q.items = [];
+    q.latestCtx = null;
     if (!q.isProcessing && q.activeDownloads === 0) {
       userQueues.delete(userId);
     }
@@ -589,9 +593,10 @@ async function handleDownload(ctx, rawUrl) {
     parse_mode: 'Markdown',
   });
 
+  let dlResult = null;
   try {
     const targetDir = TEMP_DOWNLOADS_DIR;
-    const dlResult = await downloadMediaVideo(url, targetDir);
+    dlResult = await downloadMediaVideo(url, targetDir);
 
     if (dlResult.isOverTelegramLimit) {
       await ctx.api.editMessageText(
@@ -647,19 +652,19 @@ async function handleDownload(ctx, rawUrl) {
       resultsCount: 1,
     });
 
-    try {
-      await fsp.unlink(dlResult.filePath);
-    } catch {}
-
     await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
   } catch (err) {
-    console.error('Download error:', err);
+    console.error('Download error:', sanitizeError(err));
     await ctx.api.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
-      `❌ *Download failed:*\n\`${err.message.slice(0, 200)}\`\n\nPlease check the link and try again.`,
+      `❌ *Download failed:*\n\`${sanitizeError(err).slice(0, 200)}\`\n\nPlease check the link and try again.`,
       { parse_mode: 'Markdown' }
     );
+  } finally {
+    if (dlResult?.filePath) {
+      await fsp.unlink(dlResult.filePath).catch(() => {});
+    }
   }
 }
 
@@ -1252,18 +1257,19 @@ async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 
 }
 
 async function sendLongMessage(ctx, text, parseMode = 'Markdown') {
+  const { safeText } = sanitizeAndCheckSecrets(text, 'outgoing_message');
   const MAX_LEN = 4000;
-  if (text.length <= MAX_LEN) {
+  if (safeText.length <= MAX_LEN) {
     try {
-      await ctx.reply(text, { parse_mode: parseMode });
+      await ctx.reply(safeText, { parse_mode: parseMode });
     } catch {
-      await ctx.reply(text);
+      await ctx.reply(safeText);
     }
     return;
   }
 
-  for (let i = 0; i < text.length; i += MAX_LEN) {
-    const chunk = text.slice(i, i + MAX_LEN);
+  for (let i = 0; i < safeText.length; i += MAX_LEN) {
+    const chunk = safeText.slice(i, i + MAX_LEN);
     try {
       await ctx.reply(chunk, { parse_mode: parseMode });
     } catch {
@@ -1349,21 +1355,32 @@ function sanitizeAndCheckSecrets(text, context = 'content') {
     'GEMINI_API_KEY',
     'GOOGLE_API_KEY',
     'STORAGE_DIR',
+    'ALLOWED_USER_ID',
+    'ALLOWED_USER_IDS',
   ];
 
   for (const envKey of secretEnvKeys) {
-    const val = (process.env[envKey] || '').trim();
-    if (val.length >= 8 && safeText.includes(val)) {
-      wasClean = false;
-      console.warn(`[SECURITY ALERT] Prevented leak of ${envKey} in ${context}`);
-      safeText = safeText.split(val).join('[REDACTED_SECRET]');
+    const rawVal = (process.env[envKey] || '').replace(/^["']|["']$/g, '').trim();
+    if (!rawVal) continue;
+    // Handle comma-separated lists (e.g. ALLOWED_USER_ID="id1,id2")
+    const parts = rawVal.split(/[,;\s]+/).map((p) => p.trim()).filter(Boolean);
+    const valsToCheck = parts.length > 1 ? [rawVal, ...parts] : [rawVal];
+    for (const val of valsToCheck) {
+      if (val.length >= 8 && safeText.includes(val)) {
+        wasClean = false;
+        console.warn(`[SECURITY ALERT] Prevented leak of ${envKey} in ${context}`);
+        safeText = safeText.split(val).join('[REDACTED_SECRET]');
+      }
     }
   }
 
   const secretPatterns = [
-    /bot\d+:[A-Za-z0-9_-]{35}/g,
-    /sk-[a-zA-Z0-9_\-]{24,}/g,
-    /AIza[0-9A-Za-z-_]{35}/g,
+    // Telegram Bot Tokens: with or without "bot" prefix
+    /(?:bot)?\d{8,11}:[A-Za-z0-9_-]{35}/g,
+    // Anthropic API Keys (standard and custom proxy)
+    /sk-(?:ant-)?[a-zA-Z0-9_\-]{20,}/g,
+    // Google / Gemini API Keys (AIza... and AQ....)
+    /(?:AIza[0-9A-Za-z-_]{35}|AQ\.[A-Za-z0-9_\-]{30,})/g,
   ];
 
   for (const pat of secretPatterns) {
@@ -1375,6 +1392,12 @@ function sanitizeAndCheckSecrets(text, context = 'content') {
   }
 
   return { safeText, wasClean };
+}
+
+function sanitizeError(err) {
+  if (!err) return '';
+  const msg = typeof err === 'string' ? err : err.message || String(err);
+  return sanitizeAndCheckSecrets(msg, 'error_message').safeText;
 }
 
 async function bundleCodeWithGemini(claudeResponseText, userPrompt) {
@@ -1695,8 +1718,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       await sendLongMessage(ctx, safeAssistantMsg);
     }
   } catch (error) {
-    clearInterval(typingInterval);
-    console.error('Error calling Claude API:', error.status, error.message);
+    console.error('Error calling Claude API:', error.status, sanitizeError(error));
 
     history.pop();
 
@@ -1705,11 +1727,12 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       { parse_mode: 'Markdown' }
     );
   } finally {
+    clearInterval(typingInterval);
     if (!wasAlreadyProcessing) {
       q.isProcessing = false;
       if (q.items.length > 0 && !q.timer && q.activeDownloads === 0) {
         triggerUserQueueExecution(userId).catch((err) => {
-          console.error(`Error in chained user queue execution for ${userId}:`, err);
+          console.error(`Error in chained user queue execution for ${userId}:`, sanitizeError(err));
         });
       }
     }
@@ -1899,13 +1922,12 @@ async function handleVoiceMessage(ctx) {
       text: transcription,
     }, ctx);
   } catch (error) {
-    clearInterval(typingInterval);
-    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
-    console.error('Error handling hybrid voice message:', sanitizedMsg);
+    console.error('Error handling hybrid voice message:', sanitizeError(error));
     await ctx.reply('❌ Sorry, I encountered an error processing your voice note. Please try again.', {
       parse_mode: 'Markdown',
     });
   } finally {
+    clearInterval(typingInterval);
     releaseDownload();
   }
 }
@@ -1953,13 +1975,12 @@ async function handlePhotoMessage(ctx) {
       caption,
     }, ctx);
   } catch (error) {
-    clearInterval(typingInterval);
-    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
-    console.error('Error handling photo message:', sanitizedMsg);
+    console.error('Error handling photo message:', sanitizeError(error));
     await ctx.reply('❌ Sorry, I encountered an error processing your photo. Please try again.', {
       parse_mode: 'Markdown',
     });
   } finally {
+    clearInterval(typingInterval);
     releaseDownload();
   }
 }
@@ -2003,13 +2024,12 @@ async function handleImageDocument(ctx, document, fileName, fileExtension) {
       caption: promptText,
     }, ctx);
   } catch (error) {
-    clearInterval(typingInterval);
-    const sanitizedMsg = (error.message || '').replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
-    console.error('Error handling image document:', sanitizedMsg);
+    console.error('Error handling image document:', sanitizeError(error));
     await ctx.reply('❌ Sorry, I encountered an error reading your image. Please try again.', {
       parse_mode: 'Markdown',
     });
   } finally {
+    clearInterval(typingInterval);
     releaseDownload();
   }
 }
@@ -2117,7 +2137,14 @@ bot.command('quiz', async (ctx) => {
   }
 });
 
-let cachedFilesList = [];
+// Isolated per-user cached files map to prevent cross-user state leaks
+const userCachedFilesList = new Map();
+function getUserCachedFiles(userId) {
+  return userCachedFilesList.get(userId) || null;
+}
+function setUserCachedFiles(userId, files) {
+  userCachedFilesList.set(userId, files);
+}
 
 function buildCategoriesKeyboard(files, source) {
   const counts = {
@@ -2389,7 +2416,7 @@ bot.on('callback_query:data', async (ctx) => {
   // Local Storage (Drive D) Categories View
   if (data === 'lib_src:local' || data === 'lib_refresh:local') {
     const files = await getStoredFiles();
-    cachedFilesList = files;
+    setUserCachedFiles(ctx.from.id, files);
     await ctx.answerCallbackQuery();
 
     if (files.length === 0) {
@@ -2452,7 +2479,7 @@ bot.on('callback_query:data', async (ctx) => {
       files = cloudVault;
     } else {
       files = await getStoredFiles();
-      cachedFilesList = files;
+      setUserCachedFiles(ctx.from.id, files);
     }
 
     const { keyboard, totalPages, totalCount, catName, page: safePage } = buildCategoryFilesKeyboard(
@@ -2486,10 +2513,12 @@ bot.on('callback_query:data', async (ctx) => {
     if (source === 'cloud') {
       file = cloudVault[idx];
     } else {
-      if (!cachedFilesList || !cachedFilesList[idx]) {
-        cachedFilesList = await getStoredFiles();
+      let cachedFiles = getUserCachedFiles(ctx.from.id);
+      if (!cachedFiles || !cachedFiles[idx]) {
+        cachedFiles = await getStoredFiles();
+        setUserCachedFiles(ctx.from.id, cachedFiles);
       }
-      file = cachedFilesList[idx];
+      file = cachedFiles[idx];
     }
 
     if (!file) {
@@ -2540,10 +2569,12 @@ bot.on('callback_query:data', async (ctx) => {
     if (source === 'cloud') {
       file = cloudVault[idx];
     } else {
-      if (!cachedFilesList || !cachedFilesList[idx]) {
-        cachedFilesList = await getStoredFiles();
+      let cachedFiles = getUserCachedFiles(ctx.from.id);
+      if (!cachedFiles || !cachedFiles[idx]) {
+        cachedFiles = await getStoredFiles();
+        setUserCachedFiles(ctx.from.id, cachedFiles);
       }
-      file = cachedFilesList[idx];
+      file = cachedFiles[idx];
     }
 
     if (!file) {
@@ -2731,8 +2762,9 @@ bot.on('callback_query:data', async (ctx) => {
     await ctx.answerCallbackQuery({ text: 'Starting download...' });
     const statusMsg = await ctx.reply('⏳ *Downloading video...* Please wait.', { parse_mode: 'Markdown' });
 
+    let dlResult = null;
     try {
-      const dlResult = await downloadMediaVideo(entry.url, TEMP_DOWNLOADS_DIR);
+      dlResult = await downloadMediaVideo(entry.url, TEMP_DOWNLOADS_DIR);
       if (dlResult.isOverTelegramLimit) {
         await ctx.api.editMessageText(
           ctx.chat.id,
@@ -2761,14 +2793,16 @@ bot.on('callback_query:data', async (ctx) => {
         });
       }
 
-      try {
-        await fsp.unlink(dlResult.filePath);
-      } catch {}
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
     } catch (err) {
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `❌ *Download failed:* \`${err.message.slice(0, 150)}\``, {
+      console.error('History download error:', sanitizeError(err));
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `❌ *Download failed:* \`${sanitizeError(err).slice(0, 150)}\``, {
         parse_mode: 'Markdown',
       });
+    } finally {
+      if (dlResult?.filePath) {
+        await fsp.unlink(dlResult.filePath).catch(() => {});
+      }
     }
     return;
   }
@@ -2851,8 +2885,26 @@ bot.on('callback_query:data', async (ctx) => {
       parse_mode: 'Markdown',
     });
 
+    let dlResult = null;
     try {
-      const dlResult = await downloadMediaVideo(videoUrl, TEMP_DOWNLOADS_DIR);
+      dlResult = await downloadMediaVideo(videoUrl, TEMP_DOWNLOADS_DIR);
+
+      // Save to local Drive D if mode allows
+      const userMode = getUserStorageMode(ctx.from.id);
+      let localSavedPath = null;
+      if (userMode === 'local' || userMode === 'nosave') {
+        try {
+          const mediaDir = path.join(STORAGE_DIR, 'media');
+          if (!fs.existsSync(mediaDir)) {
+            await fsp.mkdir(mediaDir, { recursive: true });
+          }
+          const destPath = path.join(mediaDir, dlResult.fileName);
+          await fsp.copyFile(dlResult.filePath, destPath);
+          localSavedPath = destPath;
+        } catch (copyErr) {
+          console.warn('Could not copy downloaded video to local Drive D:', copyErr.message);
+        }
+      }
 
       if (dlResult.isOverTelegramLimit) {
         await ctx.api.editMessageText(
@@ -2860,6 +2912,7 @@ bot.on('callback_query:data', async (ctx) => {
           statusMsg.message_id,
           `⚠️ *Video is too large for Telegram upload (> 50 MB)*\n\n` +
           `Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB.\n` +
+          (localSavedPath ? `Saved locally on laptop at: \`${localSavedPath}\`\n` : '') +
           `Link: ${videoUrl}`,
           { parse_mode: 'Markdown' }
         );
@@ -2884,34 +2937,19 @@ bot.on('callback_query:data', async (ctx) => {
         });
       }
 
-      // Save to local Drive D if mode allows
-      const userMode = getUserStorageMode(ctx.from.id);
-      if (userMode === 'local' || userMode === 'nosave') {
-        try {
-          const mediaDir = path.join(STORAGE_DIR, 'media');
-          if (!fs.existsSync(mediaDir)) {
-            await fsp.mkdir(mediaDir, { recursive: true });
-          }
-          const destPath = path.join(mediaDir, dlResult.fileName);
-          await fsp.copyFile(dlResult.filePath, destPath);
-        } catch (copyErr) {
-          console.warn('Could not copy downloaded video to local Drive D:', copyErr.message);
-        }
-      }
-
-      try {
-        await fsp.unlink(dlResult.filePath);
-      } catch {}
-
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
     } catch (err) {
-      console.error('Download error:', err);
+      console.error('Download error:', sanitizeError(err));
       await ctx.api.editMessageText(
         ctx.chat.id,
         statusMsg.message_id,
-        `❌ *Download failed:*\n\`${err.message.slice(0, 200)}\``,
+        `❌ *Download failed:*\n\`${sanitizeError(err).slice(0, 200)}\``,
         { parse_mode: 'Markdown' }
       );
+    } finally {
+      if (dlResult?.filePath) {
+        await fsp.unlink(dlResult.filePath).catch(() => {});
+      }
     }
     return;
   }
@@ -3057,10 +3095,12 @@ bot.on('callback_query:data', async (ctx) => {
     if (source === 'cloud') {
       file = cloudVault[idx];
     } else {
-      if (!cachedFilesList || !cachedFilesList[idx]) {
-        cachedFilesList = await getStoredFiles();
+      let cachedFiles = getUserCachedFiles(ctx.from.id);
+      if (!cachedFiles || !cachedFiles[idx]) {
+        cachedFiles = await getStoredFiles();
+        setUserCachedFiles(ctx.from.id, cachedFiles);
       }
-      file = cachedFilesList[idx];
+      file = cachedFiles[idx];
     }
 
     if (!file) {
@@ -3108,10 +3148,12 @@ bot.on('callback_query:data', async (ctx) => {
     if (source === 'cloud') {
       file = cloudVault[idx];
     } else {
-      if (!cachedFilesList || !cachedFilesList[idx]) {
-        cachedFilesList = await getStoredFiles();
+      let cachedFiles = getUserCachedFiles(ctx.from.id);
+      if (!cachedFiles || !cachedFiles[idx]) {
+        cachedFiles = await getStoredFiles();
+        setUserCachedFiles(ctx.from.id, cachedFiles);
       }
-      file = cachedFilesList[idx];
+      file = cachedFiles[idx];
     }
 
     if (!file) {
@@ -3203,7 +3245,7 @@ bot.on('message:text', async (ctx) => {
 });
 
 bot.catch((err) => {
-  console.error('Bot error:', err);
+  console.error('[Bot Error]:', sanitizeError(err.error || err));
 });
 
 const PORT = process.env.PORT || 10000;
