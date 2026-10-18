@@ -10,3 +10,6 @@ conversation_history.json.tmp
 temp_downloads/
 .git
 .claude
+cookies.txt
+*cookies*.txt
+secrets/
