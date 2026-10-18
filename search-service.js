@@ -254,7 +254,7 @@ export function normalizeNetscapeCookies(rawText) {
 let cachedCookiePath = null;
 
 export async function getCookiesFilePath() {
-  // 1. Check known file paths (Render Secret Files mounts at /etc/secrets/cookies.txt, local project root, home, temp)
+  // 1. Check known file paths
   const candidatePaths = [
     path.join(process.cwd(), 'cookies.txt'),
     '/etc/secrets/cookies.txt',
@@ -272,6 +272,25 @@ export async function getCookiesFilePath() {
     }
   }
 
+  // 2. Dynamically scan Render Secret Files directory (/etc/secrets) for any cookie file
+  if (fs.existsSync('/etc/secrets')) {
+    try {
+      const files = await fsp.readdir('/etc/secrets');
+      for (const file of files) {
+        const fullPath = path.join('/etc/secrets', file);
+        try {
+          const stats = await fsp.stat(fullPath);
+          if (stats.isFile() && stats.size > 20) {
+            const head = await fsp.readFile(fullPath, 'utf8');
+            if (head.includes('.youtube.com') || head.includes('# Netscape') || /cookie/i.test(file)) {
+              return fullPath;
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
   // 2. Check cached cookie path
   if (cachedCookiePath && fs.existsSync(cachedCookiePath)) {
     try {
@@ -282,8 +301,8 @@ export async function getCookiesFilePath() {
     } catch {}
   }
 
-  // 3. Check if YOUTUBE_COOKIES is defined in environment variables
-  const envCookies = process.env.YOUTUBE_COOKIES;
+  // 3. Check if YOUTUBE_COOKIES or COOKIES is defined in environment variables
+  const envCookies = process.env.YOUTUBE_COOKIES || process.env.COOKIES || process.env.COOKIE;
   if (envCookies && envCookies.trim()) {
     const tmpCookiePath = path.join(os.tmpdir(), 'yt_cookies.txt');
     const normalized = normalizeNetscapeCookies(envCookies);
