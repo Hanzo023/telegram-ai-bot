@@ -202,40 +202,104 @@ export async function getYtDlpRunner() {
   return cachedYtDlpRunner;
 }
 
+export function normalizeNetscapeCookies(rawText) {
+  if (!rawText || typeof rawText !== 'string') return '';
+  let text = rawText.trim();
+
+  // If base64 encoded
+  if (!text.includes('# Netscape') && !text.includes('\t') && !text.includes('youtube.com')) {
+    try {
+      const decoded = Buffer.from(text, 'base64').toString('utf8');
+      if (decoded.includes('# Netscape') || decoded.includes('\t') || decoded.includes('youtube.com')) {
+        text = decoded;
+      }
+    } catch {}
+  }
+
+  // Handle literal escaped \n, \r, and \t strings that occur in web dashboard input boxes
+  if (text.includes('\\n') && !text.includes('\n')) {
+    text = text.replaceAll('\\r', '').replaceAll('\\n', '\n').replaceAll('\\t', '\t');
+  }
+
+  const lines = text.split(/\r?\n/);
+  const normalizedLines = ['# Netscape HTTP Cookie File'];
+
+  for (let line of lines) {
+    line = line.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    // If it already has tabs
+    if (line.includes('\t')) {
+      normalizedLines.push(line);
+      continue;
+    }
+    // If it was space-separated due to browser copy-paste into HTML inputs
+    const parts = line.split(/\s+/);
+    if (parts.length >= 7) {
+      const domain = parts[0];
+      const flag = parts[1];
+      const pth = parts[2];
+      const secure = parts[3];
+      const expiry = parts[4];
+      const name = parts[5];
+      const value = parts.slice(6).join(' ');
+      normalizedLines.push([domain, flag, pth, secure, expiry, name, value].join('\t'));
+    }
+  }
+
+  return normalizedLines.join('\n') + '\n';
+}
+
 let cachedCookiePath = null;
 
 export async function getCookiesFilePath() {
-  // 1. Check if cookies.txt exists in root directory
-  const rootCookiePath = path.join(process.cwd(), 'cookies.txt');
-  if (fs.existsSync(rootCookiePath)) {
-    return rootCookiePath;
+  // 1. Check known file paths (Render Secret Files mounts at /etc/secrets/cookies.txt, local project root, home, temp)
+  const candidatePaths = [
+    path.join(process.cwd(), 'cookies.txt'),
+    '/etc/secrets/cookies.txt',
+    path.join(os.homedir(), 'cookies.txt'),
+    path.join(os.tmpdir(), 'cookies.txt'),
+  ];
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const stats = await fsp.stat(p);
+        if (stats.size > 20) {
+          return p;
+        }
+      } catch {}
+    }
   }
 
   // 2. Check cached cookie path
   if (cachedCookiePath && fs.existsSync(cachedCookiePath)) {
-    return cachedCookiePath;
+    try {
+      const stats = await fsp.stat(cachedCookiePath);
+      if (stats.size > 20) {
+        return cachedCookiePath;
+      }
+    } catch {}
   }
 
   // 3. Check if YOUTUBE_COOKIES is defined in environment variables
   const envCookies = process.env.YOUTUBE_COOKIES;
   if (envCookies && envCookies.trim()) {
     const tmpCookiePath = path.join(os.tmpdir(), 'yt_cookies.txt');
-    let content = envCookies.trim();
-    // Auto-detect base64 encoded cookies
-    if (!content.includes('# Netscape') && !content.includes('\t')) {
-      try {
-        const decoded = Buffer.from(content, 'base64').toString('utf8');
-        if (decoded.includes('# Netscape') || decoded.includes('\t')) {
-          content = decoded;
-        }
-      } catch {}
+    const normalized = normalizeNetscapeCookies(envCookies);
+    if (normalized && normalized.length > 30) {
+      await fsp.writeFile(tmpCookiePath, normalized, { encoding: 'utf8', mode: 0o600 });
+      cachedCookiePath = tmpCookiePath;
+      return tmpCookiePath;
     }
-    await fsp.writeFile(tmpCookiePath, content, { encoding: 'utf8', mode: 0o600 });
-    cachedCookiePath = tmpCookiePath;
-    return tmpCookiePath;
   }
 
   return null;
+}
+
+export async function hasYouTubeCookies() {
+  const p = await getCookiesFilePath();
+  return Boolean(p);
 }
 
 export async function cleanupTemporaryCookies() {

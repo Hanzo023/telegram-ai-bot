@@ -18,6 +18,7 @@ import {
   downloadMediaVideo,
   formatDownloadErrorMessage,
   cleanupTemporaryCookies,
+  getCookiesFilePath,
 } from './search-service.js';
 
 import {
@@ -1062,6 +1063,11 @@ bot.command('status', async (ctx) => {
     : `${uptimeMinutes}m ${uptimeSecs}s`;
 
   const activeDoc = await getOrAutoLoadDocument(ctx.from.id);
+  const cookiePath = await getCookiesFilePath();
+  const cookieDisplay = cookiePath
+    ? `🍪 *YouTube Authentication:* ✅ Active (\`${path.basename(cookiePath)}\`)\n`
+    : `🍪 *YouTube Authentication:* ⚠️ Not detected (Add via Render Secret Files)\n`;
+
   const statusMessage =
     `📊 *Bot Status*\n\n` +
     `⏱️ *Uptime:* ${uptimeString}\n\n` +
@@ -1078,6 +1084,7 @@ bot.command('status', async (ctx) => {
     `└─ Load Average: ${load1min} (1m), ${load5min} (5m), ${load15min} (15m)\n\n` +
     `💬 *Active Conversations:* ${conversationHistory.size}\n` +
     `📄 *Loaded Document:* ${activeDoc?.fileName ? `\`${activeDoc.fileName}\`` : '_None (unloaded)_'}\n` +
+    cookieDisplay +
     `⚙️ *Upload Storage Mode:* ${getUserStorageMode(ctx.from.id) === 'cloud' ? '☁️ Cloud Only' : getUserStorageMode(ctx.from.id) === 'nosave' ? '💻 Local Only (/nosave)' : '💻+☁️ Local & Cloud (Dual)'}`;
 
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
