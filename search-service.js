@@ -553,13 +553,13 @@ export async function downloadMediaVideo(url, targetDir) {
       // -------------------------------------------------------------
       // WITH COOKIES: Desktop web cookies must be used with web clients
       // -------------------------------------------------------------
-      // Attempt 1: web_creator (YouTube Studio) + web,mweb clients
+      // Attempt 1: default, web_embedded, mweb (with -tv_downgraded blacklisted)
       try {
-        console.log('Attempt 1: Authenticated download with web_creator client...');
+        console.log('Attempt 1: Authenticated download with default,web_embedded client...');
         const args1 = [
           ...commonArgs,
           '--cookies', cookiePath,
-          '--extractor-args', 'youtube:player_client=web_creator,mweb,web',
+          '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
           '--add-header', `User-Agent:${desktopUA}`,
           '--add-header', 'Accept-Language:en-US,en;q=0.9',
           '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/18/best',
@@ -571,15 +571,15 @@ export async function downloadMediaVideo(url, targetDir) {
         lastError = null;
       } catch (err1) {
         lastError = err1;
-        console.warn('Attempt 1 (web_creator) failed:', sanitizeError(err1));
+        console.warn('Attempt 1 (default,web_embedded) failed:', sanitizeError(err1));
 
-        // Attempt 2: Fallback with cookies using default client (-tv blacklisted) at 360p (itag 18)
+        // Attempt 2: Fallback with cookies using web_creator (Studio) at 360p (itag 18)
         try {
-          console.log('Attempt 2: Authenticated download with default client (-tv blacklisted)...');
+          console.log('Attempt 2: Authenticated download with web_creator client...');
           const args2 = [
             ...commonArgs,
             '--cookies', cookiePath,
-            '--extractor-args', 'youtube:player_client=default,-tv,-tv_downgraded',
+            '--extractor-args', 'youtube:player_client=web_creator,web_embedded,web,-tv,-tv_downgraded',
             '--add-header', `User-Agent:${desktopUA}`,
             '--add-header', 'Accept-Language:en-US,en;q=0.9',
             '-f', '18/best[height<=480][ext=mp4]/best',
@@ -591,14 +591,14 @@ export async function downloadMediaVideo(url, targetDir) {
           lastError = null;
         } catch (err2) {
           lastError = err2;
-          console.warn('Attempt 2 (default client) failed:', sanitizeError(err2));
+          console.warn('Attempt 2 (web_creator) failed:', sanitizeError(err2));
 
-          // Attempt 3: If cookies were rejected/flagged ("The page needs to be reloaded"), retry anonymously via Android client
+          // Attempt 3: If cookies were rejected/flagged, retry anonymously via Android/iOS client
           try {
             console.log('Attempt 3: Retrying anonymously without cookies via Android client...');
             const args3 = [
               ...commonArgs,
-              '--extractor-args', 'youtube:player_client=android,-tv,-tv_downgraded',
+              '--extractor-args', 'youtube:player_client=android,ios,-tv,-tv_downgraded',
               '--add-header', `User-Agent:${androidUA}`,
               '--add-header', 'Accept-Language:en-US,en;q=0.9',
               '-f', '18/best[height<=720][ext=mp4]/best',
