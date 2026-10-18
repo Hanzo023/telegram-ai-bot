@@ -634,15 +634,15 @@ export async function downloadMediaVideo(url, targetDir) {
       }
     } else {
       // -------------------------------------------------------------
-      // WITHOUT COOKIES: Mobile Android/iOS clients optimized for unauthenticated requests
+      // WITHOUT COOKIES: default, web_embedded, mweb clients with POT provider
       // -------------------------------------------------------------
-      // Attempt 1: Android client 720p
+      // Attempt 1: default, web_embedded, mweb (tv_downgraded blacklisted)
       try {
-        console.log('Attempt 1 (no cookies): Downloading via Android mobile client...');
+        console.log('Attempt 1 (no cookies): Downloading via default,web_embedded client...');
         const args1 = [
           ...commonArgs,
-          '--extractor-args', 'youtube:player_client=android,-tv,-tv_downgraded',
-          '--add-header', `User-Agent:${androidUA}`,
+          '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
+          '--add-header', `User-Agent:${desktopUA}`,
           '--add-header', 'Accept-Language:en-US,en;q=0.9',
           '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/18/best',
           '--merge-output-format', 'mp4',
@@ -653,15 +653,15 @@ export async function downloadMediaVideo(url, targetDir) {
         lastError = null;
       } catch (err1) {
         lastError = err1;
-        console.warn('Attempt 1 (no cookies, android) failed:', sanitizeError(err1));
+        console.warn('Attempt 1 (no cookies, default,web_embedded) failed:', sanitizeError(err1));
 
-        // Attempt 2: Android 360p (itag 18)
+        // Attempt 2: web_embedded, mweb standalone at 360p (itag 18)
         try {
-          console.log('Attempt 2 (no cookies): Android 360p standalone...');
+          console.log('Attempt 2 (no cookies): web_embedded, mweb 360p fallback...');
           const args2 = [
             ...commonArgs,
-            '--extractor-args', 'youtube:player_client=android,-tv,-tv_downgraded',
-            '--add-header', `User-Agent:${androidUA}`,
+            '--extractor-args', 'youtube:player_client=web_embedded,mweb,-tv,-tv_downgraded',
+            '--add-header', `User-Agent:${desktopUA}`,
             '-f', '18/best[height<=480][ext=mp4]/best',
             '--merge-output-format', 'mp4',
             '-o', outTemplate,
@@ -671,15 +671,15 @@ export async function downloadMediaVideo(url, targetDir) {
           lastError = null;
         } catch (err2) {
           lastError = err2;
-          console.warn('Attempt 2 (no cookies, android 360p) failed:', sanitizeError(err2));
+          console.warn('Attempt 2 (no cookies, web_embedded) failed:', sanitizeError(err2));
 
-          // Attempt 3: iOS client
+          // Attempt 3: Android mobile client fallback
           try {
-            console.log('Attempt 3 (no cookies): iOS client fallback...');
+            console.log('Attempt 3 (no cookies): Android mobile client fallback...');
             const args3 = [
               ...commonArgs,
-              '--extractor-args', 'youtube:player_client=ios',
-              '--add-header', `User-Agent:${iosUA}`,
+              '--extractor-args', 'youtube:player_client=android,-tv,-tv_downgraded',
+              '--add-header', `User-Agent:${androidUA}`,
               '-f', '18/best',
               '-o', outTemplate,
               cleanUrl,
@@ -688,7 +688,25 @@ export async function downloadMediaVideo(url, targetDir) {
             lastError = null;
           } catch (err3) {
             lastError = err3;
-            console.warn('Attempt 3 (no cookies, ios) failed:', sanitizeError(err3));
+            console.warn('Attempt 3 (no cookies, android) failed:', sanitizeError(err3));
+
+            // Attempt 4: Standalone iOS client fallback
+            try {
+              console.log('Attempt 4 (no cookies): iOS client fallback...');
+              const args4 = [
+                ...commonArgs,
+                '--extractor-args', 'youtube:player_client=ios',
+                '--add-header', `User-Agent:${iosUA}`,
+                '-f', '18/best',
+                '-o', outTemplate,
+                cleanUrl,
+              ];
+              await execFilePromise(runner.bin, args4, execOpts);
+              lastError = null;
+            } catch (err4) {
+              lastError = err4;
+              console.warn('Attempt 4 (no cookies, ios) failed:', sanitizeError(err4));
+            }
           }
         }
       }
