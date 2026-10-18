@@ -508,12 +508,12 @@ bot.command(['start', 'help'], async (ctx) => {
     '• 📸 **Photos & Screenshots**: Send any image or screenshot to analyze, transcribe, or translate.\n' +
     '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
     '• 🎥 **YouTube Research**: Search videos and download MP4s directly into chat.\n' +
-    '• 🌐 **AI Research & Web Search**: Research any topic, find websites, and look up products powered by Claude.\n' +
+    '• 🌐 **AI Research & Web Search**: Research any topic, find websites, and look up products powered by Gemini.\n' +
     '• 📥 **Video Downloader**: Download YouTube or TikTok videos and save them to your Cloud Vault.\n' +
     '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
     '📌 *Commands:*\n' +
     '/image <prompt> - 🎨 Generate pictures with Gemini Nano Banana\n' +
-    '/search <query> - AI research & web search powered by Claude\n' +
+    '/search <query> - AI research & web search powered by Gemini\n' +
     '/youtube <query> - Search YouTube videos & download MP4 directly\n' +
     '/download <url> - Download YouTube or TikTok video\n' +
     '/storage - Open Cloud Vault (Saved Files & Search History)\n' +
@@ -707,11 +707,14 @@ async function handleWebSearch(ctx, query) {
   const cleanQuery = (query || '').trim();
   if (!cleanQuery) return;
 
-  await ctx.replyWithChatAction('typing');
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('typing').catch(() => {});
+  }, 4000);
+
   const webResults = await searchWeb(cleanQuery, 5);
 
-  // Use Claude directly to perform deep research and format a high-quality answer
-  let claudeResearch = '';
+  // Use Gemini 3.8 Flash to perform deep research and format a high-quality answer (preserving Claude balance)
+  let geminiResearch = '';
   try {
     const webContext =
       webResults.length > 0
@@ -728,24 +731,27 @@ async function handleWebSearch(ctx, query) {
       `3. Format neatly with markdown bullet points and clear sections.\n` +
       `4. Keep the explanation concise, high-value, and directly useful.`;
 
-    const response = await anthropic.messages.create({
-      model: anthropicModel,
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: prompt }],
-    });
-    claudeResearch = response.content?.[0]?.text || '';
+    const response = await callGeminiWithRetry(() =>
+      googleAI.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+      })
+    );
+    geminiResearch = (response.text || '').trim();
   } catch (err) {
-    console.error('Claude web research error:', sanitizeError(err));
+    console.error('Gemini web research error:', sanitizeError(err));
+  } finally {
+    clearInterval(typingInterval);
   }
 
   let msgText = `🌐 *Research Results for: "${cleanQuery}"*\n\n`;
-  if (claudeResearch) {
-    msgText += `${claudeResearch}\n\n`;
+  if (geminiResearch) {
+    msgText += `${geminiResearch}\n\n`;
   }
 
   if (webResults.length > 0) {
     msgText += `🔗 *Source Links:*\n`;
-    webResults.slice(0, 3).forEach((r, idx) => {
+    webResults.slice(0, 3).forEach((r) => {
       msgText += `• [${r.title}](${r.link})\n`;
     });
     msgText += `\n`;
@@ -764,7 +770,7 @@ async function handleWebSearch(ctx, query) {
   const keyboard = new InlineKeyboard()
     .text('💾 View in Search History', 'cloud_hist_page:0');
 
-  await ctx.reply(msgText, {
+  await sendLongMessage(ctx, msgText, {
     parse_mode: 'Markdown',
     reply_markup: keyboard,
   });
@@ -1577,24 +1583,44 @@ async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 
   }
 }
 
-async function sendLongMessage(ctx, text, parseMode = 'Markdown') {
+async function sendLongMessage(ctx, text, options = 'Markdown') {
   const { safeText } = sanitizeAndCheckSecrets(text, 'outgoing_message');
+  const parseMode = typeof options === 'string' ? options : (options?.parse_mode || 'Markdown');
+  const replyMarkup = typeof options === 'object' ? options?.reply_markup : undefined;
+  const disablePreview = typeof options === 'object' ? options?.disable_web_page_preview : undefined;
   const MAX_LEN = 4000;
+
   if (safeText.length <= MAX_LEN) {
+    const replyOpts = {
+      ...(parseMode ? { parse_mode: parseMode } : {}),
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      ...(disablePreview !== undefined ? { disable_web_page_preview: disablePreview } : {}),
+    };
     try {
-      await ctx.reply(safeText, { parse_mode: parseMode });
+      await ctx.reply(safeText, replyOpts);
     } catch {
-      await ctx.reply(safeText);
+      await ctx.reply(safeText, replyMarkup ? { reply_markup: replyMarkup } : undefined);
     }
     return;
   }
 
+  const chunks = [];
   for (let i = 0; i < safeText.length; i += MAX_LEN) {
-    const chunk = safeText.slice(i, i + MAX_LEN);
+    chunks.push(safeText.slice(i, i + MAX_LEN));
+  }
+
+  for (let idx = 0; idx < chunks.length; idx++) {
+    const chunk = chunks[idx];
+    const isLast = idx === chunks.length - 1;
+    const replyOpts = {
+      ...(parseMode ? { parse_mode: parseMode } : {}),
+      ...(isLast && replyMarkup ? { reply_markup: replyMarkup } : {}),
+      ...(disablePreview !== undefined ? { disable_web_page_preview: disablePreview } : {}),
+    };
     try {
-      await ctx.reply(chunk, { parse_mode: parseMode });
+      await ctx.reply(chunk, replyOpts);
     } catch {
-      await ctx.reply(chunk);
+      await ctx.reply(chunk, isLast && replyMarkup ? { reply_markup: replyMarkup } : undefined);
     }
   }
 }
@@ -3538,9 +3564,31 @@ bot.on('callback_query:data', async (ctx) => {
           `4. 💡 **Actionable Insights / Conclusion**.`;
       }
 
-      await sendToClaudeWithHistory(ctx, prompt);
+      const typingInterval = setInterval(() => {
+        ctx.replyWithChatAction('typing').catch(() => {});
+      }, 4000);
+
+      try {
+        const docExcerpt =
+          content.length > 50000
+            ? content.slice(0, 50000) + '\n\n[... File excerpted to first 50,000 characters ...]'
+            : content;
+        const fullPrompt = `${prompt}\n\nFile: "${file.name}" (${file.ext})\nContent:\n\`\`\`\n${docExcerpt}\n\`\`\``;
+
+        const res = await callGeminiWithRetry(() =>
+          googleAI.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: fullPrompt,
+          })
+        );
+        clearInterval(typingInterval);
+        const summaryText = (res.text || '').trim() || 'Unable to generate summary.';
+        await sendLongMessage(ctx, summaryText);
+      } finally {
+        clearInterval(typingInterval);
+      }
     } catch (err) {
-      console.error('Error summarizing library file:', sanitizeError(err));
+      console.error('Error summarizing library file with Gemini:', sanitizeError(err));
       await ctx.reply('❌ Sorry, I encountered an error reading or summarizing the file.');
     }
     return;
@@ -3712,7 +3760,7 @@ try {
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 const botCommands = [
   { command: 'image', description: '🎨 Generate pictures with Gemini Nano Banana' },
-  { command: 'search', description: 'AI research & web search powered by Claude' },
+  { command: 'search', description: 'AI research & web search powered by Gemini' },
   { command: 'youtube', description: 'Search YouTube videos & download MP4' },
   { command: 'download', description: 'Download YouTube or TikTok video' },
   { command: 'library', description: 'Browse Cloud Vault & Drive D files (A-Z)' },
