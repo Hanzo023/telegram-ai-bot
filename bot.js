@@ -15,8 +15,6 @@ import {
   FILE_CATEGORIES,
   searchWeb,
   searchYouTube,
-  downloadMediaVideo,
-  formatDownloadErrorMessage,
   cleanupTemporaryCookies,
 } from './search-service.js';
 
@@ -509,15 +507,12 @@ bot.command(['start', 'help'], async (ctx) => {
     '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
     '• 🎥 **YouTube Search**: Search videos and direct links to watch on YouTube using `/youtube`.\n' +
     '• 🌐 **AI Research & Web Search**: Research any topic, find websites, and look up products powered by Gemini.\n' +
-    '• 🎵 **TikTok Downloader**: Download TikTok videos (MP4) and save them to your Cloud Vault.\n' +
     '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
     '📌 *Commands:*\n' +
     '/cancel - Exit active command mode & return to normal chat\n' +
     '/image <prompt> - 🎨 Generate pictures with Gemini Nano Banana\n' +
     '/search <query> - AI research & web search powered by Gemini\n' +
     '/youtube <query> - Search YouTube videos & channels\n' +
-    '/tiktok <url> - 🎵 Download TikTok video (MP4)\n' +
-    '/download <url> - 🎵 Download TikTok video (MP4)\n' +
     '/storage - Open Cloud Vault (Saved Files & Search History)\n' +
     '/library - Browse saved files by category (A-Z)\n' +
     '/quiz - Generate an interactive quiz poll on loaded file or topic\n' +
@@ -789,128 +784,7 @@ async function handleWebSearch(ctx, query) {
   });
 }
 
-async function handleDownload(ctx, rawUrl) {
-  const url = (rawUrl || '').trim();
-  const isDlMode = ['download', 'tiktok'].includes(userActiveMode.get(ctx.from.id)?.mode);
-  const cancelKb = isDlMode ? new InlineKeyboard().text('❌ Exit TikTok Mode', 'exit_active_mode') : undefined;
 
-  if (!url || !url.startsWith('http')) {
-    await ctx.reply(
-      '⚠️ Please provide a valid TikTok link starting with http:// or https://' +
-      (isDlMode ? '\n\n💡 _Send another link, or type /cancel to exit._' : ''),
-      cancelKb ? { reply_markup: cancelKb } : undefined
-    );
-    return;
-  }
-
-  if (/(?:youtube\.com|youtu\.be)/i.test(url)) {
-    await ctx.reply(
-      '❌ *YouTube downloads have been disabled.*\n\n' +
-      'Due to YouTube datacenter restrictions on cloud servers, YouTube video downloading has been removed.\n\n' +
-      '🎵 *TikTok video downloads are fully supported!* Send a TikTok link to download.' +
-      (isDlMode ? '\n\n💡 _Send a TikTok link, or type /cancel to exit._' : ''),
-      {
-        parse_mode: 'Markdown',
-        ...(cancelKb ? { reply_markup: cancelKb } : {}),
-      }
-    );
-    return;
-  }
-
-  if (isDlMode) {
-    userActiveMode.set(ctx.from.id, { mode: 'tiktok', timestamp: Date.now() });
-  }
-
-  const statusMsg = await ctx.reply('⏳ *Downloading TikTok video...* Please wait a moment while it processes.', {
-    parse_mode: 'Markdown',
-  });
-
-  let dlResult = null;
-  try {
-    const targetDir = TEMP_DOWNLOADS_DIR;
-    dlResult = await downloadMediaVideo(url, targetDir);
-
-    if (dlResult.isOverTelegramLimit) {
-      await ctx.api.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        `⚠️ *Video is too large for Telegram upload (> 50 MB)*\n\n` +
-        `Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB.\n` +
-        (getUserStorageMode(ctx.from.id) !== 'cloud' ? `Saved locally on laptop at: \`${dlResult.filePath}\`\n\n` : '') +
-        (isDlMode ? `💡 _TikTok mode active. Send another link, or type /cancel to exit._` : ''),
-        {
-          parse_mode: 'Markdown',
-          ...(cancelKb ? { reply_markup: cancelKb } : {}),
-        }
-      );
-      return;
-    }
-
-    const dlKeyboard = isDlMode ? new InlineKeyboard().text('❌ Exit TikTok Mode', 'exit_active_mode') : undefined;
-
-    let videoCaption = `🎵 *${dlResult.fileName}*\n📦 Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB\n💾 Saved to Telegram Cloud Vault!`;
-    if (isDlMode) {
-      videoCaption += `\n\n💡 _TikTok mode active. Send another link, or type /cancel to exit._`;
-    }
-
-    await ctx.replyWithChatAction('upload_video');
-    const sentVideo = await ctx.replyWithVideo(new InputFile(dlResult.filePath), {
-      caption: videoCaption,
-      parse_mode: 'Markdown',
-      ...(dlKeyboard ? { reply_markup: dlKeyboard } : {}),
-    });
-
-    const fileId = sentVideo.video?.file_id || sentVideo.document?.file_id;
-    if (fileId) {
-      await saveCloudVaultEntry({
-        name: dlResult.fileName,
-        file_id: fileId,
-        ext: 'mp4',
-        category: 'media',
-        size: dlResult.fileSize,
-        date: Date.now(),
-      });
-    }
-
-    // Save to local Drive D if mode allows
-    const userMode = getUserStorageMode(ctx.from.id);
-    if (userMode === 'local' || userMode === 'nosave') {
-      try {
-        const mediaDir = path.join(STORAGE_DIR, 'media');
-        if (!fs.existsSync(mediaDir)) {
-          await fsp.mkdir(mediaDir, { recursive: true });
-        }
-        const destPath = path.join(mediaDir, dlResult.fileName);
-        await fsp.copyFile(dlResult.filePath, destPath);
-      } catch (copyErr) {
-        console.warn('Could not copy downloaded video to local Drive D:', sanitizeError(copyErr));
-      }
-    }
-
-    // Record in search history
-    await addSearchHistoryEntry({
-      query: url,
-      type: 'download',
-      title: dlResult.fileName,
-      url: url,
-      resultsCount: 1,
-    });
-
-    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-  } catch (err) {
-    console.error('Download error:', sanitizeError(err));
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      formatDownloadErrorMessage(err),
-      { parse_mode: 'Markdown' }
-    );
-  } finally {
-    if (dlResult?.filePath) {
-      await fsp.unlink(dlResult.filePath).catch(() => {});
-    }
-  }
-}
 
 // --- Gemini Image Generation (Nano Banana) ---
 async function generateGeminiImage(prompt) {
@@ -1092,32 +966,15 @@ bot.command(['search', 'find'], async (ctx) => {
   await handleWebSearch(ctx, query);
 });
 
-// TikTok Video Downloader Command
-bot.command(['tiktok', 'download', 'dl'], async (ctx) => {
-  const text = ctx.message.text.trim();
-  const url = text.replace(/^\/(?:tiktok|download|dl)\s*/i, '').trim();
-  userActiveMode.set(ctx.from.id, { mode: 'tiktok', timestamp: Date.now() });
-  if (!url || !url.startsWith('http')) {
-    const keyboard = new InlineKeyboard().text('❌ Exit TikTok Mode', 'exit_active_mode');
-    await ctx.reply(
-      '🎵 *TikTok Video Downloader Active*\n\n' +
-      'Send or paste the TikTok video link you want to download below:\n' +
-      '*(e.g. `https://www.tiktok.com/@user/video/...` or `https://vm.tiktok.com/...`)*\n\n' +
-      '💡 _TikTok mode will stay active for your next links until you type /cancel._',
-      { parse_mode: 'Markdown', reply_markup: keyboard }
-    );
-    return;
-  }
-  if (/(?:youtube\.com|youtu\.be)/i.test(url)) {
-    await ctx.reply(
-      '❌ *YouTube downloads have been disabled.*\n\n' +
-      'Due to YouTube datacenter restrictions on cloud servers, YouTube video downloading has been removed.\n\n' +
-      '🎵 *TikTok downloads are fully supported!* Send a TikTok link to download.',
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-  await handleDownload(ctx, url);
+// Video Downloader Commands (Disabled notice)
+bot.command(['download', 'dl', 'tiktok'], async (ctx) => {
+  await ctx.reply(
+    'ℹ️ *Video Downloading Disabled*\n\n' +
+    'Video downloading has been disabled to keep the bot fast and lightweight.\n\n' +
+    '🎥 *YouTube Search:* Use `/youtube <query>` to search videos with direct watch links!\n' +
+    '🌐 *Web Research:* Use `/search <query>` for AI web research.',
+    { parse_mode: 'Markdown' }
+  );
 });
 
 // Cancel Active Command Mode Command
@@ -1130,8 +987,6 @@ bot.command('cancel', async (ctx) => {
     const modeNames = {
       search: '🌐 AI Web Search',
       youtube: '🎥 YouTube Search',
-      download: '🎵 TikTok Downloader',
-      tiktok: '🎵 TikTok Downloader',
       image: '🎨 Image Generation',
     };
     const name = modeNames[active.mode] || active.mode;
@@ -1187,8 +1042,6 @@ bot.command('status', async (ctx) => {
   const activeModeNames = {
     search: '🌐 AI Web Search (/cancel to exit)',
     youtube: '🎥 YouTube Search (/cancel to exit)',
-    download: '🎵 TikTok Downloader (/cancel to exit)',
-    tiktok: '🎵 TikTok Downloader (/cancel to exit)',
     image: '🎨 Image Generator (/cancel to exit)',
   };
   const activeModeDisplay = activeModeObj
@@ -2872,8 +2725,6 @@ bot.on('callback_query:data', async (ctx) => {
     const modeNames = {
       search: 'AI Web Search',
       youtube: 'YouTube Search',
-      download: 'TikTok Downloader',
-      tiktok: 'TikTok Downloader',
       image: 'Image Generation',
     };
     const name = active?.mode ? (modeNames[active.mode] || active.mode) : 'Command';
@@ -2952,8 +2803,7 @@ bot.on('callback_query:data', async (ctx) => {
         `☁️ *Telegram Cloud Vault is Empty*\n\n` +
         `You haven't uploaded or saved any files to Telegram yet.\n\n` +
         `📤 *How to add files:*\n` +
-        `• Send any PDF, Python (.py), Code, or Document file to this chat.\n` +
-        `• Or download TikTok videos using /tiktok.`,
+        `• Send any PDF, Python (.py), Code, or Document file to this chat.`,
         {
           parse_mode: 'Markdown',
           reply_markup: new InlineKeyboard()
@@ -3191,8 +3041,7 @@ bot.on('callback_query:data', async (ctx) => {
         `You haven't looked up anything yet.\n\n` +
         `💡 *Try these commands:*\n` +
         `• \`/youtube <query>\` - Search YouTube videos & channels\n` +
-        `• \`/search <query>\` - AI research & web search\n` +
-        `• \`/tiktok <url>\` - Download TikTok video (MP4)\n\n` +
+        `• \`/search <query>\` - AI research & web search\n\n` +
         `All your searches and lookups will be saved here automatically!`,
         {
           parse_mode: 'Markdown',
@@ -3210,7 +3059,7 @@ bot.on('callback_query:data', async (ctx) => {
       `🔍 *Search & Research History (Cloud)*\n\n` +
       `Total Saved Lookups: *${total}*\n` +
       `Page ${safePage + 1} of ${totalPages}.\n\n` +
-      `Tap any search below to view details, re-run, or download:`,
+      `Tap any search below to view details or re-run:`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
@@ -3256,10 +3105,6 @@ bot.on('callback_query:data', async (ctx) => {
     const keyboard = new InlineKeyboard()
       .text('🔄 Re-run Search', `rerun_search:${entry.id}`)
       .row();
-
-    if (entry.type === 'youtube' && entry.url) {
-      keyboard.text('📥 Download Video', `dl_hist:${entry.id}`).row();
-    }
 
     keyboard
       .text('🗑️ Delete Entry', `del_hist:${entry.id}`)
@@ -3316,71 +3161,12 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  // Download video from history: dl_hist:<id>
-  if (data.startsWith('dl_hist:')) {
-    const id = data.replace('dl_hist:', '');
-    const entry = getSearchHistoryEntry(id);
-    if (!entry || !entry.url) {
-      await ctx.answerCallbackQuery({ text: 'Video link not found!' });
-      return;
-    }
-
-    if (/(?:youtube\.com|youtu\.be)/i.test(entry.url)) {
-      await ctx.answerCallbackQuery({
-        text: 'YouTube downloads are disabled. Only TikTok videos are supported.',
-        show_alert: true,
-      });
-      return;
-    }
-
-    await ctx.answerCallbackQuery({ text: 'Starting download...' });
-    const statusMsg = await ctx.reply('⏳ *Downloading TikTok video...* Please wait.', { parse_mode: 'Markdown' });
-
-    let dlResult = null;
-    try {
-      dlResult = await downloadMediaVideo(entry.url, TEMP_DOWNLOADS_DIR);
-      if (dlResult.isOverTelegramLimit) {
-        await ctx.api.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          `⚠️ *Video is too large for Telegram upload (> 50 MB)*\nSize: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB.`,
-          { parse_mode: 'Markdown' }
-        );
-        return;
-      }
-
-      await ctx.replyWithChatAction('upload_video');
-      const sentVideo = await ctx.replyWithVideo(new InputFile(dlResult.filePath), {
-        caption: `🎥 *${dlResult.fileName}*\n📦 Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB\n💾 Saved to Telegram Cloud Vault!`,
-        parse_mode: 'Markdown',
-      });
-
-      const fileId = sentVideo.video?.file_id || sentVideo.document?.file_id;
-      if (fileId) {
-        await saveCloudVaultEntry({
-          name: dlResult.fileName,
-          file_id: fileId,
-          ext: 'mp4',
-          category: 'media',
-          size: dlResult.fileSize,
-          date: Date.now(),
-        });
-      }
-
-      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-    } catch (err) {
-      console.error('History download error:', sanitizeError(err));
-      await ctx.api.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        formatDownloadErrorMessage(err),
-        { parse_mode: 'Markdown' }
-      );
-    } finally {
-      if (dlResult?.filePath) {
-        await fsp.unlink(dlResult.filePath).catch(() => {});
-      }
-    }
+  // Legacy video download callback guard
+  if (data.startsWith('dl_hist:') || data.startsWith('dl_yt:')) {
+    await ctx.answerCallbackQuery({
+      text: 'Video downloading has been disabled.',
+      show_alert: true,
+    });
     return;
   }
 
@@ -3453,14 +3239,7 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  // Legacy YouTube download button guard
-  if (data.startsWith('dl_yt:')) {
-    await ctx.answerCallbackQuery({
-      text: 'YouTube downloads are disabled. Only TikTok videos are supported.',
-      show_alert: true,
-    });
-    return;
-  }
+
 
   // Open storage settings from inline button
   if (data === 'open_storage_settings') {
@@ -3764,10 +3543,6 @@ bot.on('message:text', async (ctx) => {
         await handleYoutubeSearch(ctx, userMessage);
         return;
       }
-      if (active.mode === 'download' || active.mode === 'tiktok') {
-        await handleDownload(ctx, userMessage);
-        return;
-      }
       if (active.mode === 'image') {
         await handleImageGeneration(ctx, userMessage);
         return;
@@ -3902,12 +3677,10 @@ try {
 
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 const botCommands = [
-  { command: 'cancel', description: 'Exit active search/youtube/image/download mode' },
+  { command: 'cancel', description: 'Exit active search/youtube/image mode' },
   { command: 'image', description: '🎨 Generate pictures with Gemini Nano Banana' },
   { command: 'search', description: 'AI research & web search powered by Gemini' },
   { command: 'youtube', description: 'Search YouTube videos & channels' },
-  { command: 'tiktok', description: '🎵 Download TikTok video (MP4)' },
-  { command: 'download', description: '🎵 Download TikTok video (MP4)' },
   { command: 'library', description: 'Browse Cloud Vault & Drive D files (A-Z)' },
   { command: 'storage', description: 'Cloud Hub (Saved Files & Search History)' },
   { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
