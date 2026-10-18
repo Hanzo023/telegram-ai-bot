@@ -109,7 +109,7 @@ const anthropicModel =
     ? 'claude-sonnet-5-5'
     : 'claude-3-7-sonnet-20250219');
 
-const ANTHROPIC_MAX_TOKENS = parseInt(process.env.ANTHROPIC_MAX_TOKENS, 10) || 8192;
+const ANTHROPIC_MAX_TOKENS = parseInt(process.env.ANTHROPIC_MAX_TOKENS, 10) || 20000;
 
 const googleAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
@@ -2128,12 +2128,27 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       systemInstruction = systemOverride;
     }
 
-    const response = await anthropic.messages.create({
-      model: anthropicModel,
-      max_tokens: ANTHROPIC_MAX_TOKENS,
-      system: systemInstruction,
-      messages: history,
-    });
+    let response;
+    try {
+      response = await anthropic.messages.create({
+        model: anthropicModel,
+        max_tokens: ANTHROPIC_MAX_TOKENS,
+        system: systemInstruction,
+        messages: history,
+      });
+    } catch (tokenErr) {
+      if (ANTHROPIC_MAX_TOKENS > 8192 && /max_tokens/i.test(tokenErr?.message || '')) {
+        console.warn(`Model ${anthropicModel} rejected ${ANTHROPIC_MAX_TOKENS} tokens; retrying with 8192...`);
+        response = await anthropic.messages.create({
+          model: anthropicModel,
+          max_tokens: 8192,
+          system: systemInstruction,
+          messages: history,
+        });
+      } else {
+        throw tokenErr;
+      }
+    }
 
     clearInterval(typingInterval);
 
@@ -2208,6 +2223,9 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
           googleAI.models.generateContent({
             model: 'gemini-3.8-flash',
             contents: geminiFallbackPrompt,
+            config: {
+              maxOutputTokens: 20000,
+            },
           })
         );
 
