@@ -123,7 +123,8 @@ const CONVERSATION_SESSION_TIMEOUT_HOURS = parseFloat(process.env.CONVERSATION_S
 const CONVERSATION_SESSION_TIMEOUT_MS = CONVERSATION_SESSION_TIMEOUT_HOURS * 60 * 60 * 1000; // 24 hours chat session TTL
 const MAX_HISTORY_MESSAGES = parseInt(process.env.MAX_HISTORY_MESSAGES, 10) || 50; // up to 25 full conversation turns
 const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
-const userPendingAction = new Map(); // userId -> { action: 'youtube'|'search'|'download'|'image', timestamp: number }
+const userActiveMode = new Map(); // userId -> { mode: 'search'|'youtube'|'download'|'image', timestamp: number }
+const MODE_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active command mode TTL
 const userCachedFilesList = new Map(); // userId -> array of cached library files
 const botStartTime = Date.now();
 
@@ -250,14 +251,14 @@ setInterval(() => {
       conversationHistory.delete(userId);
       userLastDocument.delete(userId);
       userCachedFilesList.delete(userId);
-      userPendingAction.delete(userId);
+      userActiveMode.delete(userId);
       userLastInteraction.delete(userId);
       historyChanged = true;
     }
   }
-  for (const [userId, pending] of userPendingAction.entries()) {
-    if (pending.timestamp && now - pending.timestamp > 5 * 60 * 1000) {
-      userPendingAction.delete(userId);
+  for (const [userId, active] of userActiveMode.entries()) {
+    if (active.timestamp && now - active.timestamp > MODE_TIMEOUT_MS) {
+      userActiveMode.delete(userId);
     }
   }
   if (historyChanged) {
@@ -512,6 +513,7 @@ bot.command(['start', 'help'], async (ctx) => {
     '• 📥 **Video Downloader**: Download YouTube or TikTok videos and save them to your Cloud Vault.\n' +
     '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
     '📌 *Commands:*\n' +
+    '/cancel - Exit active command mode & return to normal chat\n' +
     '/image <prompt> - 🎨 Generate pictures with Gemini Nano Banana\n' +
     '/search <query> - AI research & web search powered by Gemini\n' +
     '/youtube <query> - Search YouTube videos & download MP4 directly\n' +
@@ -535,7 +537,7 @@ async function handleClearAll(ctx) {
   conversationHistory.delete(userId);
   userLastDocument.delete(userId);
   userLastInteraction.delete(userId);
-  userPendingAction.delete(userId);
+  userActiveMode.delete(userId);
   userCachedFilesList.delete(userId);
   scheduleConversationHistoryPersistence();
 
@@ -553,7 +555,7 @@ async function handleClearAll(ctx) {
 bot.command('clear', async (ctx) => {
   const userId = ctx.from.id;
   clearUserQueue(userId);
-  userPendingAction.delete(userId);
+  userActiveMode.delete(userId);
   const arg = ctx.message.text.replace(/^\/clear\s*/i, '').trim().toLowerCase();
 
   if (arg === 'all' || arg === 'doc' || arg === 'file') {
@@ -631,6 +633,7 @@ bot.command(['local', 'dual'], async (ctx) => {
 
 bot.command(['storage', 'mode'], async (ctx) => {
   const userId = ctx.from.id;
+  userActiveMode.delete(userId);
   const currentMode = getUserStorageMode(userId);
   const modeLabels = {
     local: '💻+☁️ Local & Cloud (Dual Save)',
@@ -693,8 +696,11 @@ async function handleYoutubeSearch(ctx, query) {
     }
   });
 
-  msgText += `💡 _Tap any download button to download the video directly to chat and Cloud Vault!_`;
-  keyboard.text('💾 View in Search History', 'cloud_hist_page:0');
+  if (userActiveMode.get(ctx.from.id)?.mode === 'youtube') {
+    userActiveMode.set(ctx.from.id, { mode: 'youtube', timestamp: Date.now() });
+    msgText += `💡 _YouTube mode active. Send another title to search, or type /cancel to exit._\n`;
+    keyboard.row().text('❌ Exit YouTube Mode', 'exit_active_mode');
+  }
 
   await ctx.reply(msgText, {
     parse_mode: 'Markdown',
@@ -757,6 +763,11 @@ async function handleWebSearch(ctx, query) {
     msgText += `\n`;
   }
 
+  if (userActiveMode.get(ctx.from.id)?.mode === 'search') {
+    userActiveMode.set(ctx.from.id, { mode: 'search', timestamp: Date.now() });
+    msgText += `💡 _Search mode active. Send another topic to search, or type /cancel to exit._\n`;
+  }
+
   // Save to search history
   await addSearchHistoryEntry({
     query: cleanQuery,
@@ -770,6 +781,10 @@ async function handleWebSearch(ctx, query) {
   const keyboard = new InlineKeyboard()
     .text('💾 View in Search History', 'cloud_hist_page:0');
 
+  if (userActiveMode.get(ctx.from.id)?.mode === 'search') {
+    keyboard.row().text('❌ Exit Search Mode', 'exit_active_mode');
+  }
+
   await sendLongMessage(ctx, msgText, {
     parse_mode: 'Markdown',
     reply_markup: keyboard,
@@ -779,8 +794,18 @@ async function handleWebSearch(ctx, query) {
 async function handleDownload(ctx, rawUrl) {
   const url = (rawUrl || '').trim();
   if (!url || !url.startsWith('http')) {
-    await ctx.reply('⚠️ Please provide a valid link starting with http:// or https://');
+    const isDlMode = userActiveMode.get(ctx.from.id)?.mode === 'download';
+    const cancelKb = isDlMode ? new InlineKeyboard().text('❌ Exit Download Mode', 'exit_active_mode') : undefined;
+    await ctx.reply(
+      '⚠️ Please provide a valid link starting with http:// or https://' +
+      (isDlMode ? '\n\n💡 _Send another link, or type /cancel to exit._' : ''),
+      cancelKb ? { reply_markup: cancelKb } : undefined
+    );
     return;
+  }
+
+  if (userActiveMode.get(ctx.from.id)?.mode === 'download') {
+    userActiveMode.set(ctx.from.id, { mode: 'download', timestamp: Date.now() });
   }
 
   const statusMsg = await ctx.reply('⏳ *Downloading video...* Please wait a moment while it processes.', {
@@ -793,21 +818,36 @@ async function handleDownload(ctx, rawUrl) {
     dlResult = await downloadMediaVideo(url, targetDir);
 
     if (dlResult.isOverTelegramLimit) {
+      const isDlMode = userActiveMode.get(ctx.from.id)?.mode === 'download';
+      const cancelKb = isDlMode ? new InlineKeyboard().text('❌ Exit Download Mode', 'exit_active_mode') : undefined;
       await ctx.api.editMessageText(
         ctx.chat.id,
         statusMsg.message_id,
         `⚠️ *Video is too large for Telegram upload (> 50 MB)*\n\n` +
         `Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB.\n` +
-        (getUserStorageMode(ctx.from.id) !== 'cloud' ? `Saved locally on laptop at: \`${dlResult.filePath}\`` : ''),
-        { parse_mode: 'Markdown' }
+        (getUserStorageMode(ctx.from.id) !== 'cloud' ? `Saved locally on laptop at: \`${dlResult.filePath}\`\n\n` : '') +
+        (isDlMode ? `💡 _Download mode active. Send another link, or type /cancel to exit._` : ''),
+        {
+          parse_mode: 'Markdown',
+          ...(cancelKb ? { reply_markup: cancelKb } : {}),
+        }
       );
       return;
     }
 
+    const isDlMode = userActiveMode.get(ctx.from.id)?.mode === 'download';
+    const dlKeyboard = isDlMode ? new InlineKeyboard().text('❌ Exit Download Mode', 'exit_active_mode') : undefined;
+
+    let videoCaption = `🎥 *${dlResult.fileName}*\n📦 Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB\n💾 Saved to Telegram Cloud Vault!`;
+    if (isDlMode) {
+      videoCaption += `\n\n💡 _Download mode active. Send another link, or type /cancel to exit._`;
+    }
+
     await ctx.replyWithChatAction('upload_video');
     const sentVideo = await ctx.replyWithVideo(new InputFile(dlResult.filePath), {
-      caption: `🎥 *${dlResult.fileName}*\n📦 Size: ${(dlResult.fileSize / 1024 / 1024).toFixed(1)} MB\n💾 Saved to Telegram Cloud Vault!`,
+      caption: videoCaption,
       parse_mode: 'Markdown',
+      ...(dlKeyboard ? { reply_markup: dlKeyboard } : {}),
     });
 
     const fileId = sentVideo.video?.file_id || sentVideo.document?.file_id;
@@ -934,12 +974,14 @@ async function handleImageGeneration(ctx, rawPrompt) {
   }
 
   if (!prompt) {
-    userPendingAction.set(ctx.from.id, { action: 'image', timestamp: Date.now() });
+    userActiveMode.set(ctx.from.id, { mode: 'image', timestamp: Date.now() });
+    const keyboard = new InlineKeyboard().text('❌ Exit Image Mode', 'exit_active_mode');
     await ctx.reply(
-      '🎨 *Gemini Nano Banana Image Generator*\n\n' +
+      '🎨 *Gemini Nano Banana Image Mode Active*\n\n' +
       'What picture would you like to generate?\n' +
-      'Type your prompt below (e.g. `a cute fluffy orange cat in cyberpunk neon city, 4k digital art`):',
-      { parse_mode: 'Markdown' }
+      'Type your prompt below (e.g. `a cute fluffy orange cat in cyberpunk neon city, 4k digital art`):\n\n' +
+      '💡 _Image mode will stay active for your next prompts until you type /cancel._',
+      { parse_mode: 'Markdown', reply_markup: keyboard }
     );
     return;
   }
@@ -960,15 +1002,29 @@ async function handleImageGeneration(ctx, rawPrompt) {
 
     await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
-    const caption =
+    const isImgMode = userActiveMode.get(ctx.from.id)?.mode === 'image';
+    if (isImgMode) {
+      userActiveMode.set(ctx.from.id, { mode: 'image', timestamp: Date.now() });
+    }
+
+    let caption =
       `🎨 *Image Generated*\n\n` +
       `📝 *Prompt:* ${prompt.slice(0, 300)}\n` +
       `⚡ *Engine:* \`${result.source}\`` +
       (result.note ? `\n\n💡 _${result.note}_` : '');
 
+    const photoKeyboard = isImgMode
+      ? new InlineKeyboard().text('❌ Exit Image Mode', 'exit_active_mode')
+      : undefined;
+
+    if (isImgMode) {
+      caption += `\n\n💡 _Image mode active. Send another prompt, or type /cancel to exit._`;
+    }
+
     await ctx.replyWithPhoto(new InputFile(result.buffer, 'gemini_image.jpg'), {
       caption: caption.slice(0, 1024),
       parse_mode: 'Markdown',
+      ...(photoKeyboard ? { reply_markup: photoKeyboard } : {}),
     });
   } catch (err) {
     console.error('Image generation error:', sanitizeError(err));
@@ -986,19 +1042,22 @@ async function handleImageGeneration(ctx, rawPrompt) {
 
 // Image Generation Command (Gemini Nano Banana)
 bot.command(['image', 'picture', 'draw', 'imagine'], async (ctx) => {
+  userActiveMode.set(ctx.from.id, { mode: 'image', timestamp: Date.now() });
   await handleImageGeneration(ctx);
 });
 
 // YouTube Search Command
 bot.command('youtube', async (ctx) => {
   const query = ctx.message.text.replace(/^\/youtube\s*/i, '').trim();
+  userActiveMode.set(ctx.from.id, { mode: 'youtube', timestamp: Date.now() });
   if (!query) {
-    userPendingAction.set(ctx.from.id, { action: 'youtube', timestamp: Date.now() });
+    const keyboard = new InlineKeyboard().text('❌ Exit YouTube Mode', 'exit_active_mode');
     await ctx.reply(
-      '🎥 *YouTube Search*\n\n' +
+      '🎥 *YouTube Search Mode Active*\n\n' +
       'What YouTube video or music are you searching for?\n' +
-      'Type your search below (e.g. `lofi hip hop` or `python full course`):',
-      { parse_mode: 'Markdown' }
+      'Type your search below (e.g. `lofi hip hop` or `python full course`):\n\n' +
+      '💡 _YouTube mode will stay active for your next messages until you type /cancel._',
+      { parse_mode: 'Markdown', reply_markup: keyboard }
     );
     return;
   }
@@ -1008,13 +1067,15 @@ bot.command('youtube', async (ctx) => {
 // Web & Research Search Command
 bot.command(['search', 'find'], async (ctx) => {
   const query = ctx.message.text.replace(/^\/(search|find)\s*/i, '').trim();
+  userActiveMode.set(ctx.from.id, { mode: 'search', timestamp: Date.now() });
   if (!query) {
-    userPendingAction.set(ctx.from.id, { action: 'search', timestamp: Date.now() });
+    const keyboard = new InlineKeyboard().text('❌ Exit Search Mode', 'exit_active_mode');
     await ctx.reply(
-      '🌐 *AI Web & Research Search*\n\n' +
+      '🌐 *AI Web & Research Search Mode Active*\n\n' +
       'What would you like to search on the web?\n' +
-      'Type your search topic below:',
-      { parse_mode: 'Markdown' }
+      'Type your search topic below:\n\n' +
+      '💡 _Search mode will stay active for your next messages until you type /cancel._',
+      { parse_mode: 'Markdown', reply_markup: keyboard }
     );
     return;
   }
@@ -1024,16 +1085,46 @@ bot.command(['search', 'find'], async (ctx) => {
 // Video Downloader Command (YouTube & TikTok)
 bot.command(['download', 'dl'], async (ctx) => {
   const url = ctx.message.text.replace(/^\/(download|dl)\s*/i, '').trim();
+  userActiveMode.set(ctx.from.id, { mode: 'download', timestamp: Date.now() });
   if (!url || !url.startsWith('http')) {
-    userPendingAction.set(ctx.from.id, { action: 'download', timestamp: Date.now() });
+    const keyboard = new InlineKeyboard().text('❌ Exit Download Mode', 'exit_active_mode');
     await ctx.reply(
-      '📥 *Video Downloader (YouTube & TikTok)*\n\n' +
-      'Send or paste the video link you want to download below:',
-      { parse_mode: 'Markdown' }
+      '📥 *Video Downloader Mode Active (YouTube & TikTok)*\n\n' +
+      'Send or paste the video link you want to download below:\n\n' +
+      '💡 _Download mode will stay active for your next links until you type /cancel._',
+      { parse_mode: 'Markdown', reply_markup: keyboard }
     );
     return;
   }
   await handleDownload(ctx, url);
+});
+
+// Cancel Active Command Mode Command
+bot.command('cancel', async (ctx) => {
+  const userId = ctx.from.id;
+  const active = userActiveMode.get(userId);
+  userActiveMode.delete(userId);
+
+  if (active) {
+    const modeNames = {
+      search: '🌐 AI Web Search',
+      youtube: '🎥 YouTube Search',
+      download: '📥 Video Downloader',
+      image: '🎨 Image Generation',
+    };
+    const name = modeNames[active.mode] || active.mode;
+    await ctx.reply(
+      `✅ *${name} mode cancelled.*\n\n` +
+      `You are now back in normal AI chat mode. Send any message, photo, or question to chat with Claude!`,
+      { parse_mode: 'Markdown' }
+    );
+  } else {
+    await ctx.reply(
+      `ℹ️ *No active command mode to cancel.*\n\n` +
+      `You are currently in normal AI chat mode. Send any message, photo, or question to chat with Claude!`,
+      { parse_mode: 'Markdown' }
+    );
+  }
 });
 
 bot.command('status', async (ctx) => {
@@ -1074,6 +1165,17 @@ bot.command('status', async (ctx) => {
     ? `🍪 *YouTube Authentication:* ✅ Active (\`${path.basename(cookiePath)}\`)\n`
     : `🍪 *YouTube Authentication:* ⚠️ Not detected (Add via Render Secret Files)\n`;
 
+  const activeModeObj = userActiveMode.get(ctx.from.id);
+  const activeModeNames = {
+    search: '🌐 AI Web Search (/cancel to exit)',
+    youtube: '🎥 YouTube Search (/cancel to exit)',
+    download: '📥 Video Downloader (/cancel to exit)',
+    image: '🎨 Image Generator (/cancel to exit)',
+  };
+  const activeModeDisplay = activeModeObj
+    ? (activeModeNames[activeModeObj.mode] || `\`${activeModeObj.mode}\` (/cancel to exit)`)
+    : '💬 Normal Chat Mode';
+
   const statusMessage =
     `📊 *Bot Status*\n\n` +
     `⏱️ *Uptime:* ${uptimeString}\n\n` +
@@ -1091,7 +1193,8 @@ bot.command('status', async (ctx) => {
     `💬 *Active Conversations:* ${conversationHistory.size}\n` +
     `📄 *Loaded Document:* ${activeDoc?.fileName ? `\`${activeDoc.fileName}\`` : '_None (unloaded)_'}\n` +
     cookieDisplay +
-    `⚙️ *Upload Storage Mode:* ${getUserStorageMode(ctx.from.id) === 'cloud' ? '☁️ Cloud Only' : getUserStorageMode(ctx.from.id) === 'nosave' ? '💻 Local Only (/nosave)' : '💻+☁️ Local & Cloud (Dual)'}`;
+    `⚙️ *Upload Storage Mode:* ${getUserStorageMode(ctx.from.id) === 'cloud' ? '☁️ Cloud Only' : getUserStorageMode(ctx.from.id) === 'nosave' ? '💻 Local Only (/nosave)' : '💻+☁️ Local & Cloud (Dual)'}\n` +
+    `🎯 *Active Command Mode:* ${activeModeDisplay}`;
 
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
 });
@@ -1729,6 +1832,8 @@ function sanitizeAndCheckSecrets(text, context = 'content') {
     /sk-(?:ant-)?[a-zA-Z0-9_\-]{20,}/g,
     // Google / Gemini API Keys (AIza... and AQ....)
     /(?:AIza[0-9A-Za-z-_]{35}|AQ\.[A-Za-z0-9_\-]{30,})/g,
+    // YouTube / Google Session Cookies and Sensitive Tokens
+    /(?:(?:session_logininfo|LOGIN_INFO|VISITOR_INFO1_LIVE|__Secure-[13]PSID(?:TS|CC)?)\s*[:=\t]\s*)[^\s;&"']{15,}/gi,
   ];
 
   for (const pat of secretPatterns) {
@@ -2464,6 +2569,7 @@ async function sendQuizPolls(ctx, quizList) {
 
 bot.command('quiz', async (ctx) => {
   const userId = ctx.from.id;
+  userActiveMode.delete(userId);
   const topicArg = ctx.message.text.replace(/^\/quiz\s*/i, '').trim();
   let lastDoc = await getOrAutoLoadDocument(userId);
 
@@ -2663,6 +2769,7 @@ function buildSourcePickerKeyboard(userId = null) {
 
 bot.command(['library', 'files'], async (ctx) => {
   const userId = ctx.from.id;
+  userActiveMode.delete(userId);
   const keyboard = buildSourcePickerKeyboard(userId);
   await ctx.reply(
     `📚 *Document & File Library*\n\n` +
@@ -2680,6 +2787,25 @@ bot.command(['library', 'files'], async (ctx) => {
 
 bot.on('callback_query:data', async (ctx) => {
   const data = ctx.callbackQuery.data;
+
+  // Exit Active Command Mode
+  if (data === 'exit_active_mode') {
+    const active = userActiveMode.get(ctx.from.id);
+    userActiveMode.delete(ctx.from.id);
+    const modeNames = {
+      search: 'AI Web Search',
+      youtube: 'YouTube Search',
+      download: 'Video Downloader',
+      image: 'Image Generation',
+    };
+    const name = active?.mode ? (modeNames[active.mode] || active.mode) : 'Command';
+    await ctx.answerCallbackQuery({ text: `${name} mode cancelled!` });
+    await ctx.reply(
+      `✅ *${name} mode cancelled.*\n\nYou are now back in normal AI chat mode! Send any message or question to chat with Claude.`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
 
   // Return to Storage Hub
   if (data === 'storage_main') {
@@ -3602,30 +3728,31 @@ bot.on('message:text', async (ctx) => {
   const userMessage = ctx.message.text.trim();
 
   if (userMessage.startsWith('/')) {
-    userPendingAction.delete(ctx.from.id);
     return;
   }
 
-  // Check if user is responding to an interactive prompt (/youtube, /search, /download, /image)
-  if (userPendingAction.has(ctx.from.id)) {
-    const pending = userPendingAction.get(ctx.from.id);
-    userPendingAction.delete(ctx.from.id);
+  // Check if user is in an active persistent command mode (/search, /youtube, /download, /image)
+  if (userActiveMode.has(ctx.from.id)) {
+    const active = userActiveMode.get(ctx.from.id);
+    const isStale = active.timestamp && (Date.now() - active.timestamp > MODE_TIMEOUT_MS);
+    if (isStale) {
+      userActiveMode.delete(ctx.from.id);
+    } else {
+      active.timestamp = Date.now(); // Refresh activity timer so active searches/prompts keep mode alive
 
-    const isStale = pending.timestamp && (Date.now() - pending.timestamp > 5 * 60 * 1000);
-    if (!isStale) {
-      if (pending.action === 'youtube') {
-        await handleYoutubeSearch(ctx, userMessage);
-        return;
-      }
-      if (pending.action === 'search') {
+      if (active.mode === 'search') {
         await handleWebSearch(ctx, userMessage);
         return;
       }
-      if (pending.action === 'download') {
+      if (active.mode === 'youtube') {
+        await handleYoutubeSearch(ctx, userMessage);
+        return;
+      }
+      if (active.mode === 'download') {
         await handleDownload(ctx, userMessage);
         return;
       }
-      if (pending.action === 'image') {
+      if (active.mode === 'image') {
         await handleImageGeneration(ctx, userMessage);
         return;
       }
@@ -3759,6 +3886,7 @@ try {
 
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 const botCommands = [
+  { command: 'cancel', description: 'Exit active search/youtube/image/download mode' },
   { command: 'image', description: '🎨 Generate pictures with Gemini Nano Banana' },
   { command: 'search', description: 'AI research & web search powered by Gemini' },
   { command: 'youtube', description: 'Search YouTube videos & download MP4' },

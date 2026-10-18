@@ -14,7 +14,8 @@ export function sanitizeError(err) {
   let res = msg
     .replace(/(?:bot)?\d{8,11}:[A-Za-z0-9_-]{35}/g, '[REDACTED_TOKEN]')
     .replace(/sk-(?:ant-)?[a-zA-Z0-9_\-]{20,}/g, '[REDACTED_TOKEN]')
-    .replace(/(?:AIza[0-9A-Za-z-_]{35}|AQ\.[A-Za-z0-9_\-]{30,})/g, '[REDACTED_TOKEN]');
+    .replace(/(?:AIza[0-9A-Za-z-_]{35}|AQ\.[A-Za-z0-9_\-]{30,})/g, '[REDACTED_TOKEN]')
+    .replace(/(?:(?:session_logininfo|LOGIN_INFO|VISITOR_INFO1_LIVE|__Secure-[13]PSID(?:TS|CC)?)\s*[:=\t]\s*)[^\s;&"']{15,}/gi, '[REDACTED_COOKIE_TOKEN]');
   if (process.env.YOUTUBE_COOKIES && process.env.YOUTUBE_COOKIES.length >= 8) {
     res = res.split(process.env.YOUTUBE_COOKIES.trim()).join('[REDACTED_SECRET]');
   }
