@@ -499,8 +499,9 @@ export async function searchYouTube(query, maxResults = 4) {
 }
 
 /**
- * Download a video from YouTube or TikTok using yt-dlp.
+ * Download a video from TikTok using yt-dlp.
  * Targets MP4 format under 45MB to comply with Telegram's 50MB file size limit.
+ * YouTube downloads are explicitly disabled due to datacenter IP blocking.
  */
 export async function downloadMediaVideo(url, targetDir) {
   if (!fs.existsSync(targetDir)) {
@@ -519,20 +520,15 @@ export async function downloadMediaVideo(url, targetDir) {
 
   const cleanUrl = parsedUrl.href.replace(/["\\`$;|&><]/g, '');
   const isYouTube = /(?:youtube\.com|youtu\.be)/i.test(cleanUrl);
+  if (isYouTube) {
+    throw new Error('YOUTUBE_DISABLED: YouTube video downloads have been disabled. Only TikTok video downloads are supported.');
+  }
+
   const timestamp = Date.now();
   const filePrefix = `video_${timestamp}`;
   const outTemplate = path.join(targetDir, `${filePrefix}_%(title).40s.%(ext)s`);
 
   const runner = await getYtDlpRunner();
-  const cookiePath = await getCookiesFilePath();
-  const hasCookies = Boolean(cookiePath && fs.existsSync(cookiePath));
-
-  const desktopUA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-  const androidUA =
-    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
-  const iosUA =
-    'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)';
 
   const commonArgs = [
     ...runner.args,
@@ -543,201 +539,35 @@ export async function downloadMediaVideo(url, targetDir) {
     '--socket-timeout', '30',
   ];
 
-  console.log(`Starting media download for: ${cleanUrl} (cookies: ${hasCookies ? path.basename(cookiePath) : 'none'})`);
+  console.log(`Starting media download for: ${cleanUrl}`);
 
   const execOpts = { timeout: 180000, maxBuffer: 10 * 1024 * 1024 };
   let lastError = null;
 
-  if (isYouTube) {
-    if (hasCookies) {
-      // -------------------------------------------------------------
-      // WITH COOKIES: Desktop web cookies must be used with web clients
-      // -------------------------------------------------------------
-      // Attempt 1: web_creator, web_embedded, mweb
-      try {
-        console.log('Attempt 1: Authenticated download with web_creator,web_embedded,mweb client...');
-        const args1 = [
-          ...commonArgs,
-          '--cookies', cookiePath,
-          '--extractor-args', 'youtube:player_client=web_creator,web_embedded,mweb',
-          '--add-header', `User-Agent:${desktopUA}`,
-          '--add-header', 'Accept-Language:en-US,en;q=0.9',
-          '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/18/best',
-          '--merge-output-format', 'mp4',
-          '-o', outTemplate,
-          cleanUrl,
-        ];
-        await execFilePromise(runner.bin, args1, execOpts);
-        lastError = null;
-      } catch (err1) {
-        lastError = err1;
-        console.warn('Attempt 1 (web_creator,web_embedded,mweb) failed:', sanitizeError(err1));
-
-        // Attempt 2: Fallback with cookies using default client (-tv blacklisted) at 360p (itag 18)
-        try {
-          console.log('Attempt 2: Authenticated download with default client (-tv blacklisted)...');
-          const args2 = [
-            ...commonArgs,
-            '--cookies', cookiePath,
-            '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
-            '--add-header', `User-Agent:${desktopUA}`,
-            '--add-header', 'Accept-Language:en-US,en;q=0.9',
-            '-f', '18/best[height<=480][ext=mp4]/best',
-            '--merge-output-format', 'mp4',
-            '-o', outTemplate,
-            cleanUrl,
-          ];
-          await execFilePromise(runner.bin, args2, execOpts);
-          lastError = null;
-        } catch (err2) {
-          lastError = err2;
-          console.warn('Attempt 2 (default client) failed:', sanitizeError(err2));
-
-          // Attempt 3: If cookies were rejected/flagged, retry anonymously via Android/iOS client
-          try {
-            console.log('Attempt 3: Retrying anonymously without cookies via Android client...');
-            const args3 = [
-              ...commonArgs,
-              '--extractor-args', 'youtube:player_client=android,ios,-tv,-tv_downgraded',
-              '--add-header', `User-Agent:${androidUA}`,
-              '--add-header', 'Accept-Language:en-US,en;q=0.9',
-              '-f', '18/best[height<=720][ext=mp4]/best',
-              '--merge-output-format', 'mp4',
-              '-o', outTemplate,
-              cleanUrl,
-            ];
-            await execFilePromise(runner.bin, args3, execOpts);
-            lastError = null;
-          } catch (err3) {
-            lastError = err3;
-            console.warn('Attempt 3 (anonymous android) failed:', sanitizeError(err3));
-
-            // Attempt 4: Anonymous iOS client fallback
-            try {
-              console.log('Attempt 4: Retrying anonymously via iOS client...');
-              const args4 = [
-                ...commonArgs,
-                '--extractor-args', 'youtube:player_client=ios',
-                '--add-header', `User-Agent:${iosUA}`,
-                '-f', '18/best',
-                '-o', outTemplate,
-                cleanUrl,
-              ];
-              await execFilePromise(runner.bin, args4, execOpts);
-              lastError = null;
-            } catch (err4) {
-              lastError = err4;
-              console.warn('Attempt 4 (anonymous ios) failed:', sanitizeError(err4));
-            }
-          }
-        }
-      }
-    } else {
-      // -------------------------------------------------------------
-      // WITHOUT COOKIES: web_creator, web_embedded, mweb clients with POT provider
-      // -------------------------------------------------------------
-      // Attempt 1: web_creator, web_embedded, mweb
-      try {
-        console.log('Attempt 1 (no cookies): Downloading via web_creator,web_embedded,mweb client...');
-        const args1 = [
-          ...commonArgs,
-          '--extractor-args', 'youtube:player_client=web_creator,web_embedded,mweb',
-          '--add-header', `User-Agent:${desktopUA}`,
-          '--add-header', 'Accept-Language:en-US,en;q=0.9',
-          '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/18/best',
-          '--merge-output-format', 'mp4',
-          '-o', outTemplate,
-          cleanUrl,
-        ];
-        await execFilePromise(runner.bin, args1, execOpts);
-        lastError = null;
-      } catch (err1) {
-        lastError = err1;
-        console.warn('Attempt 1 (no cookies, web_creator,web_embedded,mweb) failed:', sanitizeError(err1));
-
-        // Attempt 2: default, web_embedded, mweb standalone at 360p (itag 18)
-        try {
-          console.log('Attempt 2 (no cookies): default, web_embedded 360p fallback...');
-          const args2 = [
-            ...commonArgs,
-            '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
-            '--add-header', `User-Agent:${desktopUA}`,
-            '-f', '18/best[height<=480][ext=mp4]/best',
-            '--merge-output-format', 'mp4',
-            '-o', outTemplate,
-            cleanUrl,
-          ];
-          await execFilePromise(runner.bin, args2, execOpts);
-          lastError = null;
-        } catch (err2) {
-          lastError = err2;
-          console.warn('Attempt 2 (no cookies, web_embedded) failed:', sanitizeError(err2));
-
-          // Attempt 3: Android mobile client fallback
-          try {
-            console.log('Attempt 3 (no cookies): Android mobile client fallback...');
-            const args3 = [
-              ...commonArgs,
-              '--extractor-args', 'youtube:player_client=android,-tv,-tv_downgraded',
-              '--add-header', `User-Agent:${androidUA}`,
-              '-f', '18/best',
-              '-o', outTemplate,
-              cleanUrl,
-            ];
-            await execFilePromise(runner.bin, args3, execOpts);
-            lastError = null;
-          } catch (err3) {
-            lastError = err3;
-            console.warn('Attempt 3 (no cookies, android) failed:', sanitizeError(err3));
-
-            // Attempt 4: Standalone iOS client fallback
-            try {
-              console.log('Attempt 4 (no cookies): iOS client fallback...');
-              const args4 = [
-                ...commonArgs,
-                '--extractor-args', 'youtube:player_client=ios',
-                '--add-header', `User-Agent:${iosUA}`,
-                '-f', '18/best',
-                '-o', outTemplate,
-                cleanUrl,
-              ];
-              await execFilePromise(runner.bin, args4, execOpts);
-              lastError = null;
-            } catch (err4) {
-              lastError = err4;
-              console.warn('Attempt 4 (no cookies, ios) failed:', sanitizeError(err4));
-            }
-          }
-        }
-      }
-    }
-  } else {
-    // Non-YouTube platforms (TikTok, Twitter, etc.)
+  try {
+    const downloadArgs = [
+      ...commonArgs,
+      '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/best',
+      '--merge-output-format', 'mp4',
+      '-o', outTemplate,
+      cleanUrl,
+    ];
+    await execFilePromise(runner.bin, downloadArgs, execOpts);
+    lastError = null;
+  } catch (downloadErr) {
+    lastError = downloadErr;
+    console.warn('Standard media download failed, attempting best format fallback:', sanitizeError(downloadErr));
     try {
-      const nonYtArgs = [
+      const fallbackArgs = [
         ...commonArgs,
-        ...(hasCookies ? ['--cookies', cookiePath] : []),
-        '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/best',
-        '--merge-output-format', 'mp4',
+        '-f', 'best',
         '-o', outTemplate,
         cleanUrl,
       ];
-      await execFilePromise(runner.bin, nonYtArgs, execOpts);
+      await execFilePromise(runner.bin, fallbackArgs, execOpts);
       lastError = null;
-    } catch (nonYtErr) {
-      lastError = nonYtErr;
-      try {
-        const fallbackArgs = [
-          ...commonArgs,
-          '-f', 'best',
-          '-o', outTemplate,
-          cleanUrl,
-        ];
-        await execFilePromise(runner.bin, fallbackArgs, execOpts);
-        lastError = null;
-      } catch (fbErr) {
-        lastError = fbErr;
-      }
+    } catch (fbErr) {
+      lastError = fbErr;
     }
   }
 
@@ -753,26 +583,6 @@ export async function downloadMediaVideo(url, targetDir) {
     } catch {}
 
     const stderr = lastError.stderr || lastError.stdout || lastError.message || '';
-    const isBotChallenge =
-      /sign in to confirm/i.test(stderr) ||
-      /confirm you(?:'|’|&#39;|\s+a)?re not a bot/i.test(stderr) ||
-      /the page needs to be reloaded/i.test(stderr) ||
-      /please sign in/i.test(stderr) ||
-      /use --cookies/i.test(stderr) ||
-      /bot\s+detection/i.test(stderr);
-
-    if (isYouTube && isBotChallenge) {
-      if (hasCookies) {
-        throw new Error(
-          "YOUTUBE_SESSION_FLAGGED: YouTube rejected the current session cookies or the session expired ('The page needs to be reloaded')."
-        );
-      } else {
-        throw new Error(
-          "YOUTUBE_BOT_PROTECTION: YouTube requires account cookies to download on cloud servers (Render)."
-        );
-      }
-    }
-
     const matchError = stderr.match(/ERROR:\s*([^\n\r]+)/i);
     const cleanErrorMsg = matchError ? matchError[1].trim() : (stderr.split('\n').filter(Boolean).pop() || 'Video download failed.');
     throw new Error(sanitizeError(cleanErrorMsg));
@@ -809,49 +619,17 @@ export async function downloadMediaVideo(url, targetDir) {
 
 export function formatDownloadErrorMessage(err) {
   const msg = typeof err === 'string' ? err : err?.message || String(err || '');
-  const hasCookies = hasYouTubeCookiesSync();
 
-  const isBotOrReload =
-    /YOUTUBE_SESSION_FLAGGED/i.test(msg) ||
-    /YOUTUBE_BOT_PROTECTION/i.test(msg) ||
-    /sign in to confirm/i.test(msg) ||
-    /confirm you(?:'|’|&#39;|\s+a)?re not a bot/i.test(msg) ||
-    /the page needs to be reloaded/i.test(msg) ||
-    /please sign in/i.test(msg) ||
-    /use --cookies/i.test(msg) ||
-    /bot\s+detection/i.test(msg);
-
-  // 1. If cookies are ACTIVE on the server, but YouTube flagged or rejected the session
-  if (hasCookies && isBotOrReload) {
+  if (/YOUTUBE_DISABLED/i.test(msg) || /(?:youtube\.com|youtu\.be)/i.test(msg)) {
     return (
-      `⚠️ *YouTube Session Flagged / Cookies Expired*\n\n` +
-      `Your \`YOUTUBE_COOKIES\` are active on the server, but YouTube's anti-bot system flagged the session or the cookies have expired ("The page needs to be reloaded").\n\n` +
-      `💡 *Why this happens:*\n` +
-      `YouTube rotates session security keys (\`__Secure-1PSIDTS\` and \`SIDCC\`) when you browse, change IP, or log in on different devices.\n\n` +
-      `🔧 *How to refresh in 30 seconds:*\n` +
-      `1️⃣ Open YouTube in an **Incognito / Private tab** and log in to a Google account.\n` +
-      `2️⃣ Click **Get cookies.txt LOCALLY** and copy the fresh cookie text.\n` +
-      `3️⃣ In Render Dashboard ➔ **Environment** ➔ Update \`YOUTUBE_COOKIES\` with the new text and save.\n\n` +
-      `Once saved, Render redeploys and downloads will work! 🚀`
+      `❌ *YouTube Downloads Disabled*\n\n` +
+      `YouTube video downloads have been disabled.\n\n` +
+      `🎵 *TikTok Downloader is Active:*\n` +
+      `You can download TikTok videos anytime using \`/tiktok <link>\` or \`/download <link>\`!`
     );
   }
 
-  // 2. If NO cookies are detected on the server
-  if (isBotOrReload) {
-    return (
-      `⚠️ *YouTube Cloud Server Protection*\n\n` +
-      `YouTube blocks automated downloads from cloud servers (Render) without account cookies.\n\n` +
-      `💡 *How to enable YouTube downloads in 1 minute:*\n` +
-      `1️⃣ Install the *Get cookies.txt LOCALLY* extension on your browser (Chrome/Edge/Firefox).\n` +
-      `2️⃣ Open YouTube, click the extension icon, and copy the cookie text.\n` +
-      `3️⃣ In Render Dashboard ➔ *Environment* ➔ Add Environment Variable:\n` +
-      `   *Key:* \`YOUTUBE_COOKIES\`\n` +
-      `   *Value:* *(paste cookie text)*\n\n` +
-      `Once saved, Render will restart and YouTube downloads will work! 🚀`
-    );
-  }
-
-  // 3. Any other specific error
+  // Any other specific error
   const matchError = msg.match(/ERROR:\s*([^\n\r]+)/i);
   const cleanErrorMsg = matchError ? matchError[1].trim() : msg;
   return `❌ *Download failed:*\n\`${sanitizeError(cleanErrorMsg).slice(0, 200)}\`\n\nPlease check the link and try again.`;
