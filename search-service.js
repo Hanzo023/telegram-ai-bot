@@ -319,9 +319,8 @@ export async function searchYouTube(query, maxResults = 4) {
     ];
     if (cookiePath && fs.existsSync(cookiePath)) {
       ytArgs.push('--cookies', cookiePath);
-    } else {
-      ytArgs.push('--extractor-args', 'youtube:player_client=android,ios,mweb');
     }
+    ytArgs.push('--extractor-args', 'youtube:player_client=android,-tv,-tv_downgraded');
     ytArgs.push(sanitizedQuery);
 
     const { stdout } = await execFilePromise(runner.bin, ytArgs, { timeout: 20000 });
@@ -416,14 +415,18 @@ export async function downloadMediaVideo(url, targetDir) {
     '--socket-timeout', '30',
   ];
 
-  if (cookiePath && fs.existsSync(cookiePath)) {
-    baseArgs.push('--cookies', cookiePath);
-  } else if (isYouTube) {
+  if (isYouTube) {
+    // Explicitly enforce Android mobile client and blacklist TV clients to permanently prevent "The page needs to be reloaded" error
     baseArgs.push(
-      '--extractor-args', 'youtube:player_client=android,ios,mweb',
+      '--extractor-args', 'youtube:player_client=android,-tv,-tv_downgraded',
       '--add-header', 'User-Agent:Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
       '--add-header', 'Accept-Language:en-US,en;q=0.9'
     );
+  }
+
+  const initialArgs = [...baseArgs];
+  if (cookiePath && fs.existsSync(cookiePath)) {
+    initialArgs.push('--cookies', cookiePath);
   }
 
   console.log(`Starting media download for: ${cleanUrl} (cookies: ${Boolean(cookiePath)})`);
@@ -434,8 +437,8 @@ export async function downloadMediaVideo(url, targetDir) {
   // Step 1: Attempt primary format (720p MP4 or best under 50MB)
   try {
     const primaryArgs = [
-      ...baseArgs,
-      '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/best',
+      ...initialArgs,
+      '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/18/best',
       '--merge-output-format', 'mp4',
       '-o', outTemplate,
       cleanUrl,
@@ -445,11 +448,11 @@ export async function downloadMediaVideo(url, targetDir) {
     lastError = primaryErr;
     console.warn('Primary download format failed, trying 360p fallback:', sanitizeError(primaryErr));
 
-    // Step 2: Fallback to universal 360p (itag 18)
+    // Step 2: Fallback to universal standalone 360p (itag 18)
     try {
       const fallbackArgs = [
-        ...baseArgs,
-        '-f', '18/best[height<=480]/best',
+        ...initialArgs,
+        '-f', '18/best[height<=480][ext=mp4]/best',
         '--merge-output-format', 'mp4',
         '-o', outTemplate,
         cleanUrl,
@@ -460,24 +463,44 @@ export async function downloadMediaVideo(url, targetDir) {
       lastError = fbErr;
       console.warn('Fallback download failed:', sanitizeError(fbErr));
 
-      // Step 3: If YouTube and no cookies, try forcing iOS client as last resort
-      if (isYouTube && !cookiePath) {
+      // Step 3: If cookies were passed and caused failure (e.g. flagged cookie session or "page reload" error),
+      // retry WITHOUT cookies using pure android client
+      if (cookiePath && fs.existsSync(cookiePath)) {
         try {
-          const iosArgs = [
+          console.log('Retrying download anonymously without cookies...');
+          const noCookieArgs = [
+            ...baseArgs,
+            '-f', '18/best[height<=720][ext=mp4]/best',
+            '--merge-output-format', 'mp4',
+            '-o', outTemplate,
+            cleanUrl,
+          ];
+          await execFilePromise(runner.bin, noCookieArgs, execOpts);
+          lastError = null;
+        } catch (noCookieErr) {
+          lastError = noCookieErr;
+          console.warn('Anonymous retry failed:', sanitizeError(noCookieErr));
+        }
+      }
+
+      // Step 4: If YouTube and still failing, try pure android standalone extraction
+      if (isYouTube && lastError) {
+        try {
+          const directAndroidArgs = [
             ...runner.args,
             '--no-playlist',
             '--no-check-certificates',
             '--geo-bypass',
             '--no-progress',
-            '--extractor-args', 'youtube:player_client=ios',
-            '-f', 'best[ext=mp4]/18/best',
+            '--extractor-args', 'youtube:player_client=android',
+            '-f', '18/best',
             '-o', outTemplate,
             cleanUrl,
           ];
-          await execFilePromise(runner.bin, iosArgs, execOpts);
+          await execFilePromise(runner.bin, directAndroidArgs, execOpts);
           lastError = null;
-        } catch (iosErr) {
-          lastError = iosErr;
+        } catch (androidErr) {
+          lastError = androidErr;
         }
       }
     }
@@ -495,7 +518,11 @@ export async function downloadMediaVideo(url, targetDir) {
     } catch {}
 
     const stderr = lastError.stderr || lastError.stdout || lastError.message || '';
-    if (/sign in to confirm you(?:'|’|&#39;)?re not a bot/i.test(stderr) || /cookies/i.test(stderr)) {
+    if (
+      /sign in to confirm you(?:'|’|&#39;)?re not a bot/i.test(stderr) ||
+      /the page needs to be reloaded/i.test(stderr) ||
+      /cookies/i.test(stderr)
+    ) {
       throw new Error(
         "YOUTUBE_BOT_PROTECTION: YouTube requires account cookies to download on cloud servers (Render)."
       );
@@ -536,10 +563,15 @@ export async function downloadMediaVideo(url, targetDir) {
 
 export function formatDownloadErrorMessage(err) {
   const msg = typeof err === 'string' ? err : err?.message || String(err || '');
-  if (/sign in to confirm you(?:'|’|&#39;)?re not a bot/i.test(msg) || /YOUTUBE_BOT_PROTECTION/i.test(msg) || /--cookies/i.test(msg)) {
+  if (
+    /sign in to confirm you(?:'|’|&#39;)?re not a bot/i.test(msg) ||
+    /YOUTUBE_BOT_PROTECTION/i.test(msg) ||
+    /the page needs to be reloaded/i.test(msg) ||
+    /--cookies/i.test(msg)
+  ) {
     return (
       `⚠️ *YouTube Cloud Server Protection*\n\n` +
-      `YouTube blocks automated downloads from cloud servers (Render) without account cookies.\n\n` +
+      `YouTube blocks automated downloads from cloud servers (Render) without account cookies, or the session was flagged ("The page needs to be reloaded").\n\n` +
       `💡 *How to enable YouTube downloads in 1 minute:*\n` +
       `1️⃣ Install the *Get cookies.txt LOCALLY* extension on your browser (Chrome/Edge/Firefox).\n` +
       `2️⃣ Open YouTube, click the extension icon, and copy the cookie text.\n` +
