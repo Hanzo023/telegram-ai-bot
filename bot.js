@@ -2188,6 +2188,47 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   } catch (error) {
     console.error('Error calling Claude API:', error.status, sanitizeError(error));
 
+    // If Claude API fails (e.g. 400 "The requested model is not available", rate limit, or proxy outage),
+    // automatically and gracefully fall back to Gemini 3.8 Flash so the user receives a seamless response
+    if (googleAI) {
+      console.log('Claude API unavailable; falling back to Gemini 3.8 Flash for user response...');
+      try {
+        const userPromptStr = typeof content === 'string'
+          ? content
+          : Array.isArray(content)
+            ? content.map(p => p.text || '').join('\n')
+            : String(content || '');
+
+        const geminiFallbackPrompt =
+          `${systemInstruction}\n\n` +
+          `User prompt: ${userPromptStr}\n\n` +
+          `Respond helpfully and thoroughly as the AI assistant.`;
+
+        const geminiRes = await callGeminiWithRetry(() =>
+          googleAI.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: geminiFallbackPrompt,
+          })
+        );
+
+        const geminiReply = geminiRes?.text?.trim() || 'Sorry, I could not generate a response.';
+        history.push({
+          role: 'assistant',
+          content: geminiReply,
+        });
+        scheduleConversationHistoryPersistence();
+
+        const deliveredAsFile = await handleGameAndCodeDelivery(ctx, geminiReply, content);
+        if (!deliveredAsFile) {
+          const { safeText: safeAssistantMsg } = sanitizeAndCheckSecrets(geminiReply, 'chat_reply');
+          await sendLongMessage(ctx, safeAssistantMsg);
+        }
+        return;
+      } catch (geminiFallbackErr) {
+        console.error('Gemini fallback failed as well:', sanitizeError(geminiFallbackErr));
+      }
+    }
+
     history.pop();
     scheduleConversationHistoryPersistence();
 
