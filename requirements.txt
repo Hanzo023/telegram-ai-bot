@@ -1,2 +1,2 @@
-yt-dlp[default]
+yt-dlp[default]>=2025.03.31
 bgutil-ytdlp-pot-provider

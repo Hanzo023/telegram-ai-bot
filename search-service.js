@@ -553,13 +553,13 @@ export async function downloadMediaVideo(url, targetDir) {
       // -------------------------------------------------------------
       // WITH COOKIES: Desktop web cookies must be used with web clients
       // -------------------------------------------------------------
-      // Attempt 1: default, web_embedded, mweb (with -tv_downgraded blacklisted)
+      // Attempt 1: web_creator, web_embedded, mweb
       try {
-        console.log('Attempt 1: Authenticated download with default,web_embedded client...');
+        console.log('Attempt 1: Authenticated download with web_creator,web_embedded,mweb client...');
         const args1 = [
           ...commonArgs,
           '--cookies', cookiePath,
-          '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
+          '--extractor-args', 'youtube:player_client=web_creator,web_embedded,mweb',
           '--add-header', `User-Agent:${desktopUA}`,
           '--add-header', 'Accept-Language:en-US,en;q=0.9',
           '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/18/best',
@@ -571,15 +571,15 @@ export async function downloadMediaVideo(url, targetDir) {
         lastError = null;
       } catch (err1) {
         lastError = err1;
-        console.warn('Attempt 1 (default,web_embedded) failed:', sanitizeError(err1));
+        console.warn('Attempt 1 (web_creator,web_embedded,mweb) failed:', sanitizeError(err1));
 
-        // Attempt 2: Fallback with cookies using web_creator (Studio) at 360p (itag 18)
+        // Attempt 2: Fallback with cookies using default client (-tv blacklisted) at 360p (itag 18)
         try {
-          console.log('Attempt 2: Authenticated download with web_creator client...');
+          console.log('Attempt 2: Authenticated download with default client (-tv blacklisted)...');
           const args2 = [
             ...commonArgs,
             '--cookies', cookiePath,
-            '--extractor-args', 'youtube:player_client=web_creator,web_embedded,web,-tv,-tv_downgraded',
+            '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
             '--add-header', `User-Agent:${desktopUA}`,
             '--add-header', 'Accept-Language:en-US,en;q=0.9',
             '-f', '18/best[height<=480][ext=mp4]/best',
@@ -591,7 +591,7 @@ export async function downloadMediaVideo(url, targetDir) {
           lastError = null;
         } catch (err2) {
           lastError = err2;
-          console.warn('Attempt 2 (web_creator) failed:', sanitizeError(err2));
+          console.warn('Attempt 2 (default client) failed:', sanitizeError(err2));
 
           // Attempt 3: If cookies were rejected/flagged, retry anonymously via Android/iOS client
           try {
@@ -634,14 +634,14 @@ export async function downloadMediaVideo(url, targetDir) {
       }
     } else {
       // -------------------------------------------------------------
-      // WITHOUT COOKIES: default, web_embedded, mweb clients with POT provider
+      // WITHOUT COOKIES: web_creator, web_embedded, mweb clients with POT provider
       // -------------------------------------------------------------
-      // Attempt 1: default, web_embedded, mweb (tv_downgraded blacklisted)
+      // Attempt 1: web_creator, web_embedded, mweb
       try {
-        console.log('Attempt 1 (no cookies): Downloading via default,web_embedded client...');
+        console.log('Attempt 1 (no cookies): Downloading via web_creator,web_embedded,mweb client...');
         const args1 = [
           ...commonArgs,
-          '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
+          '--extractor-args', 'youtube:player_client=web_creator,web_embedded,mweb',
           '--add-header', `User-Agent:${desktopUA}`,
           '--add-header', 'Accept-Language:en-US,en;q=0.9',
           '-f', 'best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best[ext=mp4]/18/best',
@@ -653,14 +653,14 @@ export async function downloadMediaVideo(url, targetDir) {
         lastError = null;
       } catch (err1) {
         lastError = err1;
-        console.warn('Attempt 1 (no cookies, default,web_embedded) failed:', sanitizeError(err1));
+        console.warn('Attempt 1 (no cookies, web_creator,web_embedded,mweb) failed:', sanitizeError(err1));
 
-        // Attempt 2: web_embedded, mweb standalone at 360p (itag 18)
+        // Attempt 2: default, web_embedded, mweb standalone at 360p (itag 18)
         try {
-          console.log('Attempt 2 (no cookies): web_embedded, mweb 360p fallback...');
+          console.log('Attempt 2 (no cookies): default, web_embedded 360p fallback...');
           const args2 = [
             ...commonArgs,
-            '--extractor-args', 'youtube:player_client=web_embedded,mweb,-tv,-tv_downgraded',
+            '--extractor-args', 'youtube:player_client=default,web_embedded,mweb,-tv_downgraded',
             '--add-header', `User-Agent:${desktopUA}`,
             '-f', '18/best[height<=480][ext=mp4]/best',
             '--merge-output-format', 'mp4',
