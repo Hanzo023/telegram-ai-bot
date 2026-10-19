@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Gemini 3.8 Live Voice Agent</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    body {
+      background-color: #0b0f19;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      justify-content: space-between;
+      align-items: center;
+      padding: 24px 16px;
+    }
+    .header {
+      text-align: center;
+      margin-top: 12px;
+    }
+    .header h1 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #38bdf8, #818cf8, #c084fc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.02em;
+    }
+    .badge {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 3px 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      border-radius: 9999px;
+      background: rgba(56, 189, 248, 0.12);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+    }
+    .visualizer-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      flex: 1;
+      position: relative;
+    }
+    .orb {
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.4) 0%, rgba(14, 165, 233, 0.15) 70%, transparent 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 50px rgba(56, 189, 248, 0.2);
+      transition: all 0.3s ease;
+      position: relative;
+    }
+    .orb.active {
+      animation: pulse 2s infinite ease-in-out;
+      box-shadow: 0 0 80px rgba(99, 102, 241, 0.45);
+    }
+    .orb.speaking {
+      animation: pulseSpeaking 1.2s infinite ease-in-out;
+      box-shadow: 0 0 90px rgba(192, 132, 252, 0.6);
+      background: radial-gradient(circle, rgba(192, 132, 252, 0.5) 0%, rgba(99, 102, 241, 0.25) 70%, transparent 100%);
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 0.85; }
+      50% { transform: scale(1.08); opacity: 1; }
+    }
+    @keyframes pulseSpeaking {
+      0%, 100% { transform: scale(1.05); }
+      50% { transform: scale(1.2); }
+    }
+    .mic-icon {
+      font-size: 48px;
+      user-select: none;
+    }
+    .status-text {
+      margin-top: 24px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: #94a3b8;
+      text-align: center;
+      min-height: 24px;
+    }
+    .transcript-box {
+      width: 100%;
+      max-width: 480px;
+      height: 140px;
+      background: rgba(30, 41, 59, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      padding: 14px 16px;
+      overflow-y: auto;
+      font-size: 0.88rem;
+      line-height: 1.45;
+      color: #cbd5e1;
+      backdrop-filter: blur(8px);
+      margin-bottom: 20px;
+    }
+    .transcript-entry {
+      margin-bottom: 8px;
+    }
+    .transcript-entry.user {
+      color: #38bdf8;
+    }
+    .transcript-entry.agent {
+      color: #e2e8f0;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      width: 100%;
+      max-width: 480px;
+      margin-bottom: 12px;
+    }
+    .btn {
+      flex: 1;
+      padding: 14px 20px;
+      border-radius: 12px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s ease;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+    }
+    .btn-primary:active {
+      transform: scale(0.98);
+    }
+    .btn-danger {
+      background: #ef4444;
+      color: #ffffff;
+    }
+    .voice-select {
+      background: rgba(30, 41, 59, 0.8);
+      color: #cbd5e1;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 0 14px;
+      font-size: 0.85rem;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Gemini 3.8 Live Voice</h1>
+    <div class="badge">Real-Time Duplex Agent</div>
+  </div>
+
+  <div class="visualizer-container">
+    <div class="orb" id="orb">
+      <div class="mic-icon" id="micIcon">🎙️</div>
+    </div>
+    <div class="status-text" id="statusText">Tap "Start Call" to begin speaking</div>
+  </div>
+
+  <div class="transcript-box" id="transcriptBox">
+    <div class="transcript-entry agent">✨ Real-time voice agent ready. Talk naturally in English or your preferred language.</div>
+  </div>
+
+  <div class="controls">
+    <select id="voiceSelect" class="voice-select">
+      <option value="Puck">Voice: Puck</option>
+      <option value="Aoede">Voice: Aoede</option>
+      <option value="Charon">Voice: Charon</option>
+      <option value="Fenrir">Voice: Fenrir</option>
+      <option value="Kore">Voice: Kore</option>
+    </select>
+    <button class="btn btn-primary" id="callBtn">📞 Start Call</button>
+  </div>
+
+  <script>
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.ready();
+      window.Telegram.WebApp.expand();
+    }
+
+    const orb = document.getElementById('orb');
+    const micIcon = document.getElementById('micIcon');
+    const statusText = document.getElementById('statusText');
+    const transcriptBox = document.getElementById('transcriptBox');
+    const callBtn = document.getElementById('callBtn');
+    const voiceSelect = document.getElementById('voiceSelect');
+
+    let ws = null;
+    let audioContext = null;
+    let micStream = null;
+    let isCalling = false;
+    let audioQueue = [];
+    let isPlaying = false;
+
+    function addTranscript(text, role) {
+      const entry = document.createElement('div');
+      entry.className = `transcript-entry ${role}`;
+      entry.textContent = (role === 'user' ? '👤 You: ' : '🤖 Gemini: ') + text;
+      transcriptBox.appendChild(entry);
+      transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
+    async function startCall() {
+      try {
+        statusText.textContent = 'Connecting to Gemini Live...';
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/live-call?voice=${encodeURIComponent(voiceSelect.value)}`;
+
+        ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = async () => {
+          statusText.textContent = 'Requesting microphone access...';
+          await initAudioCapture();
+          isCalling = true;
+          callBtn.textContent = '❌ End Call';
+          callBtn.className = 'btn btn-danger';
+          orb.className = 'orb active';
+          statusText.textContent = 'Connected! Speak freely into your mic.';
+        };
+
+        ws.onmessage = async (event) => {
+          if (typeof event.data === 'string') {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === 'transcript') {
+                addTranscript(data.text, 'agent');
+              } else if (data.type === 'status') {
+                statusText.textContent = data.text;
+              }
+            } catch {}
+          } else if (event.data instanceof ArrayBuffer) {
+            // Received 24kHz raw PCM audio chunk from Gemini Live
+            playPcmChunk(event.data);
+          }
+        };
+
+        ws.onerror = (err) => {
+          console.error('WebSocket error:', err);
+          statusText.textContent = 'Connection error. Check connection or quota.';
+          endCall();
+        };
+
+        ws.onclose = () => {
+          endCall();
+        };
+      } catch (err) {
+        statusText.textContent = 'Error: ' + err.message;
+        endCall();
+      }
+    }
+
+    async function initAudioCapture() {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      const source = audioContext.createMediaStreamSource(micStream);
+      // Resample / chunk capture
+      const processor = audioContext.createScriptProcessor(2048, 1, 1);
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      processor.onaudioprocess = (e) => {
+        if (!isCalling || !ws || ws.readyState !== WebSocket.OPEN) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        // Convert Float32 [-1.0, 1.0] to 16-bit Int PCM
+        const pcm16 = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          const s = Math.max(-1, Math.min(1, inputData[i]));
+          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        ws.send(pcm16.buffer);
+      };
+    }
+
+    function playPcmChunk(arrayBuffer) {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      orb.className = 'orb speaking';
+      const int16 = new Int16Array(arrayBuffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+
+      const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      source.onended = () => {
+        if (audioQueue.length === 0) {
+          orb.className = 'orb active';
+        }
+      };
+      source.start();
+    }
+
+    function endCall() {
+      isCalling = false;
+      callBtn.textContent = '📞 Start Call';
+      callBtn.className = 'btn btn-primary';
+      orb.className = 'orb';
+      statusText.textContent = 'Call ended. Tap to reconnect.';
+
+      if (micStream) {
+        micStream.getTracks().forEach((track) => track.stop());
+        micStream = null;
+      }
+      if (ws) {
+        try { ws.close(); } catch {}
+        ws = null;
+      }
+    }
+
+    callBtn.addEventListener('click', () => {
+      if (isCalling) {
+        endCall();
+      } else {
+        startCall();
+      }
+    });
+  </script>
+</body>
+</html>

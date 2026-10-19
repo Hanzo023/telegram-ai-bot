@@ -28,6 +28,22 @@ import {
   clearAllSearchHistory,
 } from './history-service.js';
 
+import {
+  executeGeminiLiveExchange,
+  AVAILABLE_VOICES,
+  getUserVoice,
+  setUserVoice,
+  isUserLiveModeEnabled,
+  setUserLiveMode,
+} from './gemini-live-service.js';
+import { setupLiveCallServer } from './live-call-server.js';
+import {
+  runGeminiAgent,
+  runDeepResearchAgent,
+} from './gemini-agent-service.js';
+
+const userAgentMode = new Map(); // userId -> boolean
+
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
 const VAULT_FILE = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
 const CONVERSATION_HISTORY_FILE = process.env.CONVERSATION_HISTORY_FILE || path.resolve('./conversation_history.json');
@@ -51,6 +67,11 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[HTTP Server] Health check server immediately listening on 0.0.0.0:${PORT}`);
+  try {
+    setupLiveCallServer(server);
+  } catch (liveServerErr) {
+    console.warn('[Live Call Server] Warning attaching live call server:', liveServerErr.message);
+  }
 });
 
 try {
@@ -466,8 +487,62 @@ async function processUserBatch(userId, items, ctx) {
       .join('\n\n');
 
     if (combinedText) {
-      await sendToClaudeWithHistory(ctx, combinedText);
+      if (userAgentMode.get(userId)) {
+        await handleAgentCommand(ctx, combinedText);
+      } else {
+        await sendToClaudeWithHistory(ctx, combinedText);
+      }
     }
+  }
+}
+
+async function handleAgentCommand(ctx, prompt) {
+  const userId = ctx.from.id;
+  const statusMsg = await ctx.reply('🤖 *Gemini Agent initialized...*', { parse_mode: 'Markdown' });
+  let lastEditTime = Date.now();
+
+  const updateStatus = async (statusText) => {
+    if (Date.now() - lastEditTime > 900) {
+      lastEditTime = Date.now();
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, statusText, {
+          parse_mode: 'Markdown',
+        });
+      } catch {}
+    }
+  };
+
+  try {
+    const result = await runGeminiAgent({
+      prompt,
+      onStatusUpdate: (text) => updateStatus(text),
+    });
+
+    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+    let reply = result.finalAnswer;
+    if (result.stepsExecuted && result.stepsExecuted.length > 0) {
+      const toolsSummary = result.stepsExecuted.map((s) => `• \`${s.name}\``).join('\n');
+      reply = `${reply}\n\n🛠️ *Autonomous tools executed:*\n${toolsSummary}`;
+    }
+
+    const { safeText } = sanitizeAndCheckSecrets(reply, 'chat_reply');
+    await sendLongMessage(ctx, safeText);
+
+    // Persist to conversation history
+    const history = conversationHistory.get(userId) || [];
+    history.push({ role: 'user', content: prompt });
+    history.push({ role: 'assistant', content: result.finalAnswer });
+    conversationHistory.set(userId, history);
+    scheduleConversationHistoryPersistence();
+  } catch (err) {
+    console.error('[Gemini Agent Error]:', sanitizeError(err));
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `❌ *Gemini Agent Error:*\n${err.message || 'Failed to complete agent task.'}`,
+      { parse_mode: 'Markdown' }
+    ).catch(() => {});
   }
 }
 
@@ -507,8 +582,18 @@ bot.command(['start', 'help'], async (ctx) => {
     '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
     '• 🎥 **YouTube Search**: Search videos and direct links to watch on YouTube using `/youtube`.\n' +
     '• 🌐 **AI Research & Web Search**: Research any topic, find websites, and look up products powered by Gemini.\n' +
-    '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n\n' +
+    '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n' +
+    '• 🎙️ **Gemini 3.8 Live Voice**: Ultra-low latency voice notes & real-time live duplex calls!\n' +
+    '• 🤖 **Gemini Autonomous Agent**: ReAct tool loop (web search, files, YouTube, calculations) (/agent, /agent_mode)\n' +
+    '• 🔬 **Deep Research Agent**: Exhaustive background research reports (/deep_research)\n\n' +
     '📌 *Commands:*\n' +
+    '/agent <prompt> - 🤖 Autonomous agent with tools (web search, files, math)\n' +
+    '/agent_mode - 🎚️ Toggle Gemini Agent as primary assistant for all messages\n' +
+    '/deep_research <topic> - 🔬 Exhaustive multi-step research agent report\n' +
+    '/live <query> - 🎙️ Ask Gemini Live and receive spoken voice reply\n' +
+    '/call - 📞 Open interactive real-time duplex voice call WebApp\n' +
+    '/voice - 🗣️ Choose Gemini Live voice (Puck, Aoede, Charon, Fenrir, Kore)\n' +
+    '/live_mode - 🎚️ Toggle automatic Live Voice replies for voice notes\n' +
     '/cancel - Exit active command mode & return to normal chat\n' +
     '/image <prompt> - 🎨 Generate pictures with Gemini Nano Banana\n' +
     '/search <query> - AI research & web search powered by Gemini\n' +
@@ -524,6 +609,246 @@ bot.command(['start', 'help'], async (ctx) => {
     '/local - Save new files to both Drive D and Cloud Vault',
     { parse_mode: 'Markdown' }
   );
+});
+
+bot.command('live', async (ctx) => {
+  const query = ctx.message.text.replace(/^\/live\s*/i, '').trim();
+  if (!query) {
+    await ctx.reply(
+      '🎙️ *Gemini 3.8 Live Voice Prompt*\n\n' +
+      'Send a query to receive an instant spoken voice reply powered by `gemini-3.8-live`!\n\n' +
+      '*Usage:*\n' +
+      '`/live What are three interesting facts about Saturn?`\n\n' +
+      '💡 You can change the voice using `/voice` (Puck, Aoede, Charon, Fenrir, Kore).',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const userId = ctx.from.id;
+  const userVoice = getUserVoice(userId);
+  const statusMsg = await ctx.reply('🎙️ *Connecting to Gemini 3.8 Live...*', { parse_mode: 'Markdown' });
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction('record_voice').catch(() => {});
+  }, 4000);
+
+  try {
+    const result = await executeGeminiLiveExchange({
+      text: query,
+      voice: userVoice,
+    });
+
+    clearInterval(typingInterval);
+    if (result.voiceBuffer) {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+      await ctx.replyWithVoice(new InputFile(result.voiceBuffer, 'gemini_live.ogg'), {
+        caption: result.replyText ? `🎙️ *Gemini 3.8 Live (${userVoice}):*\n${result.replyText}` : undefined,
+        parse_mode: 'Markdown',
+      });
+    } else {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `🎙️ *Gemini 3.8 Live (${userVoice}):*\n${result.replyText || 'Response received.'}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  } catch (err) {
+    clearInterval(typingInterval);
+    console.error('Error with /live command:', sanitizeError(err));
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `⚠️ *Gemini Live Notice:*\n${err.message || 'Failed to connect to Live API.'}\n\n` +
+      `💡 Note: Gemini Live API requires available quota on your Google GenAI key. You can check quota at [Google AI Studio](https://aistudio.google.com/).`,
+      { parse_mode: 'Markdown' }
+    ).catch(() => {});
+  }
+});
+
+bot.command(['call', 'live_call'], async (ctx) => {
+  const userId = ctx.from.id;
+  const userVoice = getUserVoice(userId);
+  const host = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+  const callUrl = `${host}/live-call?voice=${encodeURIComponent(userVoice)}`;
+
+  const kb = new InlineKeyboard().url('📞 Open Live Voice Call WebApp', callUrl);
+
+  await ctx.reply(
+    `🎙️ *Gemini 3.8 Live Voice Call*\n\n` +
+    `Experience real-time, bidirectional voice conversations with Gemini 3.8 Live over WebSockets.\n\n` +
+    `• **Active Voice:** \`${userVoice}\`\n` +
+    `• **Latency:** Ultra-low, sub-second speech streaming\n` +
+    `• **Audio Engine:** 16kHz duplex mic ↔ 24kHz Gemini Live\n\n` +
+    `Tap the button below to open the WebApp and start talking:`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: kb,
+    }
+  );
+});
+
+bot.command('voice', async (ctx) => {
+  const arg = ctx.message.text.replace(/^\/voice\s*/i, '').trim();
+  const userId = ctx.from.id;
+
+  if (!arg) {
+    const currentVoice = getUserVoice(userId);
+    const kb = new InlineKeyboard();
+    AVAILABLE_VOICES.forEach((v, idx) => {
+      kb.text(`${v === currentVoice ? '✅ ' : ''}${v}`, `set_voice:${v}`);
+      if (idx % 2 === 1) kb.row();
+    });
+
+    await ctx.reply(
+      `🗣️ *Gemini 3.8 Live Voice Settings*\n\n` +
+      `Current active voice: *${currentVoice}*\n\n` +
+      `Choose a voice below or type \`/voice <name>\`:\n` +
+      `• **Puck**: Warm, natural neutral/male\n` +
+      `• **Aoede**: Breezy, expressive female\n` +
+      `• **Charon**: Deep, calm, steady male\n` +
+      `• **Fenrir**: Authoritative, energetic male\n` +
+      `• **Kore**: Crisp, professional female`,
+      { parse_mode: 'Markdown', reply_markup: kb }
+    );
+    return;
+  }
+
+  const capitalized = arg.charAt(0).toUpperCase() + arg.slice(1).toLowerCase();
+  if (setUserVoice(userId, capitalized)) {
+    await ctx.reply(`✅ *Voice updated!* Your Gemini Live voice is now set to *${capitalized}*.`, {
+      parse_mode: 'Markdown',
+    });
+  } else {
+    await ctx.reply(
+      `❌ Unknown voice: *${arg}*.\nAvailable voices: ${AVAILABLE_VOICES.join(', ')}`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
+
+bot.callbackQuery(/^set_voice:(.+)$/, async (ctx) => {
+  const selectedVoice = ctx.match[1];
+  const userId = ctx.from.id;
+  setUserVoice(userId, selectedVoice);
+  await ctx.answerCallbackQuery({ text: `Voice set to ${selectedVoice}!` });
+
+  const kb = new InlineKeyboard();
+  AVAILABLE_VOICES.forEach((v, idx) => {
+    kb.text(`${v === selectedVoice ? '✅ ' : ''}${v}`, `set_voice:${v}`);
+    if (idx % 2 === 1) kb.row();
+  });
+
+  await ctx.editMessageText(
+    `🗣️ *Gemini 3.8 Live Voice Settings*\n\n` +
+    `Current active voice: *${selectedVoice}*\n\n` +
+    `• **Puck**: Warm, natural neutral/male\n` +
+    `• **Aoede**: Breezy, expressive female\n` +
+    `• **Charon**: Deep, calm, steady male\n` +
+    `• **Fenrir**: Authoritative, energetic male\n` +
+    `• **Kore**: Crisp, professional female`,
+    { parse_mode: 'Markdown', reply_markup: kb }
+  );
+});
+
+bot.command(['live_mode', 'livemode'], async (ctx) => {
+  const userId = ctx.from.id;
+  const isEnabled = !isUserLiveModeEnabled(userId);
+  setUserLiveMode(userId, isEnabled);
+
+  await ctx.reply(
+    isEnabled
+      ? `🎙️ *Gemini Live Mode ENABLED!*\n\n` +
+        `• When you send voice notes, Gemini 3.8 Live will respond directly with spoken voice notes.\n` +
+        `• Active voice: *${getUserVoice(userId)}* (Change with /voice)\n` +
+        `• To switch back to text replies, send /live_mode again.`
+      : `📝 *Gemini Live Mode DISABLED!*\n\n` +
+        `• Voice notes will now be transcribed and answered via standard text replies.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command('agent', async (ctx) => {
+  const prompt = ctx.message.text.replace(/^\/agent\s*/i, '').trim();
+  if (!prompt) {
+    await ctx.reply(
+      '🤖 *Gemini Autonomous Agent*\n\n' +
+      'Give the agent a goal or task. It will autonomously plan and execute tools (web search, files, YouTube, calculations) to accomplish it!\n\n' +
+      '*Usage:*\n' +
+      '`/agent Search the web for latest releases in Node.js, and check my local drive for any .js files`\n\n' +
+      '💡 Toggle `/agent_mode` to make the agent your primary assistant for all messages!',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  await handleAgentCommand(ctx, prompt);
+});
+
+bot.command(['agent_mode', 'agentmode'], async (ctx) => {
+  const userId = ctx.from.id;
+  const isEnabled = !userAgentMode.get(userId);
+  userAgentMode.set(userId, isEnabled);
+
+  await ctx.reply(
+    isEnabled
+      ? `🤖 *Gemini Agent Mode ENABLED!*\n\n` +
+        `• All standard text messages will now run through the Gemini Autonomous Agent.\n` +
+        `• The agent will automatically call tools (web search, YouTube, file inspection, math) whenever needed.\n` +
+        `• Send /agent_mode again to switch back to Claude.`
+      : `🧠 *Claude Standard Mode RESTORED!*\n\n` +
+        `• Messages will now be answered by Claude as normal.\n` +
+        `• You can still invoke the agent on-demand with \`/agent <prompt>\`.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command(['deep_research', 'research'], async (ctx) => {
+  const topic = ctx.message.text.replace(/^\/(?:deep_research|research)\s*/i, '').trim();
+  if (!topic) {
+    await ctx.reply(
+      '🔬 *Gemini Deep Research Agent*\n\n' +
+      'Conduct exhaustive, multi-step web research on any complex topic powered by `deep-research-preview-04-2026`!\n\n' +
+      '*Usage:*\n' +
+      '`/deep_research The current state and future architecture of quantum computing chips`',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const statusMsg = await ctx.reply('🔬 *Initiating Gemini Deep Research Agent...*', { parse_mode: 'Markdown' });
+  let lastEditTime = Date.now();
+
+  const updateStatus = async (statusText) => {
+    if (Date.now() - lastEditTime > 1500) {
+      lastEditTime = Date.now();
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, statusText, {
+          parse_mode: 'Markdown',
+        });
+      } catch {}
+    }
+  };
+
+  try {
+    const { report } = await runDeepResearchAgent({
+      topic,
+      onStatusUpdate: updateStatus,
+      timeoutMs: 180000,
+    });
+
+    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    const { safeText } = sanitizeAndCheckSecrets(report, 'chat_reply');
+    await sendLongMessage(ctx, `📑 *Deep Research Report:*\n\n${safeText}`);
+  } catch (err) {
+    console.error('[Deep Research Error]:', sanitizeError(err));
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `⚠️ *Deep Research Notice:*\n${err.message || 'Failed to complete research.'}\n\n` +
+      `💡 Note: Deep Research Agent requires available quota on your Google GenAI account.`,
+      { parse_mode: 'Markdown' }
+    ).catch(() => {});
+  }
 });
 
 async function handleClearAll(ctx) {
@@ -2287,7 +2612,39 @@ async function handleVoiceMessage(ctx) {
       throw new Error(`Failed to download audio file: ${fileRes.statusText}`);
     }
     const arrayBuffer = await fileRes.arrayBuffer();
-    const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+    const audioBuffer = Buffer.from(arrayBuffer);
+
+    // If user has Gemini Live mode enabled, attempt Gemini 3.8 Live direct spoken reply
+    const userId = ctx.from.id;
+    if (isUserLiveModeEnabled(userId)) {
+      ctx.replyWithChatAction('record_voice').catch(() => {});
+      try {
+        const userVoice = getUserVoice(userId);
+        const liveResult = await executeGeminiLiveExchange({
+          audioBuffer,
+          voice: userVoice,
+        });
+
+        if (liveResult.voiceBuffer) {
+          clearInterval(typingInterval);
+          await ctx.replyWithVoice(new InputFile(liveResult.voiceBuffer, 'gemini_live.ogg'), {
+            caption: liveResult.replyText ? `🎙️ *Gemini 3.8 Live (${userVoice}):*\n${liveResult.replyText}` : undefined,
+            parse_mode: 'Markdown',
+          });
+
+          const history = conversationHistory.get(userId) || [];
+          history.push({ role: 'user', content: '[Spoken Voice Note]' });
+          history.push({ role: 'assistant', content: liveResult.replyText || '[Voice Note Reply]' });
+          conversationHistory.set(userId, history);
+          scheduleConversationHistoryPersistence();
+          return;
+        }
+      } catch (liveErr) {
+        console.warn('[Gemini Live] Live exchange error, falling back to standard pipeline:', sanitizeError(liveErr));
+      }
+    }
+
+    const base64Audio = audioBuffer.toString('base64');
 
     let mimeType = voice.mime_type || 'audio/ogg';
     if (fileInfo.file_path.endsWith('.oga') || fileInfo.file_path.endsWith('.ogg')) {
