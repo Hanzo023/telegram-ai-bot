@@ -41,6 +41,12 @@ import {
   runGeminiAgent,
   runDeepResearchAgent,
 } from './gemini-agent-service.js';
+import {
+  setupLaptopBridge,
+  setBotApi,
+  isLaptopConnected,
+  getConnectedLaptopsList,
+} from './laptop-bridge.js';
 
 const userAgentMode = new Map(); // userId -> boolean
 
@@ -50,6 +56,23 @@ const CONVERSATION_HISTORY_FILE = process.env.CONVERSATION_HISTORY_FILE || path.
 const TEMP_DOWNLOADS_DIR = path.resolve('./temp_downloads');
 
 const PORT = parseInt(process.env.PORT, 10) || 10000;
+
+// Robust extraction of all allowed Telegram IDs from ALLOWED_USER_IDS and/or ALLOWED_USER_ID
+// Handles comma-separated, space-separated, quotes, brackets, and multiple variables
+const combinedAllowedRaw = [process.env.ALLOWED_USER_IDS, process.env.ALLOWED_USER_ID]
+  .filter(Boolean)
+  .join(',');
+const allowedIdMatches = combinedAllowedRaw.match(/-?\d+/g) || [];
+const allowedUserIds = new Set(allowedIdMatches.map((id) => parseInt(id, 10)));
+
+// Primary user ID for admin/vault backup operations (defaults to the first ID in the list)
+const allowedUserId = allowedUserIds.values().next().value || null;
+
+console.log(`[Config] Authorized Telegram User IDs configured (${allowedUserIds.size} user(s) authorized)`);
+if (allowedUserIds.size === 0) {
+  console.warn('⚠️ WARNING: No valid ALLOWED_USER_ID configured! All incoming messages will be rejected.');
+}
+
 const server = http.createServer((req, res) => {
   // Always return 200 OK for any path (/, /health, /health/, /healthz, etc.) so Render health checks always pass
   res.writeHead(200, {
@@ -71,6 +94,11 @@ server.listen(PORT, '0.0.0.0', () => {
     setupLiveCallServer(server);
   } catch (liveServerErr) {
     console.warn('[Live Call Server] Warning attaching live call server:', liveServerErr.message);
+  }
+  try {
+    setupLaptopBridge(server, allowedUserIds);
+  } catch (bridgeErr) {
+    console.warn('[Laptop Bridge] Warning attaching laptop bridge server:', bridgeErr.message);
   }
 });
 
@@ -100,21 +128,7 @@ if (!telegramToken) {
 }
 
 const bot = new Bot(telegramToken);
-// Robust extraction of all allowed Telegram IDs from ALLOWED_USER_IDS and/or ALLOWED_USER_ID
-// Handles comma-separated, space-separated, quotes, brackets, and multiple variables
-const combinedAllowedRaw = [process.env.ALLOWED_USER_IDS, process.env.ALLOWED_USER_ID]
-  .filter(Boolean)
-  .join(',');
-const allowedIdMatches = combinedAllowedRaw.match(/-?\d+/g) || [];
-const allowedUserIds = new Set(allowedIdMatches.map((id) => parseInt(id, 10)));
-
-// Primary user ID for admin/vault backup operations (defaults to the first ID in the list)
-const allowedUserId = allowedUserIds.values().next().value || null;
-
-console.log(`[Config] Authorized Telegram User IDs configured (${allowedUserIds.size} user(s) authorized)`);
-if (allowedUserIds.size === 0) {
-  console.warn('⚠️ WARNING: No valid ALLOWED_USER_ID configured! All incoming messages will be rejected.');
-}
+setBotApi(bot.api);
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -570,6 +584,7 @@ async function handleAgentCommand(ctx, prompt) {
   try {
     const result = await runGeminiAgent({
       prompt,
+      userId,
       onStatusUpdate: (text) => updateStatus(text),
     });
 
@@ -635,6 +650,7 @@ bot.command(['start', 'help'], async (ctx) => {
     '🤖 *Autonomous AI Agent*\n' +
     '• `/agent <prompt>` — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +
     '• `/agent_mode` — 🎚️ *Toggle All Chats*: Set Agent as default for all messages (send again or `/cancel` to exit)\n' +
+    '• `/devices` — 💻 *Laptop Agent*: View connected laptops for remote terminal & file tasks\n' +
     '• `/deep_research <topic>` — 🔬 *Deep Research*: Exhaustive multi-source background report\n\n' +
     '🎙️ *Real-Time Live Voice*\n' +
     '• `/live [query]` — 🎙️ Toggle Live Voice mode (spoken voice replies until /cancel)\n' +
@@ -866,6 +882,36 @@ bot.command(['agent_mode', 'agentmode'], async (ctx) => {
         `• **Single Tasks:** You can still run on-demand agent tasks anytime with \`/agent <prompt>\`.`,
     { parse_mode: 'Markdown' }
   );
+});
+
+bot.command(['devices', 'laptops', 'device'], async (ctx) => {
+  const userId = ctx.from.id;
+  const list = getConnectedLaptopsList(userId);
+  if (!list || list.length === 0) {
+    await ctx.reply(
+      '💻 *No Laptops Currently Connected*\n\n' +
+      'Your remote agent runner is not connected yet.\n\n' +
+      '• **How to connect:** Run `start-agent.bat` or `npm run laptop` on your laptop.\n' +
+      '• **Safe on Public Wi-Fi:** Uses an outbound encrypted TLS tunnel (`wss://`). It opens **0** listening ports on your laptop, so nobody on the network can scan, connect to, or hack it.\n' +
+      '• **Works Anywhere:** Connects from home Wi-Fi, coffee shops, or mobile hotspots.\n' +
+      '• **Multi-User Isolation:** Each authorized Telegram user controls only their own registered laptop.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  let text = `💻 *Connected Laptops (${list.length} registered)*\n\n`;
+  for (const d of list) {
+    const statusIcon = d.isOnline ? '🟢' : '🔴';
+    const statusText = d.isOnline ? 'Online & Ready' : 'Disconnected';
+    text += `${statusIcon} *${d.deviceName}* (\`${d.hostname}\`)\n` +
+      `   • OS: \`${d.platform}\`\n` +
+      `   • Status: ${statusText}\n` +
+      `   • Connected: ${new Date(d.connectedAt).toLocaleTimeString()}\n\n`;
+  }
+  text += `_Agent commands will now execute directly on your connected laptop!_\n` +
+    `Try: \`/agent check disk space and list files on my laptop\` or \`/agent install <package>\``;
+  await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
 bot.command(['deep_research', 'research'], async (ctx) => {
@@ -4123,6 +4169,7 @@ const botCommands = [
   // 🤖 AI Agent & Research
   { command: 'agent', description: '🤖 One-time task with live tools (web, files, math)' },
   { command: 'agent_mode', description: '🎚️ Toggle Agent as default for all chats (or /cancel)' },
+  { command: 'devices', description: '💻 View connected laptop status for Agent' },
   { command: 'deep_research', description: '🔬 Deep Research report (deep-research-2026)' },
 
   // 🎙️ Real-Time Voice & Live Calls

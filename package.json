@@ -6,6 +6,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
+    "laptop": "node laptop-runner.js",
     "sync": "node sync-drive-d.js"
   },
   "engines": {

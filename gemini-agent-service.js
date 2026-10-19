@@ -3,6 +3,14 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { searchWeb, searchYouTube, sanitizeError } from './search-service.js';
+import {
+  runLaptopCommand,
+  readLaptopFile,
+  writeLaptopFile,
+  listLaptopDirectory,
+  getLaptopStatus,
+  isLaptopConnected,
+} from './laptop-bridge.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
 const PRIMARY_MODEL = process.env.GEMINI_AGENT_MODEL || 'gemini-3.5-flash-lite';
@@ -12,6 +20,65 @@ const FALLBACK_MODEL = 'gemini-3.8-flash';
  * Tool Declarations for Gemini Interactions API
  */
 export const AGENT_TOOLS = [
+  {
+    type: 'function',
+    name: 'run_laptop_terminal',
+    description: 'Execute a terminal command (PowerShell / Bash) on the user\'s physical laptop to install packages, run tests, fix code, or inspect processes while they are away.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The terminal command line to execute (e.g. "npm install express", "python test.py", "git status")' },
+        cwd: { type: 'string', description: 'Optional working directory path on the laptop (e.g. "D:\\projects\\my-app")' },
+      },
+      required: ['command'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'read_laptop_file',
+    description: 'Read the contents of a file directly from the user\'s physical laptop filesystem.',
+    parameters: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Full or relative path to the file on the laptop (e.g. "D:\\projects\\app\\index.js")' },
+        max_lines: { type: 'integer', description: 'Max lines to read (default 200)' },
+      },
+      required: ['file_path'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'write_laptop_file',
+    description: 'Create, write, or patch a file directly on the user\'s physical laptop filesystem to fix bugs or update code.',
+    parameters: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Full path to the file on the laptop' },
+        content: { type: 'string', description: 'The complete text/code content to write to the file' },
+      },
+      required: ['file_path', 'content'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'list_laptop_files',
+    description: 'List files and directories directly on the user\'s physical laptop filesystem.',
+    parameters: {
+      type: 'object',
+      properties: {
+        dir_path: { type: 'string', description: 'Directory path to list on the laptop (e.g. "D:\\projects")' },
+      },
+    },
+  },
+  {
+    type: 'function',
+    name: 'get_laptop_status',
+    description: 'Get live hardware and system status of the user\'s physical laptop (CPU, memory, battery, hostname, platform).',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
   {
     type: 'function',
     name: 'search_web',
@@ -98,7 +165,7 @@ export const AGENT_TOOLS = [
 /**
  * Execute an individual tool call
  */
-export async function executeTool(name, args = {}) {
+export async function executeTool(name, args = {}, context = {}) {
   switch (name) {
     case 'search_web': {
       const query = args.query || '';
@@ -320,6 +387,71 @@ export async function executeTool(name, args = {}) {
       }
     }
 
+    case 'run_laptop_terminal': {
+      const { command, cwd } = args;
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      try {
+        const res = await runLaptopCommand(context.userId, command, cwd);
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
+    case 'read_laptop_file': {
+      const filePath = args.file_path || args.filename;
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      try {
+        const res = await readLaptopFile(context.userId, filePath, args.max_lines);
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
+    case 'write_laptop_file': {
+      const filePath = args.file_path || args.filename;
+      const content = args.content;
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      try {
+        const res = await writeLaptopFile(context.userId, filePath, content);
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
+    case 'list_laptop_files': {
+      const dirPath = args.dir_path || args.path;
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      try {
+        const res = await listLaptopDirectory(context.userId, dirPath);
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
+    case 'get_laptop_status': {
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      try {
+        const res = await getLaptopStatus(context.userId);
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
@@ -332,9 +464,10 @@ export async function executeTool(name, args = {}) {
  * @param {string} options.prompt - User goal or prompt
  * @param {Function} [options.onStatusUpdate] - Live status callback (e.g. "🔍 Searching web...")
  * @param {number} [options.maxSteps=6] - Max tool calling iterations
+ * @param {number} [options.userId] - Telegram User ID to route laptop tools to
  * @returns {Promise<{ finalAnswer: string, stepsExecuted: Array, success: boolean }>}
  */
-export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6 }) {
+export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6, userId }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not configured in environment variables.');
@@ -358,9 +491,9 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6 }) {
         input: prompt,
         tools: AGENT_TOOLS,
         system_instruction:
-          'You are an autonomous AI Agent in Telegram with access to tools (web search, YouTube, drive files, calculations, system status). ' +
-          'When the user asks questions requiring real-time facts, files, or calculations, call the appropriate tools. ' +
-          'Execute tools iteratively until you have gathered all necessary information, then synthesize a comprehensive, clean Markdown answer.',
+          'You are an autonomous AI Agent in Telegram with access to tools (web search, YouTube, drive files, calculations, system status, AND live laptop control). ' +
+          'When the user asks you to run commands, install software, inspect or fix code on their laptop, call the run_laptop_terminal, read_laptop_file, write_laptop_file, or list_laptop_files tools. ' +
+          'Execute tools iteratively until you have completed the task, then synthesize a comprehensive, clean Markdown answer with the terminal outputs.',
       });
 
       let stepCount = 0;
@@ -398,7 +531,7 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6 }) {
           onStatusUpdate(`⚙️ *Executing tool:* \`${toolName}(${argsSummary})\`...`);
         }
 
-        const toolResult = await executeTool(toolName, toolArgs);
+        const toolResult = await executeTool(toolName, toolArgs, { userId });
 
         if (onStatusUpdate) {
           onStatusUpdate(`🧠 *Analyzing results from ${toolName}...*`);
