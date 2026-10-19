@@ -12,4 +12,6 @@ temp_downloads/
 .claude/
 cookies.txt
 *cookies*.txt
+user_settings.json
+user_settings.json.tmp
 secrets/

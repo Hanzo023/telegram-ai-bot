@@ -2619,6 +2619,7 @@ function sanitizeAndCheckSecrets(text, context = 'content') {
     'ALLOWED_USER_ID',
     'ALLOWED_USER_IDS',
     'YOUTUBE_COOKIES',
+    'LAPTOP_RUNNER_SECRET',
   ];
 
   for (const envKey of secretEnvKeys) {
