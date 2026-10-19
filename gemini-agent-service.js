@@ -512,7 +512,7 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
           '     • Exactly what file was created and its path on their machine.\n' +
           '     • The output produced by the script.\n' +
           '     • What to do next or how they can run it again.\n' +
-          '• If the laptop is disconnected, explain that their runner is offline (instruct them to run start-agent.bat), and provide the complete script and exact manual terminal commands as a fallback.',
+          '• If the laptop is disconnected, explain that their runner is offline (instruct them to use /setup_laptop to receive their personalized runner files or 1-line PowerShell installer directly in Telegram), and provide the complete script and exact manual terminal commands as a fallback.',
       });
 
       let stepCount = 0;

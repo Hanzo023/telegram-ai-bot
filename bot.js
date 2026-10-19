@@ -74,7 +74,146 @@ if (allowedUserIds.size === 0) {
   console.warn('⚠️ WARNING: No valid ALLOWED_USER_ID configured! All incoming messages will be rejected.');
 }
 
+function getPublicBotUrl(req) {
+  if (process.env.SERVER_URL && process.env.SERVER_URL.trim()) {
+    return process.env.SERVER_URL.trim().replace(/\/+$/, '');
+  }
+  if (process.env.RENDER_EXTERNAL_URL && process.env.RENDER_EXTERNAL_URL.trim()) {
+    return process.env.RENDER_EXTERNAL_URL.trim().replace(/\/+$/, '');
+  }
+  if (req && req.headers && req.headers.host) {
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    return `${proto}://${req.headers.host}`;
+  }
+  return 'https://telegram-ai-bot-znei.onrender.com';
+}
+
+function generateStartAgentBat({ userId, serverUrl }) {
+  return `@echo off
+title Telegram AI Laptop Agent Runner
+cd /d "%~dp0"
+cls
+echo ========================================================
+echo   Starting Telegram AI Remote Laptop Agent Runner...
+echo ========================================================
+echo.
+
+where node >nul 2>nul
+if %errorlevel% neq 0 (
+  echo [ERROR] Node.js is not installed or not in PATH!
+  echo Opening https://nodejs.org to download Node.js LTS...
+  start https://nodejs.org/
+  pause
+  exit /b 1
+)
+
+set "SERVER_URL=${serverUrl}"
+set "USER_ID=${userId}"
+
+if not exist laptop-runner.js (
+  echo [INFO] Downloading laptop-runner.js from cloud server...
+  powershell -Command "Invoke-WebRequest -Uri '%SERVER_URL%/download/laptop-runner.js' -OutFile 'laptop-runner.js'"
+)
+
+if not exist node_modules\\ws (
+  echo [INFO] Installing required dependencies (ws, dotenv)...
+  call npm install ws dotenv
+)
+
+node laptop-runner.js --user %USER_ID% --server %SERVER_URL% %*
+if %errorlevel% neq 0 (
+  echo.
+  echo [ERROR] Runner stopped with error code %errorlevel%.
+  pause
+)
+`;
+}
+
 const server = http.createServer((req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const pathname = url.pathname;
+
+    // 1. Download latest laptop-runner.js
+    if (pathname === '/download/laptop-runner.js') {
+      const runnerPath = path.resolve('./laptop-runner.js');
+      if (fs.existsSync(runnerPath)) {
+        res.writeHead(200, {
+          'Content-Type': 'application/javascript; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="laptop-runner.js"',
+          'Cache-Control': 'no-cache',
+        });
+        return fs.createReadStream(runnerPath).pipe(res);
+      }
+    }
+
+    // 2. Download personalized start-agent.bat
+    if (pathname === '/download/start-agent.bat' || pathname.startsWith('/download/start-agent')) {
+      const uid = url.searchParams.get('userId') || allowedUserId || '';
+      const serverUrl = getPublicBotUrl(req);
+      const batContent = generateStartAgentBat({ userId: uid, serverUrl });
+
+      res.writeHead(200, {
+        'Content-Type': 'application/x-bat',
+        'Content-Disposition': 'attachment; filename="start-agent.bat"',
+        'Cache-Control': 'no-cache',
+      });
+      return res.end(batContent);
+    }
+
+    // 3. PowerShell One-Line Setup Script: /setup/:userId.ps1 or /setup.ps1?userId=...
+    const setupPs1Match = pathname.match(/^\/setup(?:\/(-?\d+))?\.ps1$/i);
+    if (setupPs1Match || pathname === '/setup.ps1') {
+      const uid = (setupPs1Match && setupPs1Match[1]) || url.searchParams.get('userId') || allowedUserId || '';
+      const serverUrl = getPublicBotUrl(req);
+      const ps1Content =
+`# Telegram AI Laptop Agent Setup
+$ErrorActionPreference = 'Stop'
+$targetUserId = "${uid}"
+$serverUrl = "${serverUrl}"
+$agentDir = Join-Path $HOME "telegram-ai-agent"
+
+Write-Host "========================================================" -ForegroundColor Cyan
+Write-Host " 💻 Setting Up Telegram AI Laptop Agent (User: $targetUserId)" -ForegroundColor Cyan
+Write-Host "========================================================" -ForegroundColor Cyan
+
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] Node.js is not installed on this laptop!" -ForegroundColor Red
+    Write-Host "Please install Node.js from https://nodejs.org" -ForegroundColor Yellow
+    Start-Process "https://nodejs.org"
+    return
+}
+
+if (-not (Test-Path $agentDir)) {
+    New-Item -ItemType Directory -Path $agentDir -Force | Out-Null
+}
+Set-Location $agentDir
+
+Write-Host "[1/3] Downloading latest laptop-runner.js..." -ForegroundColor Gray
+Invoke-WebRequest -Uri "$serverUrl/download/laptop-runner.js" -OutFile (Join-Path $agentDir "laptop-runner.js")
+
+Write-Host "[2/3] Downloading start-agent.bat..." -ForegroundColor Gray
+Invoke-WebRequest -Uri "$serverUrl/download/start-agent.bat?userId=$targetUserId" -OutFile (Join-Path $agentDir "start-agent.bat")
+
+if (-not (Test-Path (Join-Path $agentDir "node_modules/ws"))) {
+    Write-Host "[3/3] Installing dependencies (ws, dotenv)..." -ForegroundColor Gray
+    npm install ws dotenv --no-audit --no-fund
+}
+
+Write-Host "\`n✅ Setup complete! Launching laptop agent..." -ForegroundColor Green
+node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $serverUrl
+`;
+
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      });
+      return res.end(ps1Content);
+    }
+  } catch (err) {
+    console.warn('[HTTP Server] Route handler error:', err.message);
+  }
+
   // Always return 200 OK for any path (/, /health, /health/, /healthz, etc.) so Render health checks always pass
   res.writeHead(200, {
     'Content-Type': 'application/json',
@@ -1040,7 +1179,98 @@ bot.command(['devices', 'laptops', 'device'], async (ctx) => {
     `• **Multi-User Isolation:** Each user's agent commands only execute on their own machine.\n\n` +
     `_Try: \`/status\` to view live CPU/RAM specs, or \`/agent run tests on my laptop\`._`;
 
-  await ctx.reply(text, { parse_mode: 'Markdown' });
+  const keyboard = new InlineKeyboard();
+  if (!list || list.length === 0) {
+    keyboard.text('💻 Setup My Laptop', `setup_laptop_${userId}`).row();
+  } else {
+    keyboard.text('📥 Re-download start-agent.bat', `dl_bat_${userId}`).row();
+  }
+  keyboard.text('🔄 Refresh Status', `refresh_devices_${userId}`);
+
+  await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+});
+
+/**
+ * Send pre-configured laptop agent runner files and 1-line setup command to a user
+ */
+async function sendLaptopRunnerSetup(ctx, targetUserId) {
+  const uid = Number(targetUserId || ctx.from.id);
+  const serverUrl = getPublicBotUrl();
+  const isOnline = isLaptopConnected(uid);
+
+  const ps1Command = `irm ${serverUrl}/setup/${uid}.ps1 | iex`;
+
+  const keyboard = new InlineKeyboard()
+    .text('📥 Download start-agent.bat', `dl_bat_${uid}`)
+    .text('🔄 Check Connection', `refresh_devices_${uid}`);
+
+  const msg =
+    `💻 *Telegram AI Laptop Runner Setup*\n\n` +
+    `• **Target User:** \`${uid}\` ${uid === ctx.from.id ? '(You)' : ''}\n` +
+    `• **Current Status:** ${isOnline ? '🟢 Connected & Online' : '🔴 Disconnected'}\n\n` +
+    `To let the agent install dependencies, create files, and execute scripts on your laptop:\n\n` +
+    `⚡ *Option 1: 1-Line PowerShell Command (Windows)*\n` +
+    `Open PowerShell on your laptop, paste this command, and press Enter:\n` +
+    `\`${ps1Command}\`\n\n` +
+    `📁 *Option 2: Download & Run Batch File*\n` +
+    `Download the pre-configured \`start-agent.bat\` attached below and double-click it on your laptop!\n\n` +
+    `🔒 *100% Safe on Public Wi-Fi:*\n` +
+    `The runner connects outward via encrypted TLS WebSocket (\`wss://\`). It opens **0** listening ports on your laptop, so nobody on public Wi-Fi can scan or connect to your machine.`;
+
+  await ctx.reply(msg, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+
+  // Attach the personalized start-agent.bat file directly to the chat
+  try {
+    const batContent = generateStartAgentBat({ userId: uid, serverUrl });
+    await ctx.replyWithDocument(new InputFile(Buffer.from(batContent, 'utf-8'), 'start-agent.bat'), {
+      caption: `💻 *start-agent.bat (Pre-configured for User ${uid})*\nSave to any folder on your laptop and double-click to start!`,
+      parse_mode: 'Markdown',
+    });
+  } catch (err) {
+    console.warn('[Setup] Error sending start-agent.bat file:', err.message);
+  }
+}
+
+bot.command(['setup_laptop', 'connect_laptop', 'runner', 'install_agent', 'setup_agent'], async (ctx) => {
+  await sendLaptopRunnerSetup(ctx, ctx.from.id);
+});
+
+bot.callbackQuery(/^setup_laptop_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  const targetUid = Number(ctx.match[1]);
+  await sendLaptopRunnerSetup(ctx, targetUid);
+});
+
+bot.callbackQuery(/^dl_bat_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Sending pre-configured start-agent.bat...' }).catch(() => {});
+  const targetUid = Number(ctx.match[1]);
+  const serverUrl = getPublicBotUrl();
+  const batContent = generateStartAgentBat({ userId: targetUid, serverUrl });
+  await ctx.replyWithDocument(new InputFile(Buffer.from(batContent, 'utf-8'), 'start-agent.bat'), {
+    caption: `💻 *start-agent.bat (User ${targetUid})*\nSave to your laptop and double-click to run!`,
+    parse_mode: 'Markdown',
+  });
+});
+
+bot.callbackQuery(/^refresh_devices_(\d+)$/, async (ctx) => {
+  const targetUid = Number(ctx.match[1]);
+  const isOnline = isLaptopConnected(targetUid);
+  await ctx.answerCallbackQuery({
+    text: isOnline ? '🟢 Laptop is Online & Ready!' : '🔴 Laptop is currently offline.',
+    show_alert: true,
+  }).catch(() => {});
+});
+
+bot.callbackQuery(/^refresh_status_(\d+)$/, async (ctx) => {
+  const targetUid = Number(ctx.match[1]);
+  const isOnline = isLaptopConnected(targetUid);
+  await ctx.answerCallbackQuery({
+    text: isOnline ? '🟢 Laptop connected! Use /status to view specs.' : '🔴 Laptop is still offline.',
+    show_alert: true,
+  }).catch(() => {});
 });
 
 bot.command(['deep_research', 'research'], async (ctx) => {
@@ -1760,7 +1990,14 @@ bot.command('status', async (ctx) => {
     `├─ Process Heap: ${botMemoryUsage} MB\n` +
     `└─ Conversations: ${conversationHistory.size} active`;
 
-  await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
+  const statusOptions = { parse_mode: 'Markdown' };
+  if (!hasLaptop) {
+    statusOptions.reply_markup = new InlineKeyboard()
+      .text('💻 Setup My Laptop', `setup_laptop_${userId}`)
+      .text('🔄 Refresh Status', `refresh_status_${userId}`);
+  }
+
+  await ctx.reply(statusMessage, statusOptions);
 });
 
 function formatBytes(bytes) {
