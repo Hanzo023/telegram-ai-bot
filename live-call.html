@@ -129,20 +129,21 @@
       margin-bottom: 12px;
     }
     .btn {
-      flex: 1;
-      padding: 14px 20px;
+      padding: 12px 16px;
       border-radius: 12px;
-      font-size: 0.95rem;
+      font-size: 0.9rem;
       font-weight: 600;
       border: none;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
+      gap: 6px;
       transition: all 0.2s ease;
+      user-select: none;
     }
     .btn-primary {
+      flex: 1.5;
       background: linear-gradient(135deg, #2563eb, #7c3aed);
       color: #ffffff;
       box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
@@ -150,7 +151,20 @@
     .btn-primary:active {
       transform: scale(0.98);
     }
+    .btn-secondary {
+      flex: 1;
+      background: rgba(30, 41, 59, 0.9);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .btn-secondary.off {
+      color: #94a3b8;
+      border-color: rgba(148, 163, 184, 0.2);
+    }
     .btn-danger {
+      flex: 1.5;
       background: #ef4444;
       color: #ffffff;
     }
@@ -159,9 +173,28 @@
       color: #cbd5e1;
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 12px;
-      padding: 0 14px;
-      font-size: 0.85rem;
+      padding: 0 10px;
+      font-size: 0.8rem;
       outline: none;
+    }
+    .transcript-entry {
+      margin-bottom: 8px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .transcript-entry.agent {
+      color: #cbd5e1;
+    }
+    .transcript-entry.user {
+      color: #38bdf8;
+    }
+    .agent-label {
+      color: #c084fc;
+      font-weight: 600;
+    }
+    .user-label {
+      color: #38bdf8;
+      font-weight: 600;
     }
   </style>
 </head>
@@ -190,6 +223,7 @@
       <option value="Fenrir">Voice: Fenrir</option>
       <option value="Kore">Voice: Kore</option>
     </select>
+    <button class="btn btn-secondary" id="echoGuardBtn" title="Prevents speakers from triggering false interruptions">🛡️ Guard: ON</button>
     <button class="btn btn-primary" id="callBtn">📞 Start Call</button>
   </div>
 
@@ -205,20 +239,62 @@
     const transcriptBox = document.getElementById('transcriptBox');
     const callBtn = document.getElementById('callBtn');
     const voiceSelect = document.getElementById('voiceSelect');
+    const echoGuardBtn = document.getElementById('echoGuardBtn');
 
     let ws = null;
     let audioContext = null;
     let micStream = null;
     let isCalling = false;
-    let audioQueue = [];
-    let isPlaying = false;
+    let isAgentSpeaking = false;
+    let echoGuardEnabled = true;
+    let currentAgentBubble = null;
+    let scheduledTime = 0;
+    let activeSources = [];
+    let hasSpokenRecently = false;
+    let lastVoiceTime = 0;
 
-    function addTranscript(text, role) {
+    echoGuardBtn.addEventListener('click', () => {
+      echoGuardEnabled = !echoGuardEnabled;
+      if (echoGuardEnabled) {
+        echoGuardBtn.textContent = '🛡️ Guard: ON';
+        echoGuardBtn.className = 'btn btn-secondary';
+        echoGuardBtn.title = 'Echo Guard ON: Mutes mic while Gemini speaks to prevent speakers from cutting off speech.';
+      } else {
+        echoGuardBtn.textContent = '🎧 Headset';
+        echoGuardBtn.className = 'btn btn-secondary off';
+        echoGuardBtn.title = 'Headset Mode: Full duplex simultaneous barge-in enabled (use headphones).';
+      }
+    });
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function appendAgentTranscript(text) {
+      if (!currentAgentBubble) {
+        const entry = document.createElement('div');
+        entry.className = 'transcript-entry agent';
+        entry.innerHTML = '<span class="agent-label">🤖 Gemini: </span><span class="agent-text"></span>';
+        transcriptBox.appendChild(entry);
+        currentAgentBubble = entry.querySelector('.agent-text');
+      }
+      currentAgentBubble.textContent += text;
+      transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
+    function appendUserTranscript(text) {
+      currentAgentBubble = null;
       const entry = document.createElement('div');
-      entry.className = `transcript-entry ${role}`;
-      entry.textContent = (role === 'user' ? '👤 You: ' : '🤖 Gemini: ') + text;
+      entry.className = 'transcript-entry user';
+      entry.innerHTML = `<span class="user-label">👤 You: </span><span class="user-text">${escapeHtml(text)}</span>`;
       transcriptBox.appendChild(entry);
       transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
+    function finishTurn() {
+      currentAgentBubble = null;
     }
 
     async function startCall() {
@@ -245,7 +321,22 @@
             try {
               const data = JSON.parse(event.data);
               if (data.type === 'transcript') {
-                addTranscript(data.text, 'agent');
+                appendAgentTranscript(data.text);
+              } else if (data.type === 'user_transcript') {
+                appendUserTranscript(data.text);
+              } else if (data.type === 'turn_complete') {
+                finishTurn();
+              } else if (data.type === 'interrupted') {
+                finishTurn();
+                // Clear audio queue on interruption
+                for (const s of activeSources) {
+                  try { s.stop(); } catch {}
+                }
+                activeSources = [];
+                scheduledTime = 0;
+                isAgentSpeaking = false;
+                orb.className = 'orb active';
+                statusText.textContent = 'Interrupted. Listening...';
               } else if (data.type === 'status') {
                 statusText.textContent = data.text;
               }
@@ -258,7 +349,7 @@
 
         ws.onerror = (err) => {
           console.error('WebSocket error:', err);
-          statusText.textContent = 'Connection error. Check connection or quota.';
+          statusText.textContent = 'Connection error. Check quota or connection.';
           endCall();
         };
 
@@ -270,8 +361,6 @@
         endCall();
       }
     }
-
-    let scheduledTime = 0;
 
     async function initAudioCapture() {
       audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -290,7 +379,6 @@
       });
 
       const source = audioContext.createMediaStreamSource(micStream);
-      // Resample / chunk capture
       const processor = audioContext.createScriptProcessor(2048, 1, 1);
       source.connect(processor);
       processor.connect(audioContext.destination);
@@ -299,7 +387,33 @@
         const outputData = e.outputBuffer.getChannelData(0);
         outputData.fill(0); // Silence loopback to prevent mic feedback into speakers
         if (!isCalling || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        // Echo Guard: when Gemini is speaking on speaker, mute mic to prevent self-interruption!
+        if (echoGuardEnabled && isAgentSpeaking) {
+          return;
+        }
+
         const inputData = e.inputBuffer.getChannelData(0);
+
+        // Noise gate / RMS check
+        let sum = 0;
+        for (let i = 0; i < inputData.length; i++) {
+          sum += inputData[i] * inputData[i];
+        }
+        const rms = Math.sqrt(sum / inputData.length);
+
+        if (rms < 0.008) {
+          // Below audible speech energy
+          if (hasSpokenRecently && Date.now() - lastVoiceTime > 400) {
+            hasSpokenRecently = false;
+            ws.send(JSON.stringify({ type: 'audio_stream_end' }));
+          }
+          return;
+        }
+
+        hasSpokenRecently = true;
+        lastVoiceTime = Date.now();
+
         // Convert Float32 [-1.0, 1.0] to 16-bit Int PCM
         const pcm16 = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
@@ -318,7 +432,10 @@
         audioContext.resume();
       }
 
+      isAgentSpeaking = true;
       orb.className = 'orb speaking';
+      statusText.textContent = 'Gemini speaking...';
+
       const int16 = new Int16Array(arrayBuffer);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) {
@@ -338,17 +455,27 @@
       }
       source.start(scheduledTime);
       scheduledTime += audioBuffer.duration;
+      activeSources.push(source);
 
       source.onended = () => {
-        if (audioContext && audioContext.currentTime >= scheduledTime - 0.05) {
+        activeSources = activeSources.filter((s) => s !== source);
+        if (activeSources.length === 0 && (!audioContext || audioContext.currentTime >= scheduledTime - 0.05)) {
+          isAgentSpeaking = false;
           orb.className = 'orb active';
+          statusText.textContent = 'Listening... Speak into your mic.';
         }
       };
     }
 
     function endCall() {
       isCalling = false;
+      isAgentSpeaking = false;
       scheduledTime = 0;
+      currentAgentBubble = null;
+      for (const s of activeSources) {
+        try { s.stop(); } catch {}
+      }
+      activeSources = [];
       callBtn.textContent = '📞 Start Call';
       callBtn.className = 'btn btn-primary';
       orb.className = 'orb';

@@ -92,7 +92,7 @@ export function setupLiveCallServer(server) {
             if (isTerminated) return;
             const content = msg.serverContent;
 
-            // Stream transcription text
+            // 1. Output transcription (Gemini speaking)
             if (content?.outputTranscription) {
               if (ws.readyState === ws.OPEN) {
                 ws.send(
@@ -104,7 +104,33 @@ export function setupLiveCallServer(server) {
               }
             }
 
-            // Stream binary PCM audio chunks back to browser/phone
+            // 2. Input transcription (User speaking)
+            if (content?.inputTranscription) {
+              if (ws.readyState === ws.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: 'user_transcript',
+                    text: content.inputTranscription.text,
+                  })
+                );
+              }
+            }
+
+            // 3. Interrupted signal
+            if (content?.interrupted) {
+              if (ws.readyState === ws.OPEN) {
+                ws.send(JSON.stringify({ type: 'interrupted' }));
+              }
+            }
+
+            // 4. Turn complete signal
+            if (content?.turnComplete) {
+              if (ws.readyState === ws.OPEN) {
+                ws.send(JSON.stringify({ type: 'turn_complete' }));
+              }
+            }
+
+            // 5. Stream binary PCM audio chunks back to browser/phone
             if (content?.modelTurn?.parts) {
               for (const p of content.modelTurn.parts) {
                 if (p.inlineData?.data && ws.readyState === ws.OPEN) {
@@ -163,6 +189,8 @@ export function setupLiveCallServer(server) {
           const parsed = JSON.parse(data.toString());
           if (parsed.type === 'text') {
             liveSession.sendRealtimeInput({ text: parsed.text });
+          } else if (parsed.type === 'audio_stream_end') {
+            liveSession.sendRealtimeInput({ audioStreamEnd: true });
           }
         } catch {}
       }
