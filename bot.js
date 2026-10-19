@@ -574,39 +574,34 @@ bot.use(async (ctx, next) => {
 
 bot.command(['start', 'help'], async (ctx) => {
   await ctx.reply(
-    'Hello! I\'m your personal AI assistant powered by Claude.\n\n' +
-    'Just send me any message, photo, document, or link and I\'ll help you right away!\n\n' +
-    '✨ *What I can do for you:*\n' +
-    '• 🎨 **AI Image Generation**: Create pictures with Gemini Nano Banana using `/image`.\n' +
-    '• 📸 **Photos & Screenshots**: Send any image or screenshot to analyze, transcribe, or translate.\n' +
-    '• 📁 **Categorized Library**: Files organized by type (.pdf, .py, code, media, etc.) sorted A-Z!\n' +
-    '• 🎥 **YouTube Search**: Search videos and direct links to watch on YouTube using `/youtube`.\n' +
-    '• 🌐 **AI Research & Web Search**: Research any topic, find websites, and look up products powered by Gemini.\n' +
-    '• ☁️ **Telegram Cloud Vault**: Access your files and search history 24/7 on any device.\n' +
-    '• 🎙️ **Gemini 3.8 Live Voice**: Ultra-low latency voice notes & real-time live duplex calls!\n' +
-    '• 🤖 **Gemini Autonomous Agent**: ReAct tool loop (web search, files, YouTube, calculations) (/agent, /agent_mode)\n' +
-    '• 🔬 **Deep Research Agent**: Exhaustive background research reports (/deep_research)\n\n' +
-    '📌 *Commands:*\n' +
-    '/agent <prompt> - 🤖 Autonomous agent with tools (web search, files, math)\n' +
-    '/agent_mode - 🎚️ Toggle Gemini Agent as primary assistant for all messages\n' +
-    '/deep_research <topic> - 🔬 Exhaustive multi-step research agent report\n' +
-    '/live <query> - 🎙️ Ask Gemini Live and receive spoken voice reply\n' +
-    '/call - 📞 Open interactive real-time duplex voice call WebApp\n' +
-    '/voice - 🗣️ Choose Gemini Live voice (Puck, Aoede, Charon, Fenrir, Kore)\n' +
-    '/live_mode - 🎚️ Toggle automatic Live Voice replies for voice notes\n' +
-    '/cancel - Exit active command mode & return to normal chat\n' +
-    '/image <prompt> - 🎨 Generate pictures with Gemini Nano Banana\n' +
-    '/search <query> - AI research & web search powered by Gemini\n' +
-    '/youtube <query> - Search YouTube videos & channels\n' +
-    '/storage - Open Cloud Vault (Saved Files & Search History)\n' +
-    '/library - Browse saved files by category (A-Z)\n' +
-    '/quiz - Generate an interactive quiz poll on loaded file or topic\n' +
-    '/status - View system resources, loaded file & storage mode\n' +
-    '/clear - Clear chat messages (keeps loaded file active)\n' +
-    '/clearall - Clear everything & unload file\n' +
-    '/nosave - Save new files only to Drive D\n' +
-    '/cloud - Save new files only to Cloud Vault\n' +
-    '/local - Save new files to both Drive D and Cloud Vault',
+    '✨ *Welcome to Your Personal AI Assistant*\n' +
+    'Powered by *Claude 3.7 / 3.5 Sonnet* & *Gemini 3.8 Live / Flash*.\n\n' +
+    'Send me any message, voice note, photo, or document and I\'ll assist you right away!\n\n' +
+    '🤖 *Autonomous AI Agent*\n' +
+    '• `/agent <prompt>` — 🤖 Autonomous agent with live tools (web, files, math)\n' +
+    '• `/agent_mode` — 🎚️ Toggle agent mode for all chat messages\n' +
+    '• `/deep_research <topic>` — 🔬 Exhaustive background research report\n\n' +
+    '🎙️ *Real-Time Live Voice*\n' +
+    '• `/live <query>` — 🎙️ Spoken voice note answer via Gemini 3.8 Live\n' +
+    '• `/call` — 📞 Open interactive real-time duplex voice call WebApp\n' +
+    '• `/voice` — 🗣️ Select Gemini Live voice (Puck, Aoede, Charon, Fenrir, Kore)\n' +
+    '• `/live_mode` — 📻 Toggle automatic spoken replies for voice notes\n\n' +
+    '🎨 *Search & Creation*\n' +
+    '• `/image <prompt>` — 🎨 Generate pictures with Gemini Nano Banana\n' +
+    '• `/search <query>` — 🌐 Live web search & deep factual research\n' +
+    '• `/youtube <query>` — 🎥 Search YouTube videos & channels\n' +
+    '• `/quiz` — 📝 Interactive quiz on a loaded document or topic\n\n' +
+    '☁️ *Files & Cloud Vault*\n' +
+    '• `/storage` — ☁️ Cloud Vault hub (Saved files & search history)\n' +
+    '• `/library` — 📁 Browse saved files by category (A-Z)\n' +
+    '• `/status` — 📊 View system resources, loaded file & mode\n\n' +
+    '🧹 *Workspace & Settings*\n' +
+    '• `/cancel` — ❌ Exit active prompt or search mode\n' +
+    '• `/clear` — 🧹 Clear conversation history (keeps loaded file)\n' +
+    '• `/clearall` — 🗑️ Clear all conversation history & unload file\n' +
+    '• `/local` — 💾 Save files to both Drive D & Cloud Vault\n' +
+    '• `/cloud` — ☁️ Save files to Cloud Vault only\n' +
+    '• `/nosave` — 💻 Save files to local Drive D only',
     { parse_mode: 'Markdown' }
   );
 });
@@ -4034,21 +4029,37 @@ try {
 
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 const botCommands = [
-  { command: 'cancel', description: 'Exit active search/youtube/image mode' },
+  // 🤖 AI Agent & Research
+  { command: 'agent', description: '🤖 Autonomous AI agent with live tools' },
+  { command: 'agent_mode', description: '🎚️ Toggle agent mode for all chat messages' },
+  { command: 'deep_research', description: '🔬 Deep Research report (deep-research-2026)' },
+
+  // 🎙️ Real-Time Voice & Live Calls
+  { command: 'live', description: '🎙️ Spoken voice reply via Gemini 3.8 Live' },
+  { command: 'call', description: '📞 Live duplex real-time voice call WebApp' },
+  { command: 'voice', description: '🗣️ Switch Gemini Live voice persona' },
+  { command: 'live_mode', description: '📻 Toggle automatic spoken voice replies' },
+
+  // 🎨 Creation & Search
   { command: 'image', description: '🎨 Generate pictures with Gemini Nano Banana' },
-  { command: 'search', description: 'AI research & web search powered by Gemini' },
-  { command: 'youtube', description: 'Search YouTube videos & channels' },
-  { command: 'library', description: 'Browse Cloud Vault & Drive D files (A-Z)' },
-  { command: 'storage', description: 'Cloud Hub (Saved Files & Search History)' },
-  { command: 'quiz', description: 'Take an interactive quiz on topic or document' },
-  { command: 'status', description: 'View system resources, loaded file & mode' },
-  { command: 'clear', description: 'Clear chat messages (keeps loaded file)' },
-  { command: 'clearall', description: 'Clear all chat & unload file safely' },
-  { command: 'nosave', description: 'Save new files to Drive D only' },
-  { command: 'cloud', description: 'Save new files to Cloud Vault only' },
-  { command: 'local', description: 'Save to both Drive D and Cloud Vault' },
-  { command: 'start', description: 'Show welcome message and help' },
-  { command: 'help', description: 'Show list of commands and guide' },
+  { command: 'search', description: '🌐 Live web search & deep factual research' },
+  { command: 'youtube', description: '🎥 Search YouTube videos & channels' },
+  { command: 'quiz', description: '📝 Interactive quiz on loaded file or topic' },
+
+  // ☁️ Cloud Vault & Files
+  { command: 'storage', description: '☁️ Cloud Vault hub (Saved files & history)' },
+  { command: 'library', description: '📁 Browse saved files by category (A-Z)' },
+  { command: 'status', description: '📊 System resources, active file & mode' },
+
+  // 🧹 Workspace & Session Controls
+  { command: 'cancel', description: '❌ Cancel active search, image, or quiz mode' },
+  { command: 'clear', description: '🧹 Clear conversation history (keeps file)' },
+  { command: 'clearall', description: '🗑️ Clear all conversation history & unload file' },
+  { command: 'local', description: '💾 Save files to both Drive D & Cloud Vault' },
+  { command: 'cloud', description: '☁️ Save files to Cloud Vault only' },
+  { command: 'nosave', description: '💻 Save files to local Drive D only' },
+  { command: 'help', description: '📖 Command reference and cheat sheet' },
+  { command: 'start', description: '✨ Welcome guide and features overview' },
 ];
 
 async function registerTelegramCommands() {
