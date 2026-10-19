@@ -46,6 +46,7 @@ import {
   setBotApi,
   isLaptopConnected,
   getConnectedLaptopsList,
+  getAllConnectedLaptops,
 } from './laptop-bridge.js';
 
 const userAgentMode = new Map(); // userId -> boolean
@@ -997,30 +998,48 @@ bot.command(['agent_mode', 'agentmode'], async (ctx) => {
 bot.command(['devices', 'laptops', 'device'], async (ctx) => {
   const userId = ctx.from.id;
   const list = getConnectedLaptopsList(userId);
+  const allLaptops = getAllConnectedLaptops(allowedUserIds);
+
+  let text = `💻 *Laptop Fleet & Device Status*\n\n`;
+
+  // 1. Caller's own device
+  text += `👤 *Your Laptop (${userId}):*\n`;
   if (!list || list.length === 0) {
-    await ctx.reply(
-      '💻 *No Laptops Currently Connected*\n\n' +
-      'Your remote agent runner is not connected yet.\n\n' +
-      '• **How to connect:** Run `start-agent.bat` or `npm run laptop` on your laptop.\n' +
-      '• **Safe on Public Wi-Fi:** Uses an outbound encrypted TLS tunnel (`wss://`). It opens **0** listening ports on your laptop, so nobody on the network can scan, connect to, or hack it.\n' +
-      '• **Works Anywhere:** Connects from home Wi-Fi, coffee shops, or mobile hotspots.\n' +
-      '• **Multi-User Isolation:** Each authorized Telegram user controls only their own registered laptop.',
-      { parse_mode: 'Markdown' }
-    );
-    return;
+    text += `└─ 🔴 Not Connected (Run \`start-agent.bat\` on your machine)\n\n`;
+  } else {
+    for (const d of list) {
+      const statusIcon = d.isOnline ? '🟢' : '🔴';
+      const statusText = d.isOnline ? 'Online & Ready' : 'Disconnected';
+      const osText = d.osVersion ? `${d.platform} (${d.osVersion})` : d.platform;
+      const userText = d.username ? ` | User: \`${d.username}\`` : '';
+      text += `${statusIcon} *${d.deviceName}* (\`${d.hostname}\`)\n` +
+        `   • OS: \`${osText}\`${userText}\n` +
+        `   • Status: ${statusText}\n` +
+        `   • Connected: ${new Date(d.connectedAt).toLocaleTimeString()}\n\n`;
+    }
   }
 
-  let text = `💻 *Connected Laptops (${list.length} registered)*\n\n`;
-  for (const d of list) {
-    const statusIcon = d.isOnline ? '🟢' : '🔴';
-    const statusText = d.isOnline ? 'Online & Ready' : 'Disconnected';
-    text += `${statusIcon} *${d.deviceName}* (\`${d.hostname}\`)\n` +
-      `   • OS: \`${d.platform}\`\n` +
-      `   • Status: ${statusText}\n` +
-      `   • Connected: ${new Date(d.connectedAt).toLocaleTimeString()}\n\n`;
+  // 2. All authorized users' laptop names & statuses
+  if (allowedUserIds.size > 1) {
+    text += `👥 *All Authorized Users Fleet:*\n`;
+    for (const item of allLaptops) {
+      const isYou = item.userId === userId ? ' (You)' : '';
+      if (item.hasOnlineDevice) {
+        for (const d of item.devices.filter((x) => x.isOnline)) {
+          const osInfo = d.osVersion ? `${d.platform} - ${d.osVersion}` : d.platform;
+          text += `• User \`${item.userId}\`${isYou}: 🟢 *${d.deviceName}* (\`${d.hostname}\` | \`${osInfo}\`)\n`;
+        }
+      } else {
+        text += `• User \`${item.userId}\`${isYou}: 🔴 Disconnected\n`;
+      }
+    }
+    text += `\n`;
   }
-  text += `_Agent commands will now execute directly on your connected laptop!_\n` +
-    `Try: \`/agent check disk space and list files on my laptop\` or \`/agent install <package>\``;
+
+  text += `• **Safe on Public Wi-Fi:** Uses an outbound encrypted TLS tunnel (\`wss://\`) with 0 open incoming ports.\n` +
+    `• **Multi-User Isolation:** Each user's agent commands only execute on their own machine.\n\n` +
+    `_Try: \`/status\` to view live CPU/RAM specs, or \`/agent run tests on my laptop\`._`;
+
   await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
@@ -1669,10 +1688,13 @@ bot.command('status', async (ctx) => {
         const memUsedGb = (laptop.memory.usedMb / 1024).toFixed(1);
         const memFreeGb = (laptop.memory.freeMb / 1024).toFixed(1);
 
+        const osLabel = laptop.osVersion ? `${laptop.platform} - ${laptop.osVersion}` : `${laptop.platform} (${laptop.arch})`;
+        const userLabel = laptop.username ? ` | User: \`${laptop.username}\`` : '';
+
         laptopSpecsText =
           `💻 *Your Connected Laptop Specs (Live)*\n` +
-          `├─ Device: *${laptop.deviceName}* (\`${laptop.hostname}\`)\n` +
-          `├─ OS: \`${laptop.platform} (${laptop.arch})\`\n` +
+          `├─ Device: *${laptop.deviceName}* (\`${laptop.hostname}\`)${userLabel}\n` +
+          `├─ OS: \`${osLabel}\`\n` +
           `├─ CPU: ${laptop.cpuModel || 'CPU'} (${laptop.cpuCores} cores)\n` +
           `├─ RAM: ${memUsedGb} GB / ${memTotalGb} GB used (${laptop.memory.usedPercent}%)\n` +
           `├─ Free RAM: ${memFreeGb} GB\n` +
@@ -1692,6 +1714,29 @@ bot.command('status', async (ctx) => {
       `   _Run \`start-agent.bat\` on your laptop to view your live specs and enable remote scripts._\n\n`;
   }
 
+  // 1.5 Check and display all authorized users' laptop names & online states
+  let fleetText = '';
+  if (allowedUserIds.size > 1) {
+    const allLaptops = getAllConnectedLaptops(allowedUserIds);
+    fleetText = `👥 *Authorized User Laptops Status*\n`;
+    for (const item of allLaptops) {
+      const isYou = item.userId === userId ? ' (You)' : '';
+      if (item.hasOnlineDevice) {
+        const devNames = item.devices
+          .filter((d) => d.isOnline)
+          .map((d) => {
+            const osPart = d.osVersion ? ` - ${d.osVersion}` : '';
+            return `*${d.deviceName}* (\`${d.hostname}\`${osPart})`;
+          })
+          .join(', ');
+        fleetText += `├─ User \`${item.userId}\`${isYou}: 🟢 ${devNames}\n`;
+      } else {
+        fleetText += `├─ User \`${item.userId}\`${isYou}: 🔴 Offline\n`;
+      }
+    }
+    fleetText += `\n`;
+  }
+
   // 2. Cloud server hosting specs
   const totalMemory = os.totalmem();
   const freeMemory = os.freemem();
@@ -1703,6 +1748,7 @@ bot.command('status', async (ctx) => {
   const statusMessage =
     `📊 *System & Hardware Status*\n\n` +
     laptopSpecsText +
+    fleetText +
     `👤 *Your Personal Settings*\n` +
     `├─ Laptop Folder: ${userDir ? `\`${userDir}\`` : '_Not set yet (use /directory)_'}\n` +
     `├─ Upload Storage: ${modeLabels[userMode] || userMode}\n` +

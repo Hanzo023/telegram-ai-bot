@@ -47,7 +47,10 @@ const rawUserId =
 const idMatch = String(rawUserId).match(/-?\d+/);
 const TELEGRAM_USER_ID = idMatch ? idMatch[0] : '';
 
-const DEVICE_NAME = getCliArg('--name') || process.env.DEVICE_NAME || os.hostname() || 'My-Laptop';
+const rawHostname = (os.hostname() || 'My-Laptop').replace(/\.local$/i, '');
+const cleanUsername = os.userInfo ? (os.userInfo().username || '') : '';
+const cleanOsVersion = os.version ? os.version() : os.release();
+const DEVICE_NAME = getCliArg('--name') || process.env.DEVICE_NAME || rawHostname;
 
 if (!TELEGRAM_USER_ID) {
   console.error('❌ ERROR: TELEGRAM_USER_ID could not be determined!');
@@ -63,8 +66,10 @@ function buildWsUrl() {
   url.searchParams.set('secret', RUNNER_SECRET);
   url.searchParams.set('userId', TELEGRAM_USER_ID);
   url.searchParams.set('deviceName', DEVICE_NAME);
-  url.searchParams.set('hostname', os.hostname());
+  url.searchParams.set('hostname', rawHostname);
   url.searchParams.set('platform', os.platform());
+  url.searchParams.set('username', cleanUsername);
+  url.searchParams.set('osVersion', cleanOsVersion);
   return url.toString();
 }
 
@@ -72,8 +77,9 @@ console.log('========================================================');
 console.log('💻 Telegram AI Remote Laptop Agent Runner');
 console.log('========================================================');
 console.log(`• Device Name:     ${DEVICE_NAME}`);
-console.log(`• Hostname:        ${os.hostname()}`);
-console.log(`• Platform:        ${os.platform()} (${os.arch()})`);
+console.log(`• Hostname:        ${rawHostname}`);
+console.log(`• User Account:    ${cleanUsername || 'User'}`);
+console.log(`• OS & Version:    ${cleanOsVersion} (${os.platform()} ${os.arch()})`);
 console.log(`• Target Server:   ${SERVER_URL}`);
 console.log(`• Bound User ID:   ${TELEGRAM_USER_ID}`);
 console.log(`• Outbound Only:   ✅ No open ports, fully secure on Public Wi-Fi`);
@@ -282,8 +288,10 @@ async function handleTask(action, payload) {
       return {
         success: true,
         deviceName: DEVICE_NAME,
-        hostname: os.hostname(),
+        hostname: rawHostname,
         platform: os.platform(),
+        osVersion: cleanOsVersion,
+        username: cleanUsername,
         arch: os.arch(),
         cpuCores: cpus.length,
         cpuModel,

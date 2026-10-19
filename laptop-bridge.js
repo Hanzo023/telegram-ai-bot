@@ -57,14 +57,50 @@ export function getConnectedLaptopsList(userId) {
   for (const [deviceId, dev] of userDevices.entries()) {
     list.push({
       deviceId,
-      deviceName: dev.deviceName,
+      deviceName: dev.deviceName || dev.hostname || 'Laptop',
       hostname: dev.hostname,
       platform: dev.platform,
+      username: dev.username || '',
+      osVersion: dev.osVersion || '',
       isOnline: dev.ws && dev.ws.readyState === WebSocket.OPEN,
       connectedAt: dev.connectedAt,
     });
   }
   return list;
+}
+
+/**
+ * Get all connected laptops across all authorized users
+ * @param {Set<number>} allowedUserIds
+ */
+export function getAllConnectedLaptops(allowedUserIds) {
+  const result = [];
+  const uids = allowedUserIds && allowedUserIds.size > 0 ? Array.from(allowedUserIds) : Array.from(connectedLaptops.keys());
+  for (const uid of uids) {
+    const userDevices = connectedLaptops.get(Number(uid));
+    const devicesList = [];
+    if (userDevices) {
+      for (const [deviceId, dev] of userDevices.entries()) {
+        const isOnline = dev.ws && dev.ws.readyState === WebSocket.OPEN;
+        devicesList.push({
+          deviceId,
+          deviceName: dev.deviceName || dev.hostname || 'Laptop',
+          hostname: dev.hostname || 'unknown',
+          platform: dev.platform || 'unknown',
+          username: dev.username || '',
+          osVersion: dev.osVersion || '',
+          isOnline,
+          connectedAt: dev.connectedAt,
+        });
+      }
+    }
+    result.push({
+      userId: Number(uid),
+      devices: devicesList,
+      hasOnlineDevice: devicesList.some((d) => d.isOnline),
+    });
+  }
+  return result;
 }
 
 /**
@@ -185,6 +221,9 @@ export function setupLaptopBridge(server, allowedUserIds) {
         return;
       }
 
+      const username = url.searchParams.get('username') || '';
+      const osVersion = url.searchParams.get('osVersion') || '';
+
       const deviceId = `${hostname}_${platform}`;
 
       if (!connectedLaptops.has(userId)) {
@@ -197,12 +236,14 @@ export function setupLaptopBridge(server, allowedUserIds) {
         deviceName,
         hostname,
         platform,
+        username,
+        osVersion,
         connectedAt: new Date().toISOString(),
         lastPing: Date.now(),
       };
 
       userDevices.set(deviceId, deviceRecord);
-      console.log(`[Laptop Bridge] 💻 Device registered: "${deviceName}" (${hostname} / ${platform}) for User ${userId}`);
+      console.log(`[Laptop Bridge] 💻 Device registered: "${deviceName}" (${hostname} / ${platform} / ${osVersion}) for User ${userId}`);
 
       ws.send(
         JSON.stringify({
@@ -222,12 +263,14 @@ export function setupLaptopBridge(server, allowedUserIds) {
             : platform === 'linux'
             ? 'Linux'
             : platform;
+        const osLabel = osVersion ? `${friendlyPlatform} (${osVersion})` : friendlyPlatform;
+        const userLabel = username ? `\n• **Account:** \`${username}\`` : '';
 
         botApiRef
           .sendMessage(
             userId,
             `💻 *Laptop Connected: ${deviceName}*\n` +
-            `• **Host:** \`${hostname}\` (${friendlyPlatform})\n` +
+            `• **Host:** \`${hostname}\` (${osLabel})${userLabel}\n` +
             `• **Status:** Active & listening for remote commands.\n\n` +
             `You can now ask the agent to run terminal commands, inspect files, or install packages while you are away!`,
             { parse_mode: 'Markdown' }
