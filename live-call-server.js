@@ -2,9 +2,12 @@ import { WebSocketServer } from 'ws';
 import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { DEFAULT_LIVE_MODEL, AVAILABLE_VOICES } from './gemini-live-service.js';
 
-const LIVE_CALL_HTML_PATH = path.resolve('./live-call.html');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const LIVE_CALL_HTML_PATH = path.resolve(__dirname, 'live-call.html');
 
 /**
  * Attach the Gemini Live WebApp & WebSocket duplex audio bridge to the HTTP server
@@ -65,6 +68,8 @@ export function setupLiveCallServer(server) {
         model: DEFAULT_LIVE_MODEL,
         config: {
           responseModalities: ['audio'],
+          outputAudioTranscription: {},
+          inputAudioTranscription: {},
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {

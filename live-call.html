@@ -271,8 +271,14 @@
       }
     }
 
+    let scheduledTime = 0;
+
     async function initAudioCapture() {
       audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -290,6 +296,8 @@
       processor.connect(audioContext.destination);
 
       processor.onaudioprocess = (e) => {
+        const outputData = e.outputBuffer.getChannelData(0);
+        outputData.fill(0); // Silence loopback to prevent mic feedback into speakers
         if (!isCalling || !ws || ws.readyState !== WebSocket.OPEN) return;
         const inputData = e.inputBuffer.getChannelData(0);
         // Convert Float32 [-1.0, 1.0] to 16-bit Int PCM
@@ -306,6 +314,10 @@
       if (!audioContext) {
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
       }
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+
       orb.className = 'orb speaking';
       const int16 = new Int16Array(arrayBuffer);
       const float32 = new Float32Array(int16.length);
@@ -319,16 +331,24 @@
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(audioContext.destination);
+
+      const currentTime = audioContext.currentTime;
+      if (scheduledTime < currentTime) {
+        scheduledTime = currentTime;
+      }
+      source.start(scheduledTime);
+      scheduledTime += audioBuffer.duration;
+
       source.onended = () => {
-        if (audioQueue.length === 0) {
+        if (audioContext && audioContext.currentTime >= scheduledTime - 0.05) {
           orb.className = 'orb active';
         }
       };
-      source.start();
     }
 
     function endCall() {
       isCalling = false;
+      scheduledTime = 0;
       callBtn.textContent = '📞 Start Call';
       callBtn.className = 'btn btn-primary';
       orb.className = 'orb';

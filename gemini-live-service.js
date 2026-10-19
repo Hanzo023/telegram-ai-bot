@@ -203,6 +203,7 @@ export async function executeGeminiLiveExchange({
         model: DEFAULT_LIVE_MODEL,
         config: {
           responseModalities: ['audio'],
+          outputAudioTranscription: {},
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
