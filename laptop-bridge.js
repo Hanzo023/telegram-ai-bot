@@ -214,11 +214,20 @@ export function setupLaptopBridge(server, allowedUserIds) {
 
       // Notify user via Telegram
       if (botApiRef) {
+        const friendlyPlatform =
+          platform === 'win32'
+            ? 'Windows'
+            : platform === 'darwin'
+            ? 'macOS'
+            : platform === 'linux'
+            ? 'Linux'
+            : platform;
+
         botApiRef
           .sendMessage(
             userId,
             `💻 *Laptop Connected: ${deviceName}*\n` +
-            `• **Host:** \`${hostname}\` (${platform})\n` +
+            `• **Host:** \`${hostname}\` (${friendlyPlatform})\n` +
             `• **Status:** Active & listening for remote commands.\n\n` +
             `You can now ask the agent to run terminal commands, inspect files, or install packages while you are away!`,
             { parse_mode: 'Markdown' }
