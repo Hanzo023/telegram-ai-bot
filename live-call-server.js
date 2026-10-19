@@ -42,8 +42,8 @@ export function setupLiveCallServer(server) {
     }
   });
 
-  // 2. WebSocket server for duplex audio
-  const wss = new WebSocketServer({ server, path: '/ws/live-call' });
+  // 2. WebSocket server for duplex audio (noServer mode for unified HTTP upgrade routing)
+  const wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', async (ws, req) => {
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
@@ -210,4 +210,5 @@ export function setupLiveCallServer(server) {
   });
 
   console.log('[Live Call Server] WebSocket duplex bridge mounted at /ws/live-call and /live-call');
+  return wss;
 }

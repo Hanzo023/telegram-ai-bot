@@ -90,16 +90,44 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[HTTP Server] Health check server immediately listening on 0.0.0.0:${PORT}`);
+  let liveCallWss = null;
+  let laptopWss = null;
   try {
-    setupLiveCallServer(server);
+    liveCallWss = setupLiveCallServer(server);
   } catch (liveServerErr) {
     console.warn('[Live Call Server] Warning attaching live call server:', liveServerErr.message);
   }
   try {
-    setupLaptopBridge(server, allowedUserIds);
+    laptopWss = setupLaptopBridge(server, allowedUserIds);
   } catch (bridgeErr) {
     console.warn('[Laptop Bridge] Warning attaching laptop bridge server:', bridgeErr.message);
   }
+
+  // Unified HTTP upgrade router: prevents 400 Bad Request conflicts between multiple WebSocket endpoints
+  server.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+      const pathname = url.pathname;
+
+      if (pathname === '/ws/live-call' && liveCallWss) {
+        liveCallWss.handleUpgrade(request, socket, head, (ws) => {
+          liveCallWss.emit('connection', ws, request);
+        });
+      } else if (pathname === '/ws/laptop-agent' && laptopWss) {
+        laptopWss.handleUpgrade(request, socket, head, (ws) => {
+          laptopWss.emit('connection', ws, request);
+        });
+      } else {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+      }
+    } catch (err) {
+      console.warn('[HTTP Server] Upgrade error:', err.message);
+      try {
+        socket.destroy();
+      } catch {}
+    }
+  });
 });
 
 try {

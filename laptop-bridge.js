@@ -154,7 +154,8 @@ export async function getLaptopStatus(userId) {
  * @param {Set<number>} allowedUserIds
  */
 export function setupLaptopBridge(server, allowedUserIds) {
-  const wss = new WebSocketServer({ server, path: '/ws/laptop-agent' });
+  // noServer mode for unified HTTP upgrade routing
+  const wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', (ws, req) => {
     try {
@@ -273,4 +274,5 @@ export function setupLaptopBridge(server, allowedUserIds) {
   });
 
   console.log('[Laptop Bridge] WebSocket tunnel endpoint mounted at /ws/laptop-agent');
+  return wss;
 }

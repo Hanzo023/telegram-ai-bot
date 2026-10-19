@@ -20,7 +20,7 @@ if not exist node_modules (
   call npm install
 )
 
-node laptop-runner.js
+node laptop-runner.js %*
 if %errorlevel% neq 0 (
   echo.
   echo [ERROR] Runner stopped with error code %errorlevel%.

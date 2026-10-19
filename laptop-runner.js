@@ -6,14 +6,23 @@ import { promises as fsp } from 'fs';
 import path from 'path';
 import os from 'os';
 
+function getCliArg(flag) {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && idx + 1 < process.argv.length) {
+    return process.argv[idx + 1].trim();
+  }
+  return null;
+}
+
 /**
  * Configuration
  */
 const RAW_SERVER_URL =
+  getCliArg('--server') ||
   process.env.SERVER_URL ||
   process.env.RENDER_EXTERNAL_URL ||
   process.env.PUBLIC_URL ||
-  'http://localhost:10000';
+  'https://telegram-ai-bot-znei.onrender.com';
 
 let normalizedUrl = RAW_SERVER_URL.trim();
 if (!/^wss?:\/\//i.test(normalizedUrl) && !/^https?:\/\//i.test(normalizedUrl)) {
@@ -27,16 +36,22 @@ const RUNNER_SECRET =
   process.env.LAPTOP_RUNNER_SECRET ||
   (process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.slice(0, 20) : 'default_runner_secret');
 
-const TELEGRAM_USER_ID =
+const rawUserId =
+  getCliArg('--user') ||
   process.env.TELEGRAM_USER_ID ||
   process.env.ALLOWED_USER_ID ||
-  (process.env.ALLOWED_USER_IDS ? process.env.ALLOWED_USER_IDS.split(',')[0].trim() : '');
+  process.env.ALLOWED_USER_IDS ||
+  '';
 
-const DEVICE_NAME = process.env.DEVICE_NAME || os.hostname() || 'My-Laptop';
+// Extract first valid integer ID
+const idMatch = String(rawUserId).match(/-?\d+/);
+const TELEGRAM_USER_ID = idMatch ? idMatch[0] : '';
+
+const DEVICE_NAME = getCliArg('--name') || process.env.DEVICE_NAME || os.hostname() || 'My-Laptop';
 
 if (!TELEGRAM_USER_ID) {
-  console.error('❌ ERROR: TELEGRAM_USER_ID is not configured in .env or environment variables!');
-  console.error('Please set TELEGRAM_USER_ID to your numeric Telegram user ID.');
+  console.error('❌ ERROR: TELEGRAM_USER_ID could not be determined!');
+  console.error('Please pass --user <id> or set TELEGRAM_USER_ID in .env or environment variables.');
   process.exit(1);
 }
 
@@ -107,7 +122,16 @@ function connect() {
     });
 
     ws.on('close', (code, reason) => {
-      console.warn(`[Runner] Disconnected (code: ${code}, reason: ${reason || 'Connection lost'}).`);
+      const reasonStr = reason ? reason.toString() : '';
+      let diag = '';
+      if (code === 4001) {
+        diag = ' (Secret mismatch: Check LAPTOP_RUNNER_SECRET or TELEGRAM_BOT_TOKEN)';
+      } else if (code === 4003) {
+        diag = ` (Unauthorized Telegram User ID: ${TELEGRAM_USER_ID} is not in ALLOWED_USER_ID on bot)`;
+      } else if (code === 1006) {
+        diag = ' (Connection dropped or target server unreachable)';
+      }
+      console.warn(`[Runner] Disconnected (code: ${code}${reasonStr ? `, reason: "${reasonStr}"` : ''})${diag}.`);
       scheduleReconnect();
     });
 
