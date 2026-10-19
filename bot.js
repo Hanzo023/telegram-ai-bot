@@ -578,9 +578,9 @@ bot.command(['start', 'help'], async (ctx) => {
     'Powered by *Claude 3.7 / 3.5 Sonnet* & *Gemini 3.8 Live / Flash*.\n\n' +
     'Send me any message, voice note, photo, or document and I\'ll assist you right away!\n\n' +
     '🤖 *Autonomous AI Agent*\n' +
-    '• `/agent <prompt>` — 🤖 Autonomous agent with live tools (web, files, math)\n' +
-    '• `/agent_mode` — 🎚️ Toggle agent mode for all chat messages\n' +
-    '• `/deep_research <topic>` — 🔬 Exhaustive background research report\n\n' +
+    '• `/agent <prompt>` — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +
+    '• `/agent_mode` — 🎚️ *Toggle All Chats*: Set Agent as default for all messages (send again or `/cancel` to exit)\n' +
+    '• `/deep_research <topic>` — 🔬 *Deep Research*: Exhaustive multi-source background report\n\n' +
     '🎙️ *Real-Time Live Voice*\n' +
     '• `/live <query>` — 🎙️ Spoken voice note answer via Gemini 3.8 Live\n' +
     '• `/call` — 📞 Open interactive real-time duplex voice call WebApp\n' +
@@ -596,7 +596,7 @@ bot.command(['start', 'help'], async (ctx) => {
     '• `/library` — 📁 Browse saved files by category (A-Z)\n' +
     '• `/status` — 📊 View system resources, loaded file & mode\n\n' +
     '🧹 *Workspace & Settings*\n' +
-    '• `/cancel` — ❌ Exit active prompt or search mode\n' +
+    '• `/cancel` — ❌ Exit Agent Mode, active search, image, or quiz\n' +
     '• `/clear` — 🧹 Clear conversation history (keeps loaded file)\n' +
     '• `/clearall` — 🗑️ Clear all conversation history & unload file\n' +
     '• `/local` — 💾 Save files to both Drive D & Cloud Vault\n' +
@@ -767,11 +767,13 @@ bot.command('agent', async (ctx) => {
   const prompt = ctx.message.text.replace(/^\/agent\s*/i, '').trim();
   if (!prompt) {
     await ctx.reply(
-      '🤖 *Gemini Autonomous Agent*\n\n' +
-      'Give the agent a goal or task. It will autonomously plan and execute tools (web search, files, YouTube, calculations) to accomplish it!\n\n' +
-      '*Usage:*\n' +
-      '`/agent Search the web for latest releases in Node.js, and check my local drive for any .js files`\n\n' +
-      '💡 Toggle `/agent_mode` to make the agent your primary assistant for all messages!',
+      '🤖 *Gemini Autonomous Agent (One-Time Task)*\n\n' +
+      'Run a single objective using autonomous tools without changing your default chat with Claude.\n\n' +
+      '• **How it works:** Executes web search, YouTube, file inspection, and math calculations in a ReAct loop to solve your specific task.\n' +
+      '• **When to use `/agent`:** When you want a quick tool or research task done for this message only. Your regular chat stays with Claude.\n' +
+      '• **When to use `/agent_mode`:** When you want the agent to answer *all* future messages automatically without typing `/agent` each time.\n\n' +
+      '*Usage Example:*\n' +
+      '`/agent Search the web for latest releases in Node.js, and check my cloud vault for any notes`',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -781,18 +783,30 @@ bot.command('agent', async (ctx) => {
 
 bot.command(['agent_mode', 'agentmode'], async (ctx) => {
   const userId = ctx.from.id;
-  const isEnabled = !userAgentMode.get(userId);
+  const rawArg = (ctx.message.text || '').replace(/^\/(?:agent_mode|agentmode)\s*/i, '').trim().toLowerCase();
+
+  let isEnabled;
+  if (rawArg === 'on' || rawArg === 'enable' || rawArg === '1') {
+    isEnabled = true;
+  } else if (rawArg === 'off' || rawArg === 'disable' || rawArg === '0') {
+    isEnabled = false;
+  } else {
+    isEnabled = !userAgentMode.get(userId);
+  }
+
   userAgentMode.set(userId, isEnabled);
 
   await ctx.reply(
     isEnabled
-      ? `🤖 *Gemini Agent Mode ENABLED!*\n\n` +
-        `• All standard text messages will now run through the Gemini Autonomous Agent.\n` +
-        `• The agent will automatically call tools (web search, YouTube, file inspection, math) whenever needed.\n` +
-        `• Send /agent_mode again to switch back to Claude.`
-      : `🧠 *Claude Standard Mode RESTORED!*\n\n` +
-        `• Messages will now be answered by Claude as normal.\n` +
-        `• You can still invoke the agent on-demand with \`/agent <prompt>\`.`,
+      ? `🤖 *Gemini Agent Mode: ENABLED*\n\n` +
+        `• **Default Assistant:** Switched to Gemini Autonomous Agent for all your messages.\n` +
+        `• **Automatic Tools:** Every message you send can now automatically trigger web searches, file checks, YouTube searches, and calculations.\n\n` +
+        `❌ *How to Turn Off / Cancel:*\n` +
+        `• Send \`/agent_mode\` again (or \`/agent_mode off\`).\n` +
+        `• Or simply send \`/cancel\` anytime to restore Claude standard chat.`
+      : `🧠 *Claude Standard Mode: RESTORED*\n\n` +
+        `• **Default Assistant:** Switched back to Claude (best for coding, reasoning, and document discussion).\n` +
+        `• **Single Tasks:** You can still run on-demand agent tasks anytime with \`/agent <prompt>\`.`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -1303,22 +1317,34 @@ bot.command('cancel', async (ctx) => {
   const active = userActiveMode.get(userId);
   userActiveMode.delete(userId);
 
+  const wasAgentMode = !!userAgentMode.get(userId);
+  if (wasAgentMode) {
+    userAgentMode.set(userId, false);
+  }
+
+  const cancelled = [];
   if (active) {
     const modeNames = {
       search: '🌐 AI Web Search',
       youtube: '🎥 YouTube Search',
       image: '🎨 Image Generation',
     };
-    const name = modeNames[active.mode] || active.mode;
+    cancelled.push(modeNames[active.mode] || active.mode);
+  }
+  if (wasAgentMode) {
+    cancelled.push('🤖 Gemini Agent Mode');
+  }
+
+  if (cancelled.length > 0) {
     await ctx.reply(
-      `✅ *${name} mode cancelled.*\n\n` +
-      `You are now back in normal AI chat mode. Send any message, photo, or question to chat with Claude!`,
+      `✅ *${cancelled.join(' & ')} cancelled.*\n\n` +
+      `You are now back in standard AI chat mode with Claude. Send any message, photo, or question to chat!`,
       { parse_mode: 'Markdown' }
     );
   } else {
     await ctx.reply(
-      `ℹ️ *No active command mode to cancel.*\n\n` +
-      `You are currently in normal AI chat mode. Send any message, photo, or question to chat with Claude!`,
+      `ℹ️ *No active command or agent mode to cancel.*\n\n` +
+      `You are already in normal AI chat mode with Claude. Send any message, photo, or question to chat!`,
       { parse_mode: 'Markdown' }
     );
   }
@@ -4030,8 +4056,8 @@ try {
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 const botCommands = [
   // 🤖 AI Agent & Research
-  { command: 'agent', description: '🤖 Autonomous AI agent with live tools' },
-  { command: 'agent_mode', description: '🎚️ Toggle agent mode for all chat messages' },
+  { command: 'agent', description: '🤖 One-time task with live tools (web, files, math)' },
+  { command: 'agent_mode', description: '🎚️ Toggle Agent as default for all chats (or /cancel)' },
   { command: 'deep_research', description: '🔬 Deep Research report (deep-research-2026)' },
 
   // 🎙️ Real-Time Voice & Live Calls
@@ -4052,7 +4078,7 @@ const botCommands = [
   { command: 'status', description: '📊 System resources, active file & mode' },
 
   // 🧹 Workspace & Session Controls
-  { command: 'cancel', description: '❌ Cancel active search, image, or quiz mode' },
+  { command: 'cancel', description: '❌ Exit Agent Mode, search, image, or quiz' },
   { command: 'clear', description: '🧹 Clear conversation history (keeps file)' },
   { command: 'clearall', description: '🗑️ Clear all conversation history & unload file' },
   { command: 'local', description: '💾 Save files to both Drive D & Cloud Vault' },
