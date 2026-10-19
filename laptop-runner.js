@@ -253,13 +253,16 @@ async function handleTask(action, payload) {
     case 'status': {
       const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
       const freeMemMb = Math.round(os.freemem() / 1024 / 1024);
+      const cpus = os.cpus();
+      const cpuModel = cpus && cpus.length > 0 ? cpus[0].model.trim() : 'Processor';
       return {
         success: true,
         deviceName: DEVICE_NAME,
         hostname: os.hostname(),
         platform: os.platform(),
         arch: os.arch(),
-        cpuCores: os.cpus().length,
+        cpuCores: cpus.length,
+        cpuModel,
         uptimeHours: (os.uptime() / 3600).toFixed(2),
         memory: {
           totalMb: totalMemMb,

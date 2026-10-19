@@ -392,8 +392,9 @@ export async function executeTool(name, args = {}, context = {}) {
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
+      const effectiveCwd = cwd || context.userDirectory || undefined;
       try {
-        const res = await runLaptopCommand(context.userId, command, cwd);
+        const res = await runLaptopCommand(context.userId, command, effectiveCwd);
         return JSON.stringify(res);
       } catch (err) {
         return JSON.stringify({ error: err.message });
@@ -401,12 +402,16 @@ export async function executeTool(name, args = {}, context = {}) {
     }
 
     case 'read_laptop_file': {
-      const filePath = args.file_path || args.filename;
+      const rawPath = args.file_path || args.filename;
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
+      let effectivePath = rawPath;
+      if (effectivePath && !path.isAbsolute(effectivePath) && context.userDirectory) {
+        effectivePath = path.join(context.userDirectory, effectivePath);
+      }
       try {
-        const res = await readLaptopFile(context.userId, filePath, args.max_lines);
+        const res = await readLaptopFile(context.userId, effectivePath, args.max_lines);
         return JSON.stringify(res);
       } catch (err) {
         return JSON.stringify({ error: err.message });
@@ -414,13 +419,17 @@ export async function executeTool(name, args = {}, context = {}) {
     }
 
     case 'write_laptop_file': {
-      const filePath = args.file_path || args.filename;
+      const rawPath = args.file_path || args.filename;
       const content = args.content;
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
+      let effectivePath = rawPath;
+      if (effectivePath && !path.isAbsolute(effectivePath) && context.userDirectory) {
+        effectivePath = path.join(context.userDirectory, effectivePath);
+      }
       try {
-        const res = await writeLaptopFile(context.userId, filePath, content);
+        const res = await writeLaptopFile(context.userId, effectivePath, content);
         return JSON.stringify(res);
       } catch (err) {
         return JSON.stringify({ error: err.message });
@@ -428,7 +437,7 @@ export async function executeTool(name, args = {}, context = {}) {
     }
 
     case 'list_laptop_files': {
-      const dirPath = args.dir_path || args.path;
+      const dirPath = args.dir_path || args.path || context.userDirectory;
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
@@ -467,7 +476,7 @@ export async function executeTool(name, args = {}, context = {}) {
  * @param {number} [options.userId] - Telegram User ID to route laptop tools to
  * @returns {Promise<{ finalAnswer: string, stepsExecuted: Array, success: boolean }>}
  */
-export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6, userId }) {
+export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, userId, userDirectory }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not configured in environment variables.');
@@ -476,7 +485,7 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6, use
   const ai = new GoogleGenAI({ apiKey });
   const stepsExecuted = [];
 
-  // Models to attempt: primary (gemini-3.8-flash) -> fallback (gemini-3.5-flash-lite)
+  // Models to attempt: primary (gemini-3.5-flash-lite) -> fallback (gemini-3.8-flash)
   const candidateModels = [PRIMARY_MODEL, FALLBACK_MODEL];
   let lastError = null;
 
@@ -492,8 +501,18 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6, use
         tools: AGENT_TOOLS,
         system_instruction:
           'You are an autonomous AI Agent in Telegram with access to tools (web search, YouTube, drive files, calculations, system status, AND live laptop control). ' +
-          'When the user asks you to run commands, install software, inspect or fix code on their laptop, call the run_laptop_terminal, read_laptop_file, write_laptop_file, or list_laptop_files tools. ' +
-          'Execute tools iteratively until you have completed the task, then synthesize a comprehensive, clean Markdown answer with the terminal outputs.',
+          `User laptop target directory: "${userDirectory || 'default working directory'}". ` +
+          '\n\nAUTONOMOUS SCRIPT CREATION, INSTALLATION & EXECUTION RULES:\n' +
+          '• When the user asks you to run commands, install software, download or create a file, or write and run a Python/Node script on their laptop:\n' +
+          '  1. INSTALL DEPENDENCIES: If any external packages or libraries are required (e.g. pip install requests, pip install beautifulsoup4, npm install axios), execute them first using run_laptop_terminal.\n' +
+          '  2. WRITE FILE: Write the complete, production-ready script with zero omissions or placeholders using write_laptop_file into their target folder.\n' +
+          '  3. RUN SCRIPT: Execute the script on their laptop using run_laptop_terminal (e.g. "python myscript.py") to verify it works and observe the output.\n' +
+          '  4. GUIDE USER: In your final answer, clearly tell them:\n' +
+          '     • What packages you installed.\n' +
+          '     • Exactly what file was created and its path on their machine.\n' +
+          '     • The output produced by the script.\n' +
+          '     • What to do next or how they can run it again.\n' +
+          '• If the laptop is disconnected, explain that their runner is offline (instruct them to run start-agent.bat), and provide the complete script and exact manual terminal commands as a fallback.',
       });
 
       let stepCount = 0;
@@ -531,7 +550,7 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 6, use
           onStatusUpdate(`⚙️ *Executing tool:* \`${toolName}(${argsSummary})\`...`);
         }
 
-        const toolResult = await executeTool(toolName, toolArgs, { userId });
+        const toolResult = await executeTool(toolName, toolArgs, { userId, userDirectory });
 
         if (onStatusUpdate) {
           onStatusUpdate(`🧠 *Analyzing results from ${toolName}...*`);

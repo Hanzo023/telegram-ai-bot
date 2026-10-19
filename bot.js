@@ -154,7 +154,89 @@ const DOC_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active document ses
 const CONVERSATION_SESSION_TIMEOUT_HOURS = parseFloat(process.env.CONVERSATION_SESSION_TIMEOUT_HOURS) || 24;
 const CONVERSATION_SESSION_TIMEOUT_MS = CONVERSATION_SESSION_TIMEOUT_HOURS * 60 * 60 * 1000; // 24 hours chat session TTL
 const MAX_HISTORY_MESSAGES = parseInt(process.env.MAX_HISTORY_MESSAGES, 10) || 50; // up to 25 full conversation turns
-const userStorageMode = new Map(); // 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
+
+const USER_SETTINGS_FILE = process.env.USER_SETTINGS_FILE || path.resolve('./user_settings.json');
+const userStorageMode = new Map(); // userId -> 'local' (default: dual save), 'cloud' (cloud only), 'nosave' (local only)
+const userLocalStorageDir = new Map(); // userId -> string folder path on laptop
+const userAwaitingDirectoryInput = new Set(); // Set of userIds awaiting text path input
+
+let persistUserSettingsTimer = null;
+function scheduleUserSettingsPersistence() {
+  if (persistUserSettingsTimer) return;
+  persistUserSettingsTimer = setTimeout(async () => {
+    persistUserSettingsTimer = null;
+    await persistUserSettings();
+  }, 1000).unref();
+}
+
+async function persistUserSettings() {
+  try {
+    const storageDirs = {};
+    for (const [uid, dir] of userLocalStorageDir.entries()) {
+      storageDirs[uid] = dir;
+    }
+    const storageModes = {};
+    for (const [uid, mode] of userStorageMode.entries()) {
+      storageModes[uid] = mode;
+    }
+    const tempFile = `${USER_SETTINGS_FILE}.tmp`;
+    await fsp.writeFile(tempFile, JSON.stringify({ version: 1, storageDirs, storageModes }, null, 2), 'utf-8');
+    await fsp.rename(tempFile, USER_SETTINGS_FILE);
+  } catch (err) {
+    console.warn('[User Settings] Failed to persist user_settings.json:', sanitizeError(err));
+  }
+}
+
+async function initUserSettings() {
+  try {
+    if (fs.existsSync(USER_SETTINGS_FILE)) {
+      const raw = await fsp.readFile(USER_SETTINGS_FILE, 'utf-8');
+      const data = JSON.parse(raw);
+      if (data.storageDirs && typeof data.storageDirs === 'object') {
+        for (const [uid, dir] of Object.entries(data.storageDirs)) {
+          userLocalStorageDir.set(Number(uid), dir);
+        }
+      }
+      if (data.storageModes && typeof data.storageModes === 'object') {
+        for (const [uid, mode] of Object.entries(data.storageModes)) {
+          userStorageMode.set(Number(uid), mode);
+        }
+      }
+      console.log(`[User Settings] Initialized settings for ${userLocalStorageDir.size} user directories, ${userStorageMode.size} storage modes.`);
+    }
+  } catch (err) {
+    console.warn('[User Settings] Failed to load user_settings.json:', sanitizeError(err));
+  }
+}
+
+function getUserStorageDir(userId) {
+  const uid = Number(userId);
+  if (userLocalStorageDir.has(uid)) {
+    return userLocalStorageDir.get(uid);
+  }
+  // Default fallback for primary user (first configured ID in ALLOWED_USER_IDS)
+  if (uid === Number(allowedUserId) && process.env.STORAGE_DIR) {
+    return process.env.STORAGE_DIR;
+  }
+  return null;
+}
+
+function setUserStorageDir(userId, dirPath) {
+  const uid = Number(userId);
+  const clean = dirPath.trim().replace(/^["']|["']$/g, '');
+  userLocalStorageDir.set(uid, clean);
+  scheduleUserSettingsPersistence();
+}
+
+function getUserStorageMode(userId) {
+  return userStorageMode.get(Number(userId)) || 'local';
+}
+
+function setUserStorageMode(userId, mode) {
+  userStorageMode.set(Number(userId), mode);
+  scheduleUserSettingsPersistence();
+}
+
 const userActiveMode = new Map(); // userId -> { mode: 'search'|'youtube'|'download'|'image', timestamp: number }
 const MODE_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes active command mode TTL
 const userCachedFilesList = new Map(); // userId -> array of cached library files
@@ -581,10 +663,13 @@ async function handleAgentCommand(ctx, prompt) {
     }
   };
 
+  const userDirectory = getUserStorageDir(userId);
+
   try {
     const result = await runGeminiAgent({
       prompt,
       userId,
+      userDirectory,
       onStatusUpdate: (text) => updateStatus(text),
     });
 
@@ -614,10 +699,6 @@ async function handleAgentCommand(ctx, prompt) {
       { parse_mode: 'Markdown' }
     ).catch(() => {});
   }
-}
-
-function getUserStorageMode(userId) {
-  return userStorageMode.get(userId) || 'local';
 }
 
 const CODE_EXTENSIONS = ['py', 'java', 'cpp', 'cc', 'cxx', 'c', 'h', 'hpp', 'js', 'ts', 'cs', 'go', 'rs', 'html', 'css', 'sql'];
@@ -664,14 +745,15 @@ bot.command(['start', 'help'], async (ctx) => {
     '☁️ *Files & Cloud Vault*\n' +
     '• `/storage` — ☁️ Cloud Vault hub (Saved files & search history)\n' +
     '• `/library` — 📁 Browse saved files by category (A-Z)\n' +
-    '• `/status` — 📊 View system resources, loaded file & mode\n\n' +
+    '• `/directory [path]` — 📁 View or set your personal laptop folder path\n' +
+    '• `/status` — 📊 View your connected laptop specs, bot resources & mode\n\n' +
     '🧹 *Workspace & Settings*\n' +
     '• `/cancel` — ❌ Exit Live Voice, Agent, search, or quiz mode\n' +
     '• `/clear` — 🧹 Clear conversation history (keeps loaded file)\n' +
     '• `/clearall` — 🗑️ Clear all conversation history & unload file\n' +
-    '• `/local` — 💾 Save files to both Drive D & Cloud Vault\n' +
+    '• `/local` — 💾 Save files to your laptop folder & Cloud Vault\n' +
     '• `/cloud` — ☁️ Save files to Cloud Vault only\n' +
-    '• `/nosave` — 💻 Save files to local Drive D only',
+    '• `/nosave` — 💻 Save files to your laptop folder only',
     { parse_mode: 'Markdown' }
   );
 });
@@ -1022,15 +1104,51 @@ bot.command('clear', async (ctx) => {
 
 bot.command(['clearall', 'clear_all'], handleClearAll);
 
+bot.command(['directory', 'setdirectory', 'dir'], async (ctx) => {
+  const userId = ctx.from.id;
+  const rawArg = ctx.message.text.replace(/^\/(?:directory|setdirectory|dir)\s*/i, '').trim();
+
+  if (!rawArg) {
+    const currentDir = getUserStorageDir(userId);
+    userAwaitingDirectoryInput.add(userId);
+    await ctx.reply(
+      `📁 *Your Local Laptop Folder*\n\n` +
+      `Current folder: ${currentDir ? `\`${currentDir}\`` : '_Not set yet_'}\n\n` +
+      `To set or change your folder, **reply with your laptop's folder path** now:\n` +
+      `Example: \`C:\\Users\\yourname\\Documents\\BotStorage\` or \`D:\\Projects\`\n\n` +
+      `_(Or type /cancel to keep current settings)_`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  setUserStorageDir(userId, rawArg);
+  await ctx.reply(
+    `✅ *Local Folder Configured!*\n\n` +
+    `📁 *Folder:* \`${rawArg}\`\n\n` +
+    `• Whenever you choose Local or Dual storage, files will be saved in this folder on your laptop.\n` +
+    `• Remote Agent commands will use this as your default project folder.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
 bot.command(['nosave', 'no_save'], async (ctx) => {
   const userId = ctx.from.id;
-  userStorageMode.set(userId, 'nosave');
+  setUserStorageMode(userId, 'nosave');
+  const currentDir = getUserStorageDir(userId);
+  let promptFolder = '';
+  if (!currentDir) {
+    userAwaitingDirectoryInput.add(userId);
+    promptFolder = '\n\n⚠️ *Action Required:* Please reply now with the folder path on your laptop where you want files saved (e.g. `C:\\Users\\yourname\\Documents` or `D:\\Projects`).';
+  } else {
+    promptFolder = `\n• Target Laptop Folder: \`${currentDir}\``;
+  }
   await ctx.reply(
     '💻 *Upload Mode set to: Local Only (/nosave)*\n\n' +
-    '• New files you upload will be saved **only to your laptop (Drive D)**.\n' +
-    '• They will **NOT** be uploaded to Telegram Cloud Vault.\n\n' +
+    '• New files you upload will be saved **only to your laptop**.\n' +
+    '• They will **NOT** be uploaded to Telegram Cloud Vault.' + promptFolder + '\n\n' +
     '💡 _To switch back:_\n' +
-    '• Type /local to save to both Drive D and Cloud Vault\n' +
+    '• Type /local to save to both your laptop and Cloud Vault\n' +
     '• Type /cloud to save to Cloud Vault only (saving laptop space)',
     { parse_mode: 'Markdown' }
   );
@@ -1038,27 +1156,35 @@ bot.command(['nosave', 'no_save'], async (ctx) => {
 
 bot.command(['cloud', 'cloudonly'], async (ctx) => {
   const userId = ctx.from.id;
-  userStorageMode.set(userId, 'cloud');
+  setUserStorageMode(userId, 'cloud');
   await ctx.reply(
     '☁️ *Upload Mode set to: Cloud Only*\n\n' +
     '• New files you upload will be saved **only to Telegram Cloud Vault**.\n' +
-    '• They will **NOT** take up space on your laptop drive (Drive D).\n\n' +
+    '• They will **NOT** take up space on your laptop drive.\n\n' +
     '💡 _To switch back:_\n' +
-    '• Type /local to save to both Drive D and Cloud Vault\n' +
-    '• Type /nosave to save to local Drive D only',
+    '• Type /local to save to both your laptop and Cloud Vault\n' +
+    '• Type /nosave to save to your laptop only',
     { parse_mode: 'Markdown' }
   );
 });
 
 bot.command(['local', 'dual'], async (ctx) => {
   const userId = ctx.from.id;
-  userStorageMode.set(userId, 'local');
+  setUserStorageMode(userId, 'local');
+  const currentDir = getUserStorageDir(userId);
+  let promptFolder = '';
+  if (!currentDir) {
+    userAwaitingDirectoryInput.add(userId);
+    promptFolder = '\n\n⚠️ *Action Required:* Please reply now with the folder path on your laptop where you want files saved (e.g. `C:\\Users\\yourname\\Documents` or `D:\\Projects`).';
+  } else {
+    promptFolder = `\n• Target Laptop Folder: \`${currentDir}\``;
+  }
   await ctx.reply(
     '💻+☁️ *Upload Mode set to: Local & Cloud (Default)*\n\n' +
-    '• New files you upload will be saved to **both Drive D and Telegram Cloud Vault**.\n\n' +
+    '• New files you upload will be saved to **both your laptop folder and Telegram Cloud Vault**.' + promptFolder + '\n\n' +
     '💡 _Other modes:_\n' +
     '• Type /cloud to save to Cloud Vault only\n' +
-    '• Type /nosave to save to Drive D only',
+    '• Type /nosave to save to your laptop only',
     { parse_mode: 'Markdown' }
   );
 });
@@ -1067,6 +1193,8 @@ bot.command(['storage', 'mode'], async (ctx) => {
   const userId = ctx.from.id;
   userActiveMode.delete(userId);
   const currentMode = getUserStorageMode(userId);
+  const userDir = getUserStorageDir(userId);
+  const dirDisplay = userDir ? `\`${userDir}\`` : '_Not set yet (tap button below)_';
   const modeLabels = {
     local: '💻+☁️ Local & Cloud (Dual Save)',
     cloud: '☁️ Cloud Only (No laptop space)',
@@ -1076,7 +1204,9 @@ bot.command(['storage', 'mode'], async (ctx) => {
   const keyboard = new InlineKeyboard()
     .text(`☁️ Telegram Cloud Vault (${cloudVault.length} files)`, 'storage_cloud')
     .row()
-    .text('💻 Local Storage (Drive D)', 'lib_src:local')
+    .text(userDir ? `💻 Local Storage (${path.basename(userDir) || 'Folder'})` : '💻 Local Storage (Set Folder)', 'lib_src:local')
+    .row()
+    .text('📁 Set / Change Local Folder', 'change_local_dir')
     .row()
     .text(`⚙️ Upload Destination: ${modeLabels[currentMode]}`, 'open_storage_settings');
 
@@ -1085,7 +1215,8 @@ bot.command(['storage', 'mode'], async (ctx) => {
     `Current Upload Mode: *${modeLabels[currentMode]}*\n\n` +
     `Choose what you'd like to do:\n\n` +
     `• ☁️ **Telegram Cloud Vault**: Access your saved files & search history\n` +
-    `• 💻 **Local Storage (Drive D)**: Files stored in \`${STORAGE_DIR}\` on your laptop\n` +
+    `• 💻 **Local Storage**: Files stored in ${dirDisplay} on your laptop\n` +
+    `• 📁 **Configure Folder**: Tap "Set / Change Local Folder" or send /directory\n` +
     `• ⚙️ **Upload Destination**: Configure where new uploads are saved`,
     {
       parse_mode: 'Markdown',
@@ -1462,6 +1593,7 @@ bot.command('cancel', async (ctx) => {
 });
 
 bot.command('status', async (ctx) => {
+  const userId = ctx.from.id;
   const uptime = Date.now() - botStartTime;
   const uptimeSeconds = Math.floor(uptime / 1000);
   const uptimeDays = Math.floor(uptimeSeconds / 86400);
@@ -1469,60 +1601,90 @@ bot.command('status', async (ctx) => {
   const uptimeMinutes = Math.floor((uptimeSeconds % 3600) / 60);
   const uptimeSecs = uptimeSeconds % 60;
 
-  const totalMemory = os.totalmem();
-  const freeMemory = os.freemem();
-  const usedMemory = totalMemory - freeMemory;
-  const memoryUsagePercent = ((usedMemory / totalMemory) * 100).toFixed(2);
-
-  const cpuInfo = os.cpus();
-  const cpuModel = cpuInfo[0].model;
-  const cpuCount = cpuInfo.length;
-
-  const loadAverage = os.loadavg();
-  const load1min = loadAverage[0].toFixed(2);
-  const load5min = loadAverage[1].toFixed(2);
-  const load15min = loadAverage[2].toFixed(2);
-
-  const processMemory = process.memoryUsage();
-  const botMemoryUsage = (processMemory.heapUsed / 1024 / 1024).toFixed(2);
-  const botMemoryTotal = (processMemory.heapTotal / 1024 / 1024).toFixed(2);
-
   const uptimeString = uptimeDays > 0
     ? `${uptimeDays}d ${uptimeHours}h ${uptimeMinutes}m ${uptimeSecs}s`
     : uptimeHours > 0
     ? `${uptimeHours}h ${uptimeMinutes}m ${uptimeSecs}s`
     : `${uptimeMinutes}m ${uptimeSecs}s`;
 
-  const activeDoc = await getOrAutoLoadDocument(ctx.from.id);
-
-  const activeModeObj = userActiveMode.get(ctx.from.id);
+  const activeDoc = await getOrAutoLoadDocument(userId);
+  const activeModeObj = userActiveMode.get(userId);
   const activeModeNames = {
     search: '🌐 AI Web Search (/cancel to exit)',
     youtube: '🎥 YouTube Search (/cancel to exit)',
     image: '🎨 Image Generator (/cancel to exit)',
   };
-  const activeModeDisplay = activeModeObj
+  const isAgentActive = userAgentMode.get(userId);
+  const activeModeDisplay = isAgentActive
+    ? '🤖 Gemini Autonomous Agent (All chats)'
+    : activeModeObj
     ? (activeModeNames[activeModeObj.mode] || `\`${activeModeObj.mode}\` (/cancel to exit)`)
-    : '💬 Normal Chat Mode';
+    : '💬 Normal Chat Mode (Claude)';
+
+  const userDir = getUserStorageDir(userId);
+  const userMode = getUserStorageMode(userId);
+  const modeLabels = {
+    local: '💻+☁️ Local & Cloud (Dual)',
+    cloud: '☁️ Cloud Only',
+    nosave: '💻 Local Only (/nosave)',
+  };
+
+  // 1. Check if THIS specific user's laptop is connected
+  const hasLaptop = isLaptopConnected(userId);
+  let laptopSpecsText = '';
+
+  if (hasLaptop) {
+    try {
+      const laptop = await getLaptopStatus(userId);
+      if (laptop && laptop.success) {
+        const memTotalGb = (laptop.memory.totalMb / 1024).toFixed(1);
+        const memUsedGb = (laptop.memory.usedMb / 1024).toFixed(1);
+        const memFreeGb = (laptop.memory.freeMb / 1024).toFixed(1);
+
+        laptopSpecsText =
+          `💻 *Your Connected Laptop Specs (Live)*\n` +
+          `├─ Device: *${laptop.deviceName}* (\`${laptop.hostname}\`)\n` +
+          `├─ OS: \`${laptop.platform} (${laptop.arch})\`\n` +
+          `├─ CPU: ${laptop.cpuModel || 'CPU'} (${laptop.cpuCores} cores)\n` +
+          `├─ RAM: ${memUsedGb} GB / ${memTotalGb} GB used (${laptop.memory.usedPercent}%)\n` +
+          `├─ Free RAM: ${memFreeGb} GB\n` +
+          `├─ Laptop Uptime: ${laptop.uptimeHours} hrs\n` +
+          `└─ Status: 🟢 Online & Ready for remote scripts\n\n`;
+      }
+    } catch (laptopErr) {
+      console.warn(`[Status] Error querying laptop for user ${userId}:`, laptopErr.message);
+      laptopSpecsText =
+        `💻 *Your Connected Laptop*\n` +
+        `└─ Status: 🟡 Connected (Runner responding slowly)\n\n`;
+    }
+  } else {
+    laptopSpecsText =
+      `💻 *Your Laptop Specs*\n` +
+      `└─ Status: 🔴 Offline / Not Connected\n` +
+      `   _Run \`start-agent.bat\` on your laptop to view your live specs and enable remote scripts._\n\n`;
+  }
+
+  // 2. Cloud server hosting specs
+  const totalMemory = os.totalmem();
+  const freeMemory = os.freemem();
+  const usedMemory = totalMemory - freeMemory;
+  const memoryUsagePercent = ((usedMemory / totalMemory) * 100).toFixed(2);
+  const processMemory = process.memoryUsage();
+  const botMemoryUsage = (processMemory.heapUsed / 1024 / 1024).toFixed(2);
 
   const statusMessage =
-    `📊 *Bot Status*\n\n` +
-    `⏱️ *Uptime:* ${uptimeString}\n\n` +
-    `💾 *System Memory:*\n` +
-    `├─ Total: ${(totalMemory / 1024 / 1024 / 1024).toFixed(2)} GB\n` +
-    `├─ Used: ${(usedMemory / 1024 / 1024 / 1024).toFixed(2)} GB\n` +
-    `├─ Free: ${(freeMemory / 1024 / 1024 / 1024).toFixed(2)} GB\n` +
-    `└─ Usage: ${memoryUsagePercent}%\n\n` +
-    `🤖 *Bot Memory:*\n` +
-    `└─ ${botMemoryUsage} MB / ${botMemoryTotal} MB\n\n` +
-    `🖥️ *CPU:*\n` +
-    `├─ Model: ${cpuModel}\n` +
-    `├─ Cores: ${cpuCount}\n` +
-    `└─ Load Average: ${load1min} (1m), ${load5min} (5m), ${load15min} (15m)\n\n` +
-    `💬 *Active Conversations:* ${conversationHistory.size}\n` +
-    `📄 *Loaded Document:* ${activeDoc?.fileName ? `\`${activeDoc.fileName}\`` : '_None (unloaded)_'}\n` +
-    `⚙️ *Upload Storage Mode:* ${getUserStorageMode(ctx.from.id) === 'cloud' ? '☁️ Cloud Only' : getUserStorageMode(ctx.from.id) === 'nosave' ? '💻 Local Only (/nosave)' : '💻+☁️ Local & Cloud (Dual)'}\n` +
-    `🎯 *Active Command Mode:* ${activeModeDisplay}`;
+    `📊 *System & Hardware Status*\n\n` +
+    laptopSpecsText +
+    `👤 *Your Personal Settings*\n` +
+    `├─ Laptop Folder: ${userDir ? `\`${userDir}\`` : '_Not set yet (use /directory)_'}\n` +
+    `├─ Upload Storage: ${modeLabels[userMode] || userMode}\n` +
+    `├─ Loaded Document: ${activeDoc?.fileName ? `\`${activeDoc.fileName}\`` : '_None (unloaded)_'}\n` +
+    `└─ Active Mode: ${activeModeDisplay}\n\n` +
+    `☁️ *Cloud Bot Engine (Render Host)*\n` +
+    `├─ Bot Uptime: ${uptimeString}\n` +
+    `├─ Host Memory: ${(usedMemory / 1024 / 1024 / 1024).toFixed(2)} GB / ${(totalMemory / 1024 / 1024 / 1024).toFixed(2)} GB (${memoryUsagePercent}%)\n` +
+    `├─ Process Heap: ${botMemoryUsage} MB\n` +
+    `└─ Conversations: ${conversationHistory.size} active`;
 
   await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
 });
@@ -2439,7 +2601,12 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       '• You do NOT generate pictures or images directly in chat.\n' +
       '• Image generation is handled exclusively by the dedicated bot command:\n' +
       '  - If the user asks you to generate, create, make, or draw pictures or images, instruct them to use `/image <prompt>` (powered by Gemini Nano Banana).\n' +
-      '  - If the user asks about generating videos, let them know AI video generation is not supported and they can generate pictures using `/image <prompt>`.';
+      '  - If the user asks about generating videos, let them know AI video generation is not supported and they can generate pictures using `/image <prompt>`.\n\n' +
+      'REMOTE LAPTOP CONTROL & AUTOMATIC SCRIPT INSTALLATION:\n' +
+      '• Each user can link their own laptop to this bot using `start-agent.bat`.\n' +
+      '• If the user asks to create a file or python script, install packages (via pip or npm), or run a script on their laptop:\n' +
+      '  - Always provide the clean, complete code.\n' +
+      '  - Mention that they can send `/agent <request>` (or enable `/agent_mode`), and the bot will autonomously create the file on their laptop, install packages with pip/npm, and execute the script for them!';
 
     if (activeDoc && !isMultimodal) {
       const docExcerpt =
@@ -3178,10 +3345,14 @@ function buildSearchHistoryKeyboard(page = 0) {
 function buildSourcePickerKeyboard(userId = null) {
   const currentMode = userId ? getUserStorageMode(userId) : 'local';
   const modeShort = currentMode === 'cloud' ? '☁️ Cloud' : currentMode === 'nosave' ? '💻 Local Only' : '💻+☁️ Dual';
+  const userDir = userId ? getUserStorageDir(userId) : null;
+  const localLabel = userDir ? `💻 Local Storage (${path.basename(userDir) || 'Folder'})` : '💻 Local Storage (Set Folder)';
   return new InlineKeyboard()
     .text(`☁️ Telegram Cloud Vault (${cloudVault.length})`, 'storage_cloud')
     .row()
-    .text('💻 Local Storage (Drive D)', 'lib_src:local')
+    .text(localLabel, 'lib_src:local')
+    .row()
+    .text('📁 Set / Change Local Folder', 'change_local_dir')
     .row()
     .text(`⚙️ Upload Destination: ${modeShort}`, 'open_storage_settings');
 }
@@ -3190,13 +3361,15 @@ bot.command(['library', 'files'], async (ctx) => {
   const userId = ctx.from.id;
   userActiveMode.delete(userId);
   const keyboard = buildSourcePickerKeyboard(userId);
+  const userDir = getUserStorageDir(userId);
+  const dirDisplay = userDir ? `\`${userDir}\`` : '_Not set yet (tap button below)_';
   await ctx.reply(
     `📚 *Document & File Library*\n\n` +
     `Choose a storage location to browse (Files organized by category, sorted A-Z):\n\n` +
     `• ☁️ **Telegram Cloud Vault** (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
     `  Accessible 24/7 on your phone & any device.\n\n` +
-    `• 💻 **Local Storage (Drive D)**\n` +
-    `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
+    `• 💻 **Local Storage**\n` +
+    `  Physical files located in ${dirDisplay} on your laptop.`,
     {
       parse_mode: 'Markdown',
       reply_markup: keyboard,
@@ -3228,7 +3401,10 @@ bot.on('callback_query:data', async (ctx) => {
   // Return to Storage Hub
   if (data === 'storage_main') {
     await ctx.answerCallbackQuery();
-    const currentMode = getUserStorageMode(ctx.from.id);
+    const userId = ctx.from.id;
+    const currentMode = getUserStorageMode(userId);
+    const userDir = getUserStorageDir(userId);
+    const dirDisplay = userDir ? `\`${userDir}\`` : '_Not set yet (tap button below)_';
     const modeLabels = {
       local: '💻+☁️ Local & Cloud (Dual Save)',
       cloud: '☁️ Cloud Only (No laptop space)',
@@ -3238,7 +3414,9 @@ bot.on('callback_query:data', async (ctx) => {
     const keyboard = new InlineKeyboard()
       .text(`☁️ Telegram Cloud Vault (${cloudVault.length} files)`, 'storage_cloud')
       .row()
-      .text('💻 Local Storage (Drive D)', 'lib_src:local')
+      .text(userDir ? `💻 Local Storage (${path.basename(userDir) || 'Folder'})` : '💻 Local Storage (Set Folder)', 'lib_src:local')
+      .row()
+      .text('📁 Set / Change Local Folder', 'change_local_dir')
       .row()
       .text(`⚙️ Upload Destination: ${modeLabels[currentMode]}`, 'open_storage_settings');
 
@@ -3247,7 +3425,8 @@ bot.on('callback_query:data', async (ctx) => {
       `Current Upload Mode: *${modeLabels[currentMode]}*\n\n` +
       `Choose what you'd like to do:\n\n` +
       `• ☁️ **Telegram Cloud Vault**: Access your saved files & search history\n` +
-      `• 💻 **Local Storage (Drive D)**: Files stored in \`${STORAGE_DIR}\` on your laptop\n` +
+      `• 💻 **Local Storage**: Files stored in ${dirDisplay} on your laptop\n` +
+      `• 📁 **Configure Folder**: Tap "Set / Change Local Folder" or send /directory\n` +
       `• ⚙️ **Upload Destination**: Configure where new uploads are saved`,
       {
         parse_mode: 'Markdown',
@@ -3319,22 +3498,64 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  // Local Storage (Drive D) Categories View
+  // Local Storage Categories View
   if (data === 'lib_src:local' || data === 'lib_refresh:local') {
-    const files = await getStoredFiles();
-    setUserCachedFiles(ctx.from.id, files);
+    const userId = ctx.from.id;
+    const userDir = getUserStorageDir(userId);
+    const hasLaptop = isLaptopConnected(userId);
+
     await ctx.answerCallbackQuery();
+
+    if (!userDir) {
+      userAwaitingDirectoryInput.add(userId);
+      await ctx.editMessageText(
+        `📁 *Local Folder Not Configured*\n\n` +
+        `You have not set your personal laptop folder yet.\n\n` +
+        `Please **reply with your laptop's folder path** now:\n` +
+        `_Example: \`C:\\Users\\yourname\\Documents\\TelegramStorage\` or \`D:\\Projects\`_\n\n` +
+        `Or use \`/directory <path>\` anytime!`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('☁️ Switch to Cloud Vault', 'storage_cloud')
+            .row()
+            .text('⚙️ Back to Storage', 'storage_main'),
+        }
+      );
+      return;
+    }
+
+    let files = [];
+    if (fs.existsSync(userDir)) {
+      files = await getStoredFiles(userDir, userDir);
+    } else if (hasLaptop) {
+      try {
+        const res = await listLaptopDirectory(userId, userDir);
+        if (res && res.success && res.items) {
+          files = res.items
+            .filter((i) => i.isFile)
+            .map((i) => ({
+              name: i.name,
+              relPath: i.name,
+              size: 0,
+              mtime: Date.now(),
+            }));
+        }
+      } catch (err) {
+        console.warn(`[Local Files] Could not list laptop dir for user ${userId}:`, err.message);
+      }
+    }
+
+    setUserCachedFiles(userId, files);
 
     if (files.length === 0) {
       if (cloudVault.length > 0) {
-        // The bot is hosted on a cloud server (Render/Linux) where Drive D is remote,
-        // but the user's laptop files are synced to Telegram Cloud Vault!
         const keyboard = buildCategoriesKeyboard(cloudVault, 'cloud');
         await ctx.editMessageText(
-          `💻 *Drive D Files (Synced to Telegram Cloud Vault)*\n\n` +
-          `Your bot is running 24/7 on a cloud server (Render). Because cloud servers cannot directly open your physical laptop hard drive, **your files from Drive D are synced safely in your Cloud Vault!**\n\n` +
-          `Total Synced Files: *${cloudVault.length}*\n\n` +
-          `Select a category below to browse (files are sorted **A-Z**):`,
+          `💻 *Laptop Storage (${path.basename(userDir) || 'Local'})*\n\n` +
+          `Your configured folder is: \`${userDir}\`\n\n` +
+          `No local files found in this folder. Your saved files are backed up safely in **☁️ Telegram Cloud Vault** (${cloudVault.length} files available)!\n\n` +
+          `Select a category below to browse (sorted **A-Z**):`,
           {
             parse_mode: 'Markdown',
             reply_markup: keyboard,
@@ -3344,14 +3565,17 @@ bot.on('callback_query:data', async (ctx) => {
       }
 
       await ctx.editMessageText(
-        `💻 *Local Storage (Drive D) is Empty*\n\n` +
-        `Folder: \`${STORAGE_DIR}\`\n\n` +
-        `• If running locally on your laptop, copy your files into that folder.\n` +
-        `• If running on a cloud host (Render), run \`npm run sync\` on your laptop to sync files to your Cloud Vault!`,
+        `💻 *Local Storage is Empty*\n\n` +
+        `Folder: \`${userDir}\`\n\n` +
+        `• Make sure \`start-agent.bat\` is running on your laptop.\n` +
+        `• Send files to this chat or ask the agent to create files in this folder!\n` +
+        `• Tap "Change Folder" below if you want to use a different directory.`,
         {
           parse_mode: 'Markdown',
           reply_markup: new InlineKeyboard()
             .text('🔄 Refresh Local', 'lib_src:local')
+            .row()
+            .text('📁 Change Local Folder', 'change_local_dir')
             .row()
             .text('☁️ Switch to Cloud Vault', 'storage_cloud'),
         }
@@ -3361,8 +3585,8 @@ bot.on('callback_query:data', async (ctx) => {
 
     const keyboard = buildCategoriesKeyboard(files, 'local');
     await ctx.editMessageText(
-      `💻 *Local Storage (Drive D) — File Categories*\n\n` +
-      `Folder: \`${STORAGE_DIR}\`\n` +
+      `💻 *Local Storage — File Categories*\n\n` +
+      `Folder: \`${userDir}\`\n` +
       `Total Files: *${files.length}*\n\n` +
       `Select a category below to browse (files are sorted alphabetically **A-Z**):`,
       {
@@ -3730,10 +3954,29 @@ bot.on('callback_query:data', async (ctx) => {
 
 
 
+  // Change local directory
+  if (data === 'change_local_dir') {
+    const userId = ctx.from.id;
+    userAwaitingDirectoryInput.add(userId);
+    await ctx.answerCallbackQuery();
+    const currentDir = getUserStorageDir(userId);
+    await ctx.reply(
+      `📁 *Set Your Laptop Storage Folder*\n\n` +
+      `Current folder: ${currentDir ? `\`${currentDir}\`` : '_Not set yet_'}\n\n` +
+      `Please **reply with your laptop's folder path** now:\n` +
+      `_Example: \`C:\\Users\\yourname\\Documents\\TelegramStorage\` or \`D:\\Projects\`_\n\n` +
+      `_(Or type /cancel to keep current settings)_`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
   // Open storage settings from inline button
   if (data === 'open_storage_settings') {
     await ctx.answerCallbackQuery();
-    const currentMode = getUserStorageMode(ctx.from.id);
+    const userId = ctx.from.id;
+    const currentMode = getUserStorageMode(userId);
+    const userDir = getUserStorageDir(userId);
     const modeLabels = {
       local: '💻+☁️ Local & Cloud (Dual Save)',
       cloud: '☁️ Cloud Only (No laptop space)',
@@ -3747,15 +3990,18 @@ bot.on('callback_query:data', async (ctx) => {
       .row()
       .text('💻 Local Only (/nosave)', 'set_storage:nosave')
       .row()
+      .text('📁 Set / Change Local Folder', 'change_local_dir')
+      .row()
       .text('◀️ Back to Storage Hub', 'storage_main');
 
     await ctx.editMessageText(
       `⚙️ *Storage Destination Settings*\n\n` +
-      `Current Mode: *${modeLabels[currentMode]}*\n\n` +
+      `Current Mode: *${modeLabels[currentMode]}*\n` +
+      `Current Folder: ${userDir ? `\`${userDir}\`` : '_Not set yet_'}\n\n` +
       `Choose where newly uploaded files should be saved:\n\n` +
       `• ☁️ **Cloud Only**: Saved only to Telegram Cloud Vault. Takes 0 MB on laptop.\n` +
-      `• 💻+☁️ **Local & Cloud**: Saved to both Drive D and Telegram Cloud Vault.\n` +
-      `• 💻 **Local Only (/nosave)**: Saved only to Drive D. No cloud upload.`,
+      `• 💻+☁️ **Local & Cloud**: Saved to both your laptop folder and Telegram Cloud Vault.\n` +
+      `• 💻 **Local Only (/nosave)**: Saved only to your laptop folder. No cloud upload.`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
@@ -3767,9 +4013,11 @@ bot.on('callback_query:data', async (ctx) => {
   // Set storage mode
   if (data.startsWith('set_storage:')) {
     const newMode = data.split(':')[1];
-    userStorageMode.set(ctx.from.id, newMode);
+    const userId = ctx.from.id;
+    setUserStorageMode(userId, newMode);
     await ctx.answerCallbackQuery({ text: `Mode updated to ${newMode}!` });
 
+    const currentDir = getUserStorageDir(userId);
     const modeLabels = {
       local: '💻+☁️ Local & Cloud (Dual Save)',
       cloud: '☁️ Cloud Only (No laptop space)',
@@ -3783,14 +4031,26 @@ bot.on('callback_query:data', async (ctx) => {
       .row()
       .text('💻 Local Only (/nosave)', 'set_storage:nosave')
       .row()
+      .text('📁 Set / Change Local Folder', 'change_local_dir')
+      .row()
       .text('⚙️ Back to Storage Hub', 'storage_main');
+
+    let extraDirNote = '';
+    if ((newMode === 'local' || newMode === 'nosave') && !currentDir) {
+      userAwaitingDirectoryInput.add(userId);
+      extraDirNote = `\n\n⚠️ *Action Required: Local Folder Not Set*\n` +
+        `Please reply now with the folder path on your laptop where you want files saved:\n` +
+        `_Example: \`C:\\Users\\username\\Documents\\BotStorage\` or \`D:\\Projects\`_`;
+    } else if (currentDir) {
+      extraDirNote = `\n\n📁 *Target Laptop Folder:* \`${currentDir}\``;
+    }
 
     await ctx.editMessageText(
       `✅ *Storage Mode Updated!*\n\n` +
       `Active Mode: *${modeLabels[newMode]}*\n\n` +
       `• ☁️ **Cloud Only**: Saves to Cloud Vault only (0 laptop space).\n` +
-      `• 💻+☁️ **Local & Cloud**: Saves to both Drive D & Cloud Vault.\n` +
-      `• 💻 **Local Only (/nosave)**: Saves to Drive D only.`,
+      `• 💻+☁️ **Local & Cloud**: Saves to your laptop folder & Cloud Vault.\n` +
+      `• 💻 **Local Only (/nosave)**: Saves to your laptop folder only.${extraDirNote}`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
@@ -3802,14 +4062,17 @@ bot.on('callback_query:data', async (ctx) => {
   // Switch / return to source picker
   if (data === 'lib_sources') {
     await ctx.answerCallbackQuery();
-    const keyboard = buildSourcePickerKeyboard(ctx.from.id);
+    const userId = ctx.from.id;
+    const keyboard = buildSourcePickerKeyboard(userId);
+    const userDir = getUserStorageDir(userId);
+    const dirDisplay = userDir ? `\`${userDir}\`` : '_Not set yet_';
     await ctx.editMessageText(
       `📚 *Document & File Library*\n\n` +
       `Choose a storage location to browse (Files organized by category, sorted A-Z):\n\n` +
       `• ☁️ *Telegram Cloud Vault* (${cloudVault.length} file${cloudVault.length === 1 ? '' : 's'})\n` +
       `  Files uploaded via Telegram chat. Accessible 24/7 on your phone and any device.\n\n` +
-      `• 💻 *Local Storage (Drive D)*\n` +
-      `  Physical files located in \`${STORAGE_DIR}\` on your laptop.`,
+      `• 💻 *Local Storage*\n` +
+      `  Physical files located in ${dirDisplay} on your laptop.`,
       {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
@@ -4015,6 +4278,32 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
+  const userId = ctx.from.id;
+
+  // Check if user is awaiting input for setting their local laptop storage directory
+  if (userAwaitingDirectoryInput.has(userId)) {
+    userAwaitingDirectoryInput.delete(userId);
+    const rawPath = userMessage.trim();
+    if (rawPath.toLowerCase() === 'cancel' || rawPath === '/cancel') {
+      await ctx.reply('❌ Local directory configuration cancelled.', { parse_mode: 'Markdown' });
+      return;
+    }
+    if (rawPath.length < 2) {
+      await ctx.reply('❌ Invalid directory path. You can set it anytime with `/directory <path>`', { parse_mode: 'Markdown' });
+      return;
+    }
+    setUserStorageDir(userId, rawPath);
+    await ctx.reply(
+      `✅ *Local Storage Directory Configured!*\n\n` +
+      `📁 *Folder:* \`${rawPath}\`\n\n` +
+      `• Local file uploads and agent scripts will use this directory on your laptop.\n` +
+      `• You can change this anytime with \`/directory <path>\` or in \`/storage\`.\n` +
+      `• With \`start-agent.bat\` active on your laptop, the bot can directly create files and run scripts in this folder!`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
   // Check if user is in an active persistent command mode (/search, /youtube, /tiktok, /image)
   if (userActiveMode.has(ctx.from.id)) {
     const active = userActiveMode.get(ctx.from.id);
@@ -4164,6 +4453,13 @@ try {
   console.warn('Conversation history initialization note:', sanitizeError(convErr));
 }
 
+// Initialize User Settings (per-user storage directories & modes)
+try {
+  await initUserSettings();
+} catch (userErr) {
+  console.warn('User settings initialization note:', sanitizeError(userErr));
+}
+
 // Register commands with Telegram so they appear in autocomplete menu when typing /
 const botCommands = [
   // 🤖 AI Agent & Research
@@ -4186,15 +4482,16 @@ const botCommands = [
   // ☁️ Cloud Vault & Files
   { command: 'storage', description: '☁️ Cloud Vault hub (Saved files & history)' },
   { command: 'library', description: '📁 Browse saved files by category (A-Z)' },
-  { command: 'status', description: '📊 System resources, active file & mode' },
+  { command: 'directory', description: '📁 View or set your personal laptop folder path' },
+  { command: 'status', description: '📊 Laptop hardware specs, bot resources & mode' },
 
   // 🧹 Workspace & Session Controls
   { command: 'cancel', description: '❌ Exit Live Voice, Agent, search, or quiz mode' },
   { command: 'clear', description: '🧹 Clear conversation history (keeps file)' },
   { command: 'clearall', description: '🗑️ Clear all conversation history & unload file' },
-  { command: 'local', description: '💾 Save files to both Drive D & Cloud Vault' },
+  { command: 'local', description: '💾 Save files to your laptop folder & Cloud Vault' },
   { command: 'cloud', description: '☁️ Save files to Cloud Vault only' },
-  { command: 'nosave', description: '💻 Save files to local Drive D only' },
+  { command: 'nosave', description: '💻 Save files to your laptop folder only' },
   { command: 'help', description: '📖 Command reference and cheat sheet' },
   { command: 'start', description: '✨ Welcome guide and features overview' },
 ];
