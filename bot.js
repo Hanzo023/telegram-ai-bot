@@ -1343,11 +1343,12 @@ async function handleClearAll(ctx) {
   );
 }
 
-bot.command('clear', async (ctx) => {
+async function handleClear(ctx) {
   const userId = ctx.from.id;
   clearUserQueue(userId);
   userActiveMode.delete(userId);
-  const arg = ctx.message.text.replace(/^\/clear\s*/i, '').trim().toLowerCase();
+  const text = ctx.message?.text || '';
+  const arg = text.replace(/^\/?clear\s*/i, '').trim().toLowerCase();
 
   if (arg === 'all' || arg === 'doc' || arg === 'file') {
     await handleClearAll(ctx);
@@ -1360,12 +1361,13 @@ bot.command('clear', async (ctx) => {
 
   const activeDoc = await getOrAutoLoadDocument(userId);
   if (activeDoc) {
+    const keyboard = new InlineKeyboard().text('🗑️ Clear All (Unload File Too)', 'confirm_clear_all');
     await ctx.reply(
       '✅ *Conversation messages cleared!*\n\n' +
       `📄 *Active Document Kept:* \`${activeDoc.fileName}\`\n` +
-      `You can continue asking questions or quiz on this file without re-uploading!\n\n` +
-      `💡 _To unload this document from chat memory too, type \`/clearall\`._`,
-      { parse_mode: 'Markdown' }
+      `You can continue asking questions or chatting about this file without re-uploading!\n\n` +
+      `💡 _To unload this document from chat memory too, type \`/clear all\` or tap below:_`,
+      { parse_mode: 'Markdown', reply_markup: keyboard }
     );
   } else {
     userLastDocument.delete(userId);
@@ -1377,9 +1379,17 @@ bot.command('clear', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
   }
-});
+}
 
+bot.command('clear', handleClear);
 bot.command(['clearall', 'clear_all'], handleClearAll);
+bot.hears(/^clear\s+all$/i, handleClearAll);
+bot.hears(/^clear$/i, handleClear);
+
+bot.callbackQuery('confirm_clear_all', async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  await handleClearAll(ctx);
+});
 
 bot.command(['directory', 'setdirectory', 'dir'], async (ctx) => {
   const userId = ctx.from.id;
