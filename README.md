@@ -1,127 +1,219 @@
-# Telegram AI Bot
+# 🤖 Telegram AI Agent & Remote Laptop Bridge
 
-A personal Telegram bot powered by Claude 3.5 Sonnet for AI-assisted conversations.
+> An end-to-end autonomous AI assistant on Telegram powered by **Claude 3.5 Sonnet** and **Google Gemini 2.5 Flash**, featuring bidirectional voice calls, document intelligence, live web research, and a secure **outbound reverse-tunnel remote agent** to control your local computer from anywhere in the world.
 
-## Features
+---
 
-- Direct integration with Claude 3.5 Sonnet via Anthropic API
-- Conversation history management (maintains context across messages)
-- User authentication (only specified user can interact)
-- Simple command interface
-- Automatic conversation trimming to manage token usage
+## 🌟 The Evolution: From Simple Chatbot to Autonomous Agent
 
-## Prerequisites
+Over a week of development, this project evolved from a basic text chatbot into a full-fledged autonomous computing companion:
 
-- Node.js (v18 or higher recommended)
-- A Telegram account
-- An Anthropic API key
+```
+[Day 1: Simple Bot] ────────► [Day 3: Multimodal & Voice] ────────► [Day 5: Cloud Vault & Research] ────────► [Day 7: Full Autonomous Remote Agent]
+• Claude 3.5 Sonnet            • Voice note transcription           • PDF & document parsing           • Outbound WebSocket reverse tunnel
+• Multi-turn chat memory       • Voice audio responses              • Telegram Cloud Vault             • Remote terminal command execution
+• User whitelist security      • Real-time duplex voice calls       • Deep Research & Web Search       • Pending code review & inline save UI
+                                                                                                       • Background daemon (PM2 & silent VBS)
+```
 
-## Setup Instructions
+### 1. 🧠 Intelligent Conversational Core
+* Powered by **Anthropic Claude 3.5 Sonnet** with thoughtful, nuanced, human-like reasoning.
+* **Persistent Context Management**: Multi-turn conversation sessions persisted to disk and automatically synchronized across cloud container resets.
+* **Strict Whitelist Security**: Restricts access exclusively to authorized Telegram User IDs (`ALLOWED_USER_ID`), blocking unauthorized users.
 
-### 1. Create a Telegram Bot
+### 2. 🎙️ Multimodal & Real-Time Voice
+* **Voice Note Transcription**: Send any Telegram voice message or audio file — transcribed with Google Gemini.
+* **Voice Audio Replies**: Toggle `/live` mode to receive voice audio responses directly in chat.
+* **Live Duplex Calls (`/call`)**: Integrated Telegram WebApp with low-latency bidirectional voice communication powered by the Gemini Live API.
+* **Voice Personas (`/voice`)**: Choose between expressive voices (Aoede, Charon, Fenrir, Kore, Puck).
 
-1. Open Telegram and search for [@BotFather](https://t.me/botfather)
-2. Send `/newbot` command
-3. Follow the prompts to name your bot
-4. Save the bot token provided by BotFather
+### 3. ☁️ Telegram Cloud Vault & Document Intelligence
+* **Document Parsing**: Upload PDFs, text files, Python scripts, JSON, Markdown, or spreadsheets. The bot extracts text, maintains active document context, and generates interactive quizzes (`/quiz`).
+* **Telegram Cloud Vault (`/storage`)**: Free, permanent cloud storage backed by Telegram's cloud storage.
+* **Ephemeral Cloud Resilience**: Automatically creates and updates a pinned vault index (`VAULT_DATA`) so file records and user settings survive ephemeral cloud resets (like Render dyno restarts).
+* **Storage Modes**: `/local` (Dual sync), `/cloud` (Cloud only), and `/nosave` (Laptop only).
 
-### 2. Get Your Telegram User ID
+### 4. 🔬 Deep Research, Search & Creation
+* **Live Web Grounding (`/search`)**: Real-time Google search grounding with clickable citation links.
+* **Deep Research (`/deep_research`)**: Autonomous multi-step research reports synthesized across multiple search queries.
+* **YouTube Discovery (`/youtube`)**: Search and discover relevant YouTube videos and channels.
+* **AI Image Generation (`/image`)**: High-resolution image synthesis using Gemini.
 
-1. Search for [@userinfobot](https://t.me/userinfobot) on Telegram
-2. Start a conversation to get your user ID
-3. Save this ID (you'll need it for the ALLOWED_USER_ID)
+### 5. 💻 Remote Laptop Agent & Fleet Bridge (`/agent`, `/devices`, `/status`)
+* **Outbound Reverse Tunnel**: Connects your laptop to the cloud bot via a persistent outbound WebSocket (`wss://`). **Zero open ports, zero port forwarding, and fully secure on public Wi-Fi.**
+* **Terminal Execution**: Run PowerShell or Bash scripts on your laptop right from Telegram (`/agent`).
+* **Interactive Code Review & Pending Saves**: When code is generated, the bot holds it in state and prompts you with inline buttons (`[📁 Target Folder]`, `[🖥️ Desktop]`, `[☁️ Cloud Vault]`, `[✏️ Custom Path]`, `[❌ Discard]`) rather than blindly writing to disk.
+* **Zero Terminal Footprint**: Run as a silent background daemon with PM2 or VBScript launcher. No CMD windows required.
+* **Multi-User Fleet Monitoring**: Supports teams and multi-device setups — `/devices` and `/status` track each authorized user's laptop name, OS, and online state.
+* **Permanent 4-Layer Memory**: Remembers your configured storage directory (`/directory`) across laptop disconnects, reboots, and cloud container redeployments.
 
-### 3. Get Anthropic API Key
+---
 
-1. Sign up at [Anthropic](https://console.anthropic.com/)
-2. Navigate to API Keys section
-3. Create a new API key and save it
+## 🏗️ Architecture
 
-### 4. Install Dependencies
+```
+                  ┌────────────────────────────────────────────────────────┐
+                  │                 Telegram Client (Phone / PC)            │
+                  └───────────────────────────┬────────────────────────────┘
+                                              │ Telegram Bot API (HTTPS)
+                                              ▼
+                  ┌────────────────────────────────────────────────────────┐
+                  │          Cloud Bot Engine (Render / Docker Host)       │
+                  │  • grammY Telegram Framework                           │
+                  │  • Claude 3.5 Sonnet / Gemini 2.5 API Integrations     │
+                  │  • WebSocket Tunnel Server (/ws/laptop-agent)          │
+                  │  • Pinned Cloud Vault Sync & Memory Cache              │
+                  └───────────────────────────┬────────────────────────────┘
+                                              │
+                      Outbound Secure WSS Tunnel (Reverse Connection)
+                      No inbound open ports required on user machine
+                                              │
+                                              ▼
+                  ┌────────────────────────────────────────────────────────┐
+                  │           Local Laptop Agent Runner (Your PC)          │
+                  │  • Background Daemon: PM2 or WMI Silent VBScript       │
+                  │  • System Hardware Monitoring (CPU, RAM, Uptime)       │
+                  │  • PowerShell Command Execution Engine                 │
+                  │  • Direct File Read / Write / Rename / Delete API      │
+                  └────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🚀 Quick Start Guide
+
+### Step 1: Clone the Repository & Install Dependencies
 
 ```bash
+git clone https://github.com/Hanzo023/telegram-ai-bot.git
+cd telegram-ai-bot
 npm install
 ```
 
-### 5. Configure Environment Variables
+### Step 2: Configure Environment Variables
 
-1. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
+Copy the example environment configuration:
+```bash
+cp .env.example .env
+```
 
-2. Edit `.env` and fill in your credentials:
-   ```
-   TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-   ANTHROPIC_API_KEY=your_anthropic_api_key_here
-   ANTHROPIC_BASE_URL=https://api.anthropic.com
-   ALLOWED_USER_ID=your_telegram_user_id_here
-   ```
+Edit `.env` with your preferred text editor:
+```env
+# Telegram Bot Token from @BotFather
+TELEGRAM_BOT_TOKEN="1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 
-### 6. Run the Bot
+# AI Model Credentials
+ANTHROPIC_API_KEY="sk-ant-api03-..."
+ANTHROPIC_BASE_URL="https://api.anthropic.com"
+ANTHROPIC_MODEL="claude-3-5-sonnet-20241022"
+GEMINI_API_KEY="AIzaSy..."
 
+# Authorization (Your Telegram numeric user ID, find via @userinfobot)
+# Supports comma-separated IDs for multiple users (e.g. 11111111,22222222)
+ALLOWED_USER_ID="8199950189"
+
+# Local Storage Directory
+STORAGE_DIR="D:\\drive-download-20260715T073323Z-1-001"
+
+# Remote Agent Bridge Configuration
+SERVER_URL="https://your-bot-app.onrender.com"
+LAPTOP_RUNNER_SECRET="choose_a_strong_secret_phrase"
+DEVICE_NAME="My-Main-Laptop"
+```
+
+---
+
+### Step 3: Run or Deploy the Cloud Bot
+
+#### Option A: Local / Development
 ```bash
 npm start
 ```
 
-The bot will start and log "Bot is running..." to the console.
+#### Option B: Deploy to Render (Cloud Host)
+1. Push your repository to GitHub.
+2. In [Render Dashboard](https://dashboard.render.com/), create a new **Web Service**.
+3. Connect your repository.
+4. Set:
+   * **Runtime**: `Node`
+   * **Build Command**: `npm install`
+   * **Start Command**: `npm start`
+5. In **Environment Variables**, add the variables from `.env` (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `ALLOWED_USER_ID`, `LAPTOP_RUNNER_SECRET`).
+6. Deploy! Render will provide your public URL (e.g., `https://telegram-ai-bot-znei.onrender.com`).
 
-## Usage
+---
 
-### Commands
+### Step 4: Run the Local Laptop Agent (Background)
 
-- `/start` - Display welcome message and available commands
-- `/clear` - Clear conversation history
+Choose your preferred background runner mode on your laptop:
 
-### Chatting
+#### Method 1: PM2 Process Manager (Recommended)
+PM2 provides auto-restart on crashes and background daemonization:
+```powershell
+# 1. Start with PM2
+pm2 start laptop-runner.js --name "telegram-agent"
+pm2 save
 
-Simply send any text message to the bot, and it will respond using Claude 3.5 Sonnet. The bot maintains conversation context automatically.
-
-## Security
-
-- Only the user specified in `ALLOWED_USER_ID` can interact with the bot
-- Unauthorized users are silently rejected
-- Never commit your `.env` file or share your API keys
-
-## Configuration
-
-### Conversation History
-
-The bot maintains up to 20 messages (10 exchanges) in history. Older messages are automatically removed. You can adjust this in `bot.js` by modifying the history length check:
-
-```javascript
-if (history.length > 20) {
-  history.splice(0, 2);
-}
+# Helper 1-click batch files available:
+# • pm2-status.bat  (View status & memory)
+# • pm2-logs.bat    (View real-time logs)
+# • pm2-stop.bat    (Stop the runner)
 ```
 
-### Model Selection
+#### Method 2: Silent VBScript Launcher (Zero CMD Windows)
+Double-click [`start_silent.vbs`](file:///D:/projects/telegram-ai-bot/start_silent.vbs) or use the Desktop shortcut [`Start-Silent-Agent.vbs`](file:///C:/Users/dsoph/Desktop/Start-Silent-Agent.vbs).
+* Runs completely in the background with zero terminal windows.
+* Verified handshake will appear in `runner.log`.
 
-The bot uses `claude-sonnet-5` by default. You can change the model in `bot.js`:
+#### Managing the Runner:
+* **Disable / Stop**:
+  * Tap **`[ 🛑 Disable Laptop Agent ]`** inside Telegram under `/status`
+  * Or double-click [`Disable-Laptop-Agent.bat`](file:///C:/Users/dsoph/Desktop/Disable-Laptop-Agent.bat) on your Desktop.
+* **Enable / Start**:
+  * Double-click [`Enable-Laptop-Agent.bat`](file:///C:/Users/dsoph/Desktop/Enable-Laptop-Agent.bat) or [`Start-Silent-Agent.vbs`](file:///C:/Users/dsoph/Desktop/Start-Silent-Agent.vbs).
 
-```javascript
-model: 'claude-sonnet-5',
-```
+---
 
-### Custom API Endpoint
+## 📱 Telegram Commands Reference
 
-If you're using a custom Anthropic API endpoint or proxy, update the `ANTHROPIC_BASE_URL` in your `.env` file.
+| Command | Category | Description |
+| :--- | :--- | :--- |
+| `/agent <task>` | 🤖 Agent | Execute autonomous tasks with live tools (terminal, files, research) |
+| `/agent_mode` | 🤖 Agent | Toggle Agent mode as default for all general chat messages |
+| `/devices` | 🤖 Agent | View online status of all authorized users' laptops |
+| `/deep_research`| 🔬 Research | Generate comprehensive multi-source factual research reports |
+| `/search <query>`| 🌐 Research | Live Google Search grounding with verified source links |
+| `/youtube <query>`| 🎥 Media | Search YouTube videos, channels, and playlists |
+| `/image <prompt>` | 🎨 Creative | Generate high-quality images via Gemini |
+| `/live` | 🎙️ Voice | Toggle spoken voice responses for all bot replies |
+| `/call` | 📞 Voice | Open real-time duplex bidirectional voice WebApp |
+| `/voice` | 🗣️ Voice | Switch Gemini voice persona (Aoede, Charon, Fenrir, etc.) |
+| `/storage` | ☁️ Files | Open the interactive Cloud Vault & Local storage hub |
+| `/directory <path>`| 📁 Files | Set or view your local project folder path |
+| `/save [path]` | 💾 Files | Save pending generated code to your target directory |
+| `/cancel` | ❌ Files | Discard pending code save or cancel directory input |
+| `/library` | 📚 Files | Browse files saved in your local folder or Cloud Vault |
+| `/quiz` | 📝 Learning | Generate an interactive multiple-choice quiz from loaded document |
+| `/status` | 📊 System | View live laptop hardware specs (CPU, RAM, uptime) & bot engine health |
+| `/clear` | 🧹 Chat | Clear recent conversation history while retaining loaded files |
+| `/clearall` | 🧹 Chat | Clear all conversation history, sessions, and active documents |
 
-## Troubleshooting
+---
 
-### Bot doesn't respond
+## 🔒 Security Architecture
 
-- Verify your bot token is correct
-- Check that your user ID matches the one in `.env`
-- Ensure the bot is running in the console
-- Check console logs for errors
+1. **Outbound-Only Tunneling**:
+   * The local runner initiates an outgoing secure WebSocket connection (`wss://`) to the cloud server.
+   * No inbound ports are opened on your router or laptop, making it completely safe from external port scans.
+2. **Secret Handshake & Token Authentication**:
+   * Every connection validates `LAPTOP_RUNNER_SECRET` and matches the user's numeric Telegram ID against `ALLOWED_USER_ID`.
+3. **Directory Boundary Protection**:
+   * Path traversal guards (`..` sanitization) prevent rogue script execution outside designated project paths.
+4. **Interactive Code Confirmation**:
+   * Generated files are kept in memory and require interactive confirmation via inline buttons before writing to disk.
 
-### API errors
+---
 
-- Verify your Anthropic API key is valid and has credits
-- Check the `ANTHROPIC_BASE_URL` is correct
-- Review console error logs for specific API error messages
+## 📄 License
 
-## License
-
-MIT
+MIT License.
