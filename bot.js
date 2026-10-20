@@ -1097,7 +1097,7 @@ bot.use(async (ctx, next) => {
 bot.command(['start', 'help'], async (ctx) => {
   await ctx.reply(
     '✨ *Welcome to Your Personal AI Assistant*\n' +
-    'Powered by *Claude 3.7 / 3.5 Sonnet* & *Gemini 3.8 Live / Flash*.\n\n' +
+    'Powered by *Claude Sonnet 5.5* & *Gemini 3.8 Flash / Live*.\n\n' +
     'Send me any message, voice note, photo, or document and I\'ll assist you right away!\n\n' +
     '🤖 *Autonomous AI Agent*\n' +
     '• `/agent <prompt>` — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +

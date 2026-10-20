@@ -1,6 +1,6 @@
 # 🤖 Telegram AI Bot & Autonomous Remote Agent Guide
 
-> A comprehensive, battle-tested engineering blueprint for building a private, production-ready AI companion on Telegram. This guide details everything developed inside `D:\projects\telegram-ai-bot`: from the initial webhook chatbot to multimodal voice comprehension, hybrid Claude + Gemini model orchestration, token optimization, Telegram Cloud Vault document sorting, and an outbound reverse-tunnel remote agent that monitors your laptop hardware and executes terminal commands securely from anywhere in the world.
+> A comprehensive, battle-tested engineering blueprint for building a private, production-ready AI companion on Telegram powered by **Anthropic Claude Sonnet 5.5** and **Google Gemini 3.8 Flash**. This guide details everything developed inside `D:\projects\telegram-ai-bot`: from the initial webhook chatbot to multimodal voice comprehension, hybrid Claude + Gemini model orchestration, token optimization, Telegram Cloud Vault document sorting, and an outbound reverse-tunnel remote agent that monitors your laptop hardware and executes terminal commands securely from anywhere in the world.
 
 ---
 
@@ -20,7 +20,7 @@
   - [2.4 Natural Spoken Audio Responses (`/live` Mode)](#24-natural-spoken-audio-responses-live-mode)
   - [2.5 Real-Time Bidirectional Duplex Voice Calls (`/call`)](#25-real-time-bidirectional-duplex-voice-calls-call)
 - [Part 3: The Hybrid Claude + Gemini Engine, Token Management & File Organization](#-part-3-the-hybrid-claude--gemini-engine-token-management--file-organization)
-  - [3.1 Why a Dual-Brain Engine? (Claude 3.5 + Gemini 2.5)](#31-why-a-dual-brain-engine-claude-35--gemini-25)
+  - [3.1 Why a Dual-Brain Engine? (Claude Sonnet 5.5 + Gemini 3.8 Flash)](#31-why-a-dual-brain-engine-claude-sonnet-55--gemini-38-flash)
   - [3.2 Token Budgeting & Sliding Context Window](#32-token-budgeting--sliding-context-window)
   - [3.3 Document Parsing Engine (PDF, Text, Code)](#33-document-parsing-engine-pdf-text-code)
   - [3.4 A-Z Categorization & Interactive Library (`/library`)](#34-a-z-categorization--interactive-library-library)
@@ -51,8 +51,8 @@
                       │         Render Cloud Host (bot.js)           │
                       │  • grammY Dispatcher & Command Middleware    │
                       │  • Token Budgeter & Context Sliding Window   │
-                      │  • Claude 3.5 Sonnet (Reasoning & Code)      │
-                      │  • Gemini 2.5 Flash (Voice, Search, Tools)   │
+                      │  • Claude Sonnet 5.5 (Reasoning & Code)      │
+                      │  • Gemini 3.8 Flash (Voice, Search, Tools)   │
                       │  • Pinned Cloud Vault Sync Index             │
                       │  • WebSocket Server (/ws/laptop-agent)       │
                       └──────────────────────┬───────────────────────┘
@@ -218,7 +218,7 @@ bot.on('message:voice', async (ctx) => {
 ```
 
 ### 2.3 Multimodal Voice-to-Text Transcription via Gemini
-We use **Google Gemini 2.5 Flash** for transcription due to its sub-second latency and zero external dependency footprint (avoiding heavyweight local Python Whisper builds):
+We use **Google Gemini 3.8 Flash** for transcription due to its sub-second latency and zero external dependency footprint (avoiding heavyweight local Python Whisper builds):
 
 ```javascript
 import { GoogleGenAI } from '@google/genai';
@@ -227,7 +227,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 async function transcribeAudioWithGemini(buffer, mimeType = 'audio/ogg') {
   const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3.8-flash',
     contents: [
       {
         parts: [
@@ -273,13 +273,13 @@ For conversational hands-free interaction, the bot includes a Telegram WebApp th
 
 ## 🧠 Part 3: The Hybrid Claude + Gemini Engine, Token Management & File Organization
 
-### 3.1 Why a Dual-Brain Engine? (Claude 3.5 + Gemini 2.5)
+### 3.1 Why a Dual-Brain Engine? (Claude Sonnet 5.5 + Gemini 3.8 Flash)
 Rather than relying on a single AI provider, our architecture pairs two industry-leading models:
 
 | Provider & Model | Primary Responsibilities | Why Selected |
 | :--- | :--- | :--- |
-| **Anthropic Claude 3.5 Sonnet** | General chat, code generation, system architecture, document analysis | Unmatched nuance, thoughtful reasoning, low hallucination rate, and superior software engineering output. |
-| **Google Gemini 2.5 Flash** | Voice transcription, audio synthesis, live Google Search grounding, image generation, fast tool execution | Ultra-fast multimodal processing, native Web search grounding, generous rate limits, and built-in TTS. |
+| **Anthropic Claude Sonnet 5.5** | General chat, code generation, system architecture, document analysis | Unmatched nuance, thoughtful reasoning, low hallucination rate, and superior software engineering output. |
+| **Google Gemini 3.8 Flash** | Voice transcription, audio synthesis, live Google Search grounding, image generation, fast tool execution | Ultra-fast multimodal processing, native Web search grounding, generous rate limits, and built-in TTS. |
 
 ### 3.2 Token Budgeting & Sliding Context Window
 Without active context management, conversation history rapidly balloons, causing high API costs and latency. We implemented a multi-stage budgeting system:
