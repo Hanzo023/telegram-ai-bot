@@ -4478,46 +4478,316 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  // Delete a file from Cloud Vault: lib_del:<idx>
-  if (data.startsWith('lib_del:')) {
-    const idx = parseInt(data.replace('lib_del:', ''), 10);
-    if (!cloudVault[idx]) {
+  // Edit File Menu: lib_edit:<source>:<idx>
+  if (data.startsWith('lib_edit:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+    const file = source === 'cloud' ? cloudVault[idx] : getUserCachedFiles(ctx.from.id)?.[idx];
+
+    if (!file) {
       await ctx.answerCallbackQuery({ text: 'File not found!' });
       return;
     }
 
-    const removed = cloudVault.splice(idx, 1)[0];
-    await persistCloudVault();
-    await ctx.answerCallbackQuery({ text: `Removed "${removed.name}" from Cloud Vault` });
+    await ctx.answerCallbackQuery();
+    const editKeyboard = new InlineKeyboard()
+      .text('📝 Rename File', `lib_ren_prompt:${source}:${idx}`)
+      .text('📂 Change Category', `lib_chcat:${source}:${idx}`)
+      .row()
+      .text('« Back to File', `lib_sel:${source}:${idx}`);
 
-    if (cloudVault.length === 0) {
-      await ctx.editMessageText(
-        `☁️ *Telegram Cloud Vault is Empty*\n\n` +
-        `You removed all files from the Cloud Vault.\n\n` +
-        `Send any document to this chat to save it anytime!`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: new InlineKeyboard()
-            .text('🔍 Search History', 'cloud_hist_page:0')
-            .row()
-            .text('💻 Switch to Local Storage', 'lib_src:local')
-            .row()
-            .text('◀️ Back to Cloud Hub', 'storage_cloud'),
-        }
-      );
+    await ctx.editMessageText(
+      `✏️ *Edit File:* \`${file.name}\`\n\n` +
+      `Storage: *${source === 'cloud' ? '☁️ Telegram Cloud Vault' : '💻 Local Storage'}*\n\n` +
+      `What would you like to edit?`,
+      { parse_mode: 'Markdown', reply_markup: editKeyboard }
+    );
+    return;
+  }
+
+  // Rename File Prompt: lib_ren_prompt:<source>:<idx>
+  if (data.startsWith('lib_ren_prompt:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+    const file = source === 'cloud' ? cloudVault[idx] : getUserCachedFiles(ctx.from.id)?.[idx];
+
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
       return;
     }
 
-    const keyboard = buildCategoriesKeyboard(cloudVault, 'cloud');
-    await ctx.editMessageText(
-      `☁️ *Telegram Cloud Vault — File Categories*\n\n` +
-      `Total Files: *${cloudVault.length}*\n\n` +
-      `Select a category below to browse (files are sorted alphabetically **A-Z**):`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard,
-      }
+    await ctx.answerCallbackQuery();
+    userAwaitingRename.set(ctx.from.id, {
+      source,
+      idx,
+      oldName: file.name,
+      fullPath: file.fullPath || file.relPath,
+    });
+
+    await ctx.reply(
+      `📝 *Rename File*\n\n` +
+      `Current filename: \`${file.name}\`\n\n` +
+      `Please **reply with the new filename** now (e.g. \`new_${file.name}\`):\n` +
+      `_(Type /cancel to abort)_`,
+      { parse_mode: 'Markdown' }
     );
+    return;
+  }
+
+  // Change Category Menu: lib_chcat:<source>:<idx>
+  if (data.startsWith('lib_chcat:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+    const file = source === 'cloud' ? cloudVault[idx] : getUserCachedFiles(ctx.from.id)?.[idx];
+
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    const catKeyboard = new InlineKeyboard()
+      .text('📄 PDF Documents', `set_cat:${source}:${idx}:pdf`)
+      .text('🐍 Python Scripts', `set_cat:${source}:${idx}:python`)
+      .row()
+      .text('💻 Code Files', `set_cat:${source}:${idx}:code`)
+      .text('📝 Text & Docs', `set_cat:${source}:${idx}:docs`)
+      .row()
+      .text('🖼️ Images', `set_cat:${source}:${idx}:images`)
+      .text('📦 Other', `set_cat:${source}:${idx}:other`)
+      .row()
+      .text('« Back to Edit', `lib_edit:${source}:${idx}`);
+
+    await ctx.editMessageText(
+      `📂 *Change Category for:* \`${file.name}\`\n\n` +
+      `Current Category: *${FILE_CATEGORIES[file.category || getFileCategory(file.ext).id]?.name || 'Other'}*\n\n` +
+      `Select the new category below:`,
+      { parse_mode: 'Markdown', reply_markup: catKeyboard }
+    );
+    return;
+  }
+
+  // Set Category Execution: set_cat:<source>:<idx>:<catId>
+  if (data.startsWith('set_cat:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+    const newCatId = parts[3];
+    const file = source === 'cloud' ? cloudVault[idx] : getUserCachedFiles(ctx.from.id)?.[idx];
+
+    if (file) {
+      file.category = newCatId;
+      if (source === 'cloud') {
+        await persistCloudVault();
+      }
+      await ctx.answerCallbackQuery({ text: `Category set to ${FILE_CATEGORIES[newCatId]?.name || newCatId}!` });
+    }
+    // Re-render file view
+    const cat = FILE_CATEGORIES[newCatId] || FILE_CATEGORIES.other;
+    const dateStr = new Date(file.date || file.mtime).toLocaleString();
+    const userDir = getUserStorageDir(ctx.from.id);
+    const sourceName = source === 'cloud' ? '☁️ Telegram Cloud Vault' : `💻 Local Laptop (${userDir || 'Local'})`;
+
+    const actionKeyboard = new InlineKeyboard()
+      .text('✏️ Edit File', `lib_edit:${source}:${idx}`)
+      .text('🗑️ Delete File', `lib_del_confirm:${source}:${idx}`)
+      .row()
+      .text('📥 Send to Chat', `lib_send:${source}:${idx}`)
+      .text('📝 Summary', `lib_sum:${source}:${idx}`)
+      .row()
+      .text('🎲 3-Question Quiz', `lib_quiz:${source}:${idx}`)
+      .row()
+      .text('« Back to Files', source === 'cloud' ? 'cloud_files_cats' : 'lib_src:local');
+
+    await ctx.editMessageText(
+      `${cat.icon} *${file.name}*\n\n` +
+      `• 📂 **Category:** ${cat.name}\n` +
+      `• 📦 **Size:** ${formatBytes(file.size)}\n` +
+      `• 📅 **${source === 'cloud' ? 'Uploaded' : 'Modified'}:** ${dateStr}\n` +
+      `• 📍 **Location:** ${sourceName}\n\n` +
+      `What do you want to do with this file?`,
+      { parse_mode: 'Markdown', reply_markup: actionKeyboard }
+    );
+    return;
+  }
+
+  // Delete Confirmation: lib_del_confirm:<source>:<idx>
+  if (data.startsWith('lib_del_confirm:')) {
+    const parts = data.split(':');
+    const source = parts[1];
+    const idx = parseInt(parts[2], 10);
+    const file = source === 'cloud' ? cloudVault[idx] : getUserCachedFiles(ctx.from.id)?.[idx];
+
+    if (!file) {
+      await ctx.answerCallbackQuery({ text: 'File not found!' });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+    const confirmKeyboard = new InlineKeyboard()
+      .text('🔴 Yes, Delete File', `lib_del_exec:${source}:${idx}`)
+      .text('❌ Cancel', `lib_sel:${source}:${idx}`);
+
+    await ctx.editMessageText(
+      `⚠️ *Confirm Deletion*\n\n` +
+      `Are you sure you want to permanently delete:\n` +
+      `📄 \`${file.name}\`?\n\n` +
+      `• Storage: *${source === 'cloud' ? '☁️ Telegram Cloud Vault' : '💻 Local Laptop Storage'}*\n` +
+      `• *This action cannot be undone.*\n`,
+      { parse_mode: 'Markdown', reply_markup: confirmKeyboard }
+    );
+    return;
+  }
+
+  // Execute Deletion: lib_del_exec:<source>:<idx>
+  if (data.startsWith('lib_del_exec:') || data.startsWith('lib_del:')) {
+    const parts = data.split(':');
+    const source = parts.length > 2 ? parts[1] : 'cloud';
+    const idx = parseInt(parts.length > 2 ? parts[2] : parts[1], 10);
+
+    if (source === 'cloud') {
+      if (!cloudVault[idx]) {
+        await ctx.answerCallbackQuery({ text: 'File not found!' });
+        return;
+      }
+      const removed = cloudVault.splice(idx, 1)[0];
+      await persistCloudVault();
+      await ctx.answerCallbackQuery({ text: `Deleted "${removed.name}" from Cloud Vault` });
+
+      if (cloudVault.length === 0) {
+        await ctx.editMessageText(
+          `☁️ *Telegram Cloud Vault is Empty*\n\n` +
+          `You have removed all files from your Cloud Vault.\n\n` +
+          `Send any document to this chat to upload it anytime!`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: new InlineKeyboard()
+              .text('🔍 Search History', 'cloud_hist_page:0')
+              .row()
+              .text('💻 Switch to Local Storage', 'lib_src:local')
+              .row()
+              .text('« Back to Cloud Hub', 'storage_cloud'),
+          }
+        );
+        return;
+      }
+
+      const keyboard = buildCategoriesKeyboard(cloudVault, 'cloud');
+      await ctx.editMessageText(
+        `☁️ *Telegram Cloud Vault — File Categories*\n\n` +
+        `Total Files: *${cloudVault.length}*\n\n` +
+        `Select a category below to browse (files are sorted alphabetically **A-Z**):\n`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard,
+        }
+      );
+      return;
+    } else {
+      // Local laptop deletion
+      const userId = ctx.from.id;
+      const userDir = getUserStorageDir(userId);
+      const cached = getUserCachedFiles(userId);
+      const file = cached?.[idx];
+
+      if (!file) {
+        await ctx.answerCallbackQuery({ text: 'File not found!' });
+        return;
+      }
+
+      const hasLaptop = isLaptopConnected(userId);
+      if (!hasLaptop) {
+        await ctx.answerCallbackQuery({ text: 'Laptop runner is offline!' });
+        await ctx.reply('❌ Cannot delete: Your laptop runner is disconnected. Run \`start-agent.bat\` on your laptop.');
+        return;
+      }
+
+      const fullPath = file.fullPath || (userDir ? path.join(userDir, file.name) : file.name);
+      try {
+        const res = await deleteLaptopFile(userId, fullPath);
+        if (res && res.success) {
+          await ctx.answerCallbackQuery({ text: `Deleted "${file.name}" from laptop` });
+          cached.splice(idx, 1);
+          setUserCachedFiles(userId, cached);
+
+          if (cached.length === 0) {
+            await ctx.editMessageText(
+              `💻 *Local Laptop Storage is Empty*\n\n` +
+              `📁 Folder: \`${userDir}\`\n` +
+              `All files have been removed from this laptop folder.\n`,
+              {
+                parse_mode: 'Markdown',
+                reply_markup: new InlineKeyboard()
+                  .text('➕ Add File', 'lib_add_prompt:local')
+                  .text('📁 Change Folder', 'change_local_dir')
+                  .row()
+                  .text('🔄 Refresh Folder', 'lib_refresh:local')
+                  .text(`☁️ Cloud Vault (${cloudVault.length})`, 'storage_cloud')
+                  .row()
+                  .text('« Back to Storage', 'storage_main'),
+              }
+            );
+            return;
+          }
+
+          const keyboard = buildCategoriesKeyboard(cached, 'local');
+          await ctx.editMessageText(
+            `💻 *Local Storage — File Categories*\n\n` +
+            `Folder: \`${userDir}\`\n` +
+            `Total Files: *${cached.length}*\n\n` +
+            `Select a category below to browse (files are sorted alphabetically **A-Z**):\n`,
+            {
+              parse_mode: 'Markdown',
+              reply_markup: keyboard,
+            }
+          );
+          return;
+        } else {
+          await ctx.answerCallbackQuery({ text: `Delete failed: ${res?.error || 'error'}` });
+        }
+      } catch (err) {
+        await ctx.answerCallbackQuery({ text: `Delete failed: ${err.message}` });
+      }
+      return;
+    }
+  }
+
+  // Add File Prompt: lib_add_prompt:<source>
+  if (data.startsWith('lib_add_prompt:')) {
+    const source = data.split(':')[1] || 'cloud';
+    const userId = ctx.from.id;
+    const userDir = getUserStorageDir(userId);
+
+    await ctx.answerCallbackQuery();
+    if (source === 'cloud') {
+      await ctx.editMessageText(
+        `➕ *Add File to Telegram Cloud Vault*\n\n` +
+        `• 📎 **Upload:** Simply drag & drop or send any file (PDF, code, script, document, photo, video) to this chat.\n` +
+        `• It will be saved into your Telegram Cloud Vault immediately, accessible from any device 24/7!\n`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('« Back to Categories', 'cloud_files_cats')
+            .text('« Back to Cloud Hub', 'storage_cloud'),
+        }
+      );
+    } else {
+      await ctx.editMessageText(
+        `➕ *Add File to Laptop Storage*\n\n` +
+        `📁 Folder on Laptop: \`${userDir || 'Not set'}\`\n\n` +
+        `• 📎 **Upload:** Send any file to this chat with your laptop runner connected.\n` +
+        `• The bot will transmit it over your encrypted tunnel and save it directly into your folder on your laptop!\n`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text('« Back to Categories', 'lib_src:local')
+            .text('« Back to Storage', 'storage_main'),
+        }
+      );
+    }
     return;
   }
 
@@ -4552,7 +4822,7 @@ bot.on('callback_query:data', async (ctx) => {
       if (source === 'cloud') {
         content = await loadCloudDocumentContent(file.file_id, file.ext, file.name);
       } else {
-        content = await loadLocalDocumentContent(file.relPath || file.name);
+        content = await loadLocalDocumentContent(file.relPath || file.name, ctx.from.id);
       }
 
       userLastDocument.set(ctx.from.id, {
@@ -4676,6 +4946,58 @@ bot.on('message:text', async (ctx) => {
   }
 
   const userId = ctx.from.id;
+
+  // Check if user is awaiting input for renaming a file (Cloud or Laptop)
+  if (userAwaitingRename.has(userId)) {
+    const renameInfo = userAwaitingRename.get(userId);
+    userAwaitingRename.delete(userId);
+    const newNameRaw = userMessage.trim();
+    if (newNameRaw.toLowerCase() === 'cancel' || newNameRaw === '/cancel') {
+      await ctx.reply('❌ Rename cancelled.', { parse_mode: 'Markdown' });
+      return;
+    }
+    const cleanNewName = path.basename(newNameRaw).replace(/[\/\\]/g, '');
+    if (!cleanNewName || cleanNewName.length < 1) {
+      await ctx.reply('❌ Invalid file name.', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (renameInfo.source === 'cloud') {
+      const file = cloudVault[renameInfo.idx];
+      if (file) {
+        const oldName = file.name;
+        file.name = cleanNewName;
+        file.ext = cleanNewName.split('.').pop().toLowerCase();
+        file.category = getFileCategory(file.ext).id;
+        await persistCloudVault();
+        await ctx.reply(`✅ *Renamed in Cloud Vault:*\n\`${oldName}\` ➡️ \`${cleanNewName}\``, { parse_mode: 'Markdown' });
+      } else {
+        await ctx.reply('❌ File not found in Cloud Vault.');
+      }
+      return;
+    } else {
+      const hasLaptop = isLaptopConnected(userId);
+      if (!hasLaptop) {
+        await ctx.reply('❌ Cannot rename: Laptop runner is disconnected. Run \`start-agent.bat\` first.');
+        return;
+      }
+      const userDir = getUserStorageDir(userId);
+      const oldFullPath = renameInfo.fullPath || (userDir ? path.join(userDir, renameInfo.oldName) : renameInfo.oldName);
+      const dir = path.dirname(oldFullPath);
+      const newFullPath = path.join(dir, cleanNewName);
+      try {
+        const res = await renameLaptopFile(userId, oldFullPath, newFullPath);
+        if (res && res.success) {
+          await ctx.reply(`✅ *Renamed on your laptop:*\n\`${renameInfo.oldName}\` ➡️ \`${cleanNewName}\``, { parse_mode: 'Markdown' });
+        } else {
+          await ctx.reply(`❌ Failed to rename on laptop: ${res?.error || 'Unknown error'}`);
+        }
+      } catch (err) {
+        await ctx.reply(`❌ Rename error: ${err.message}`);
+      }
+      return;
+    }
+  }
 
   // Check if user is awaiting input for setting their local laptop storage directory
   if (userAwaitingDirectoryInput.has(userId)) {

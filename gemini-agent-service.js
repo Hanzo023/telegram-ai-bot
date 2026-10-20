@@ -392,7 +392,7 @@ export async function executeTool(name, args = {}, context = {}) {
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
-      const effectiveCwd = cwd || context.userDirectory || undefined;
+      const effectiveCwd = cwd || undefined;
       try {
         const res = await runLaptopCommand(context.userId, command, effectiveCwd);
         return JSON.stringify(res);

@@ -261,7 +261,7 @@ async function handleTask(action, payload) {
     }
 
     case 'write_file': {
-      const { filePath, content } = payload;
+      const { filePath, content, encoding } = payload;
       if (!filePath) return { success: false, error: 'No filePath provided.' };
 
       try {
@@ -271,7 +271,12 @@ async function handleTask(action, payload) {
           await fsp.mkdir(dir, { recursive: true });
         }
 
-        await fsp.writeFile(resolvedPath, content || '', 'utf8');
+        if (encoding === 'base64') {
+          const buf = Buffer.from(content || '', 'base64');
+          await fsp.writeFile(resolvedPath, buf);
+        } else {
+          await fsp.writeFile(resolvedPath, content || '', 'utf8');
+        }
         const stat = await fsp.stat(resolvedPath);
 
         return {
@@ -285,6 +290,46 @@ async function handleTask(action, payload) {
       }
     }
 
+    case 'delete_file': {
+      const { filePath } = payload;
+      if (!filePath) return { success: false, error: 'No filePath provided.' };
+      try {
+        const resolvedPath = path.resolve(filePath);
+        if (!fs.existsSync(resolvedPath)) {
+          return { success: false, error: `File not found: ${resolvedPath}` };
+        }
+        await fsp.unlink(resolvedPath);
+        return {
+          success: true,
+          filePath: resolvedPath,
+          message: `Successfully deleted ${path.basename(resolvedPath)}`,
+        };
+      } catch (err) {
+        return { success: false, error: `Delete file error: ${err.message}` };
+      }
+    }
+
+    case 'rename_file': {
+      const { oldPath, newPath } = payload;
+      if (!oldPath || !newPath) return { success: false, error: 'Missing oldPath or newPath.' };
+      try {
+        const resolvedOld = path.resolve(oldPath);
+        const resolvedNew = path.resolve(newPath);
+        if (!fs.existsSync(resolvedOld)) {
+          return { success: false, error: `Original file not found: ${resolvedOld}` };
+        }
+        await fsp.rename(resolvedOld, resolvedNew);
+        return {
+          success: true,
+          oldPath: resolvedOld,
+          newPath: resolvedNew,
+          message: `Successfully renamed to ${path.basename(resolvedNew)}`,
+        };
+      } catch (err) {
+        return { success: false, error: `Rename file error: ${err.message}` };
+      }
+    }
+
     case 'list_dir': {
       const { dirPath } = payload;
       try {
@@ -293,18 +338,38 @@ async function handleTask(action, payload) {
           return { success: false, error: `Directory not found: ${targetDir}` };
         }
 
-        const entries = await fsp.readdir(targetDir, { withFileTypes: true });
-        const items = entries.map((e) => ({
-          name: e.name,
-          isDirectory: e.isDirectory(),
-          isFile: e.isFile(),
-        }));
+        const items = [];
+        async function scanDir(currentDir, relativePrefix = '', depth = 0) {
+          const entries = await fsp.readdir(currentDir, { withFileTypes: true });
+          for (const e of entries) {
+            const rel = relativePrefix ? path.join(relativePrefix, e.name) : e.name;
+            const full = path.join(currentDir, e.name);
+            if (e.isDirectory() && depth < 2) {
+              await scanDir(full, rel, depth + 1);
+            } else if (e.isFile()) {
+              try {
+                const stat = await fsp.stat(full);
+                items.push({
+                  name: e.name,
+                  relPath: rel.replace(/\\/g, '/'),
+                  fullPath: full,
+                  size: stat.size,
+                  mtime: stat.mtimeMs,
+                  isFile: true,
+                  isDirectory: false,
+                });
+              } catch {}
+            }
+          }
+        }
+
+        await scanDir(targetDir);
 
         return {
           success: true,
           dirPath: targetDir,
           totalItems: items.length,
-          items: items.slice(0, 100),
+          items: items.slice(0, 200),
         };
       } catch (err) {
         return { success: false, error: `List dir error: ${err.message}` };

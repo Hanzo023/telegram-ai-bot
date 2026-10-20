@@ -166,8 +166,22 @@ export async function readLaptopFile(userId, filePath, maxLines = 200) {
 /**
  * Write/create file contents on the user's active laptop
  */
-export async function writeLaptopFile(userId, filePath, content) {
-  return await sendLaptopTask(userId, 'write_file', { filePath, content }, 30000);
+export async function writeLaptopFile(userId, filePath, content, encoding = 'utf8') {
+  return await sendLaptopTask(userId, 'write_file', { filePath, content, encoding }, 45000);
+}
+
+/**
+ * Delete a file on the user's active laptop
+ */
+export async function deleteLaptopFile(userId, filePath) {
+  return await sendLaptopTask(userId, 'delete_file', { filePath }, 20000);
+}
+
+/**
+ * Rename/move a file on the user's active laptop
+ */
+export async function renameLaptopFile(userId, oldPath, newPath) {
+  return await sendLaptopTask(userId, 'rename_file', { oldPath, newPath }, 20000);
 }
 
 /**
