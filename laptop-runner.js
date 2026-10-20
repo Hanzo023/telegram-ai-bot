@@ -86,8 +86,29 @@ console.log(`• Bound User ID:   ${TELEGRAM_USER_ID}`);
 console.log(`• Outbound Only:   ✅ No open ports, fully secure on Public Wi-Fi`);
 console.log('========================================================\n');
 
+const LOG_FILE = path.resolve('D:\\projects\\telegram-ai-bot\\runner.log');
+
+function log(msg) {
+  const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  console.log(line);
+  try {
+    fs.appendFileSync(LOG_FILE, line + '\n', 'utf8');
+  } catch {}
+}
+
+process.on('uncaughtException', (err) => {
+  log(`[CRITICAL] Uncaught exception: ${err.message}`);
+  scheduleReconnect();
+});
+
+process.on('unhandledRejection', (reason) => {
+  log(`[WARNING] Unhandled rejection: ${reason}`);
+});
+
 let ws = null;
+let pingInterval = null;
 let reconnectTimer = null;
+let reconnectAttempts = 0;
 let isExiting = false;
 
 function connect() {
@@ -96,15 +117,26 @@ function connect() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  if (pingInterval) {
+    clearInterval(pingInterval);
+    pingInterval = null;
+  }
+  if (ws) {
+    try {
+      ws.removeAllListeners();
+      ws.terminate();
+    } catch {}
+    ws = null;
+  }
 
   const wsUrl = buildWsUrl();
-  console.log(`[Runner] Connecting to Cloud Agent Bridge at ${SERVER_URL}...`);
+  log(`[Runner] Connecting to Cloud Agent Bridge at ${SERVER_URL}...`);
 
   try {
     ws = new WebSocket(wsUrl);
 
     // Keepalive ping timer to prevent cloud reverse proxy (Render) from timing out after 100s idle
-    const pingInterval = setInterval(() => {
+    pingInterval = setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         try {
           ws.ping();
@@ -113,16 +145,17 @@ function connect() {
     }, 20000);
 
     ws.on('open', async () => {
-      console.log('✅ Connected to Cloud Agent Bridge! Waiting for commands from Telegram...');
+      reconnectAttempts = 0;
+      log('✅ Connected to Cloud Agent Bridge! Waiting for commands from Telegram...');
       // Broadcast live hardware specs immediately upon connection for instant /status caching
       try {
         const specs = await handleTask('status', {});
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'initial_status', ...specs }));
-          console.log('[Runner] 📊 Live system specs transmitted to server.');
+          log('[Runner] 📊 Live system specs transmitted to server.');
         }
       } catch (specErr) {
-        console.warn('[Runner] Could not send initial specs:', specErr.message);
+        log(`[Runner] Could not send initial specs: ${specErr.message}`);
       }
     });
 
@@ -140,25 +173,28 @@ function connect() {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'connected') {
-          console.log(`[Runner] Server handshake confirmed: ${msg.message}`);
+          log(`[Runner] Server handshake confirmed: ${msg.message}`);
           return;
         }
 
         if (msg.id && msg.action) {
-          console.log(`[Runner] 📥 Received task [${msg.id}]: action="${msg.action}"`);
+          log(`[Runner] 📥 Received task [${msg.id}]: action="${msg.action}"`);
           const response = await handleTask(msg.action, msg);
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ id: msg.id, ...response }));
-            console.log(`[Runner] 📤 Completed task [${msg.id}]: success=${response.success}`);
+            log(`[Runner] 📤 Completed task [${msg.id}]: success=${response.success}`);
           }
         }
       } catch (err) {
-        console.error('[Runner] Error handling incoming message:', err.message);
+        log(`[Runner] Error handling incoming message: ${err.message}`);
       }
     });
 
     ws.on('close', (code, reason) => {
-      clearInterval(pingInterval);
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
       const reasonStr = reason ? reason.toString() : '';
       let diag = '';
       if (code === 4001) {
@@ -168,15 +204,15 @@ function connect() {
       } else if (code === 1006) {
         diag = ' (Connection dropped or target server unreachable)';
       }
-      console.warn(`[Runner] Disconnected (code: ${code}${reasonStr ? `, reason: "${reasonStr}"` : ''})${diag}.`);
+      log(`[Runner] Disconnected (code: ${code}${reasonStr ? `, reason: "${reasonStr}"` : ''})${diag}.`);
       scheduleReconnect();
     });
 
     ws.on('error', (err) => {
-      console.error('[Runner] WebSocket connection error:', err.message);
+      log(`[Runner] WebSocket connection error: ${err.message}`);
     });
   } catch (err) {
-    console.error('[Runner] Failed to initialize WebSocket:', err.message);
+    log(`[Runner] Failed to initialize WebSocket: ${err.message}`);
     scheduleReconnect();
   }
 }
@@ -184,11 +220,13 @@ function connect() {
 function scheduleReconnect() {
   if (isExiting) return;
   if (reconnectTimer) return;
-  console.log('[Runner] Reconnecting in 3 seconds...');
+  reconnectAttempts++;
+  const delay = Math.min(10000, 1500 + Math.min(reconnectAttempts * 1500, 8500));
+  log(`[Runner] Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts})...`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
-  }, 3000);
+  }, delay);
 }
 
 /**
