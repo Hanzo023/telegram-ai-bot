@@ -15,6 +15,14 @@ const connectedLaptops = new Map();
 const pendingRequests = new Map();
 
 let botApiRef = null;
+let onStorageDirCallback = null;
+
+/**
+ * Set callback for registering storage directory received from runner
+ */
+export function setStorageDirCallback(cb) {
+  onStorageDirCallback = cb;
+}
 
 /**
  * Set Telegram Bot API reference for device notifications
@@ -318,6 +326,13 @@ export function setupLaptopBridge(server, allowedUserIds) {
 
       const username = url.searchParams.get('username') || '';
       const osVersion = url.searchParams.get('osVersion') || '';
+      const storageDir = url.searchParams.get('storageDir') || '';
+
+      if (storageDir && onStorageDirCallback) {
+        try {
+          onStorageDirCallback(userId, storageDir);
+        } catch {}
+      }
 
       const deviceId = `${hostname}_${platform}`;
 
@@ -406,6 +421,11 @@ export function setupLaptopBridge(server, allowedUserIds) {
           if (msg.type === 'initial_status') {
             deviceRecord.lastStatus = msg;
             console.log(`[Laptop Bridge] 📊 Cached live system specs from "${deviceName}"`);
+            if (msg.storageDir && onStorageDirCallback) {
+              try {
+                onStorageDirCallback(userId, msg.storageDir);
+              } catch {}
+            }
             return;
           }
 

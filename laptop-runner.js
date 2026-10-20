@@ -52,6 +52,10 @@ const rawHostname = (os.hostname() || 'My-Laptop').replace(/\.local$/i, '');
 const cleanUsername = os.userInfo ? (os.userInfo().username || '') : '';
 const cleanOsVersion = os.version ? os.version() : os.release();
 const DEVICE_NAME = getCliArg('--name') || process.env.DEVICE_NAME || rawHostname;
+const RUNNER_STORAGE_DIR =
+  getCliArg('--dir') ||
+  process.env.STORAGE_DIR ||
+  'D:\\drive-download-20260715T073323Z-1-001';
 
 if (!TELEGRAM_USER_ID) {
   console.error('❌ ERROR: TELEGRAM_USER_ID could not be determined!');
@@ -71,6 +75,7 @@ function buildWsUrl() {
   url.searchParams.set('platform', os.platform());
   url.searchParams.set('username', cleanUsername);
   url.searchParams.set('osVersion', cleanOsVersion);
+  url.searchParams.set('storageDir', RUNNER_STORAGE_DIR);
   return url.toString();
 }
 
@@ -151,7 +156,7 @@ function connect() {
       try {
         const specs = await handleTask('status', {});
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'initial_status', ...specs }));
+          ws.send(JSON.stringify({ type: 'initial_status', storageDir: RUNNER_STORAGE_DIR, ...specs }));
           log('[Runner] 📊 Live system specs transmitted to server.');
         }
       } catch (specErr) {

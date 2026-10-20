@@ -44,6 +44,7 @@ import {
 import {
   setupLaptopBridge,
   setBotApi,
+  setStorageDirCallback,
   isLaptopConnected,
   getConnectedLaptopsList,
   getAllConnectedLaptops,
@@ -262,6 +263,13 @@ server.listen(PORT, '0.0.0.0', () => {
   }
   try {
     laptopWss = setupLaptopBridge(server, allowedUserIds);
+    setStorageDirCallback((userId, dirPath) => {
+      const existing = userLocalStorageDir.get(Number(userId));
+      if (!existing && dirPath) {
+        console.log(`[User Settings] 📁 Auto-registered local folder from laptop runner for User ${userId}: ${dirPath}`);
+        setUserStorageDir(userId, dirPath);
+      }
+    });
   } catch (bridgeErr) {
     console.warn('[Laptop Bridge] Warning attaching laptop bridge server:', bridgeErr.message);
   }
@@ -385,17 +393,23 @@ async function persistUserSettings() {
 
 async function initUserSettings() {
   try {
+    let raw = null;
     if (fs.existsSync(USER_SETTINGS_FILE)) {
-      const raw = await fsp.readFile(USER_SETTINGS_FILE, 'utf-8');
+      raw = await fsp.readFile(USER_SETTINGS_FILE, 'utf-8');
+    } else if (fs.existsSync(path.resolve('./default_user_settings.json'))) {
+      raw = await fsp.readFile(path.resolve('./default_user_settings.json'), 'utf-8');
+    }
+
+    if (raw) {
       const data = JSON.parse(raw);
       if (data.storageDirs && typeof data.storageDirs === 'object') {
         for (const [uid, dir] of Object.entries(data.storageDirs)) {
-          userLocalStorageDir.set(Number(uid), dir);
+          if (dir) userLocalStorageDir.set(Number(uid), dir);
         }
       }
       if (data.storageModes && typeof data.storageModes === 'object') {
         for (const [uid, mode] of Object.entries(data.storageModes)) {
-          userStorageMode.set(Number(uid), mode);
+          if (mode) userStorageMode.set(Number(uid), mode);
         }
       }
       console.log(`[User Settings] Initialized settings for ${userLocalStorageDir.size} user directories, ${userStorageMode.size} storage modes.`);
@@ -404,20 +418,30 @@ async function initUserSettings() {
     console.warn('[User Settings] Failed to load user_settings.json:', sanitizeError(err));
   }
 
-  // If local settings were empty (e.g. fresh Render container restart), restore from Telegram backup
-  if (userLocalStorageDir.size === 0 && allowedUserId) {
+  // Ensure primary allowed user has fallback storage directory registered
+  if (allowedUserId && !userLocalStorageDir.has(Number(allowedUserId)) && STORAGE_DIR) {
+    userLocalStorageDir.set(Number(allowedUserId), STORAGE_DIR);
+    scheduleUserSettingsPersistence();
+  }
+
+  // Always restore from Telegram pinned backup to sync any remote changes
+  if (allowedUserId) {
     await restoreVaultFromTelegram();
   }
 }
 
 function getUserStorageDir(userId) {
   const uid = Number(userId);
-  if (userLocalStorageDir.has(uid)) {
+  if (userLocalStorageDir.has(uid) && userLocalStorageDir.get(uid)) {
     return userLocalStorageDir.get(uid);
   }
   // Default fallback for primary user (first configured ID in ALLOWED_USER_IDS)
-  if (uid === Number(allowedUserId) && process.env.STORAGE_DIR) {
-    return process.env.STORAGE_DIR;
+  if (uid === Number(allowedUserId) && STORAGE_DIR) {
+    return STORAGE_DIR;
+  }
+  // Universal fallback for configured STORAGE_DIR
+  if (STORAGE_DIR) {
+    return STORAGE_DIR;
   }
   return null;
 }
