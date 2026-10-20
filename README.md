@@ -194,6 +194,7 @@ Double-click [`start_silent.vbs`](file:///D:/projects/telegram-ai-bot/start_sile
 | `/cancel` | ❌ Files | Discard pending code save or cancel directory input |
 | `/library` | 📚 Files | Browse files saved in your local folder or Cloud Vault |
 | `/quiz` | 📝 Learning | Generate an interactive multiple-choice quiz from loaded document |
+| `/spec` | 💻 System | View detailed laptop hardware specifications (CPU, GPU, RAM, Battery, Disks) |
 | `/status` | 📊 System | View live laptop hardware specs (CPU, RAM, uptime) & bot engine health |
 | `/clear` | 🧹 Chat | Clear recent conversation history while retaining loaded files |
 | `/clearall` | 🧹 Chat | Clear all conversation history, sessions, and active documents |
