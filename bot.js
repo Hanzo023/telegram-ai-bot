@@ -48,6 +48,11 @@ import {
   getConnectedLaptopsList,
   getAllConnectedLaptops,
   getExpectedSecret,
+  writeLaptopFile,
+  deleteLaptopFile,
+  renameLaptopFile,
+  joinLaptopPath,
+  isPathAbsolute,
 } from './laptop-bridge.js';
 
 const userAgentMode = new Map(); // userId -> boolean
@@ -2227,25 +2232,41 @@ async function extractDocumentContent(file, ctx, fileExtension) {
     } else {
       // Save to Drive D if mode allows (local or nosave)
       if (saveToDriveD) {
-        try {
-          const storageRoot = path.resolve(STORAGE_DIR);
-          const cat = getFileCategory(ext);
-          const targetDir = path.resolve(storageRoot, cat.folder);
-          if (!fs.existsSync(targetDir)) {
-            await fsp.mkdir(targetDir, { recursive: true });
+        const cat = getFileCategory(ext);
+        const userDir = getUserStorageDir(ctx.from?.id) || STORAGE_DIR;
+        const relativeTargetPath = `${cat.folder}\\${safeFileName}`;
+        const laptopTargetPath = joinLaptopPath(userDir, relativeTargetPath);
+
+        // 1. Direct WebSocket transmission to physical laptop runner (when bot runs on Render)
+        if (ctx.from?.id && isLaptopConnected(ctx.from.id)) {
+          try {
+            const b64 = nodeBuffer.toString('base64');
+            const laptopRes = await writeLaptopFile(ctx.from.id, laptopTargetPath, b64, 'base64');
+            if (laptopRes?.success) {
+              console.log(`[Laptop Bridge] Saved "${safeFileName}" directly to physical laptop: ${laptopTargetPath}`);
+            }
+          } catch (laptopErr) {
+            console.warn('[Laptop Bridge] Could not save to physical laptop:', sanitizeError(laptopErr));
           }
-          const localFilePath = path.resolve(targetDir, safeFileName);
-          if (localFilePath.startsWith(storageRoot)) {
+        }
+
+        // 2. Also save to host filesystem if folder exists locally (for local execution or caching)
+        try {
+          if (fs.existsSync(userDir)) {
+            const localTargetDir = path.join(userDir, cat.folder);
+            if (!fs.existsSync(localTargetDir)) {
+              await fsp.mkdir(localTargetDir, { recursive: true });
+            }
+            const localFilePath = path.join(localTargetDir, safeFileName);
             await fsp.writeFile(localFilePath, nodeBuffer);
-            console.log(`Auto-saved document to Drive D [${cat.name}]: ${localFilePath}`);
-            // Cache the new file's hash info
+            console.log(`Auto-saved document to local storage [${cat.name}]: ${localFilePath}`);
             const stats = await fsp.stat(localFilePath);
             const relKey = `${cat.folder}/${safeFileName}`;
             localFileHashes.set(relKey, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
             localFileHashes.set(safeFileName, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
           }
         } catch (saveErr) {
-          console.warn('Could not auto-save file to Drive D storage:', sanitizeError(saveErr));
+          console.warn('Could not auto-save file to local storage:', sanitizeError(saveErr));
         }
       }
 

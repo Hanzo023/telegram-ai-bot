@@ -150,6 +150,32 @@ export function sendLaptopTask(userId, action, payload = {}, timeoutMs = 60000) 
 }
 
 /**
+ * Cross-platform check if a path is absolute (handles both Windows C:\ and POSIX /)
+ */
+export function isPathAbsolute(p) {
+  if (!p || typeof p !== 'string') return false;
+  if (/^[a-zA-Z]:[\\\/]/.test(p) || /^[\\\/]{2}/.test(p)) return true;
+  if (p.startsWith('/')) return true;
+  return false;
+}
+
+/**
+ * Cross-platform join for remote laptop paths (handles Windows backslashes even when running on Linux host)
+ */
+export function joinLaptopPath(baseDir, relativePath) {
+  if (!baseDir) return relativePath || '';
+  if (!relativePath) return baseDir;
+  if (isPathAbsolute(relativePath)) return relativePath;
+
+  if (/^[a-zA-Z]:/.test(baseDir) || baseDir.includes('\\')) {
+    const cleanBase = baseDir.replace(/[\\\/]+$/, '');
+    const cleanRel = relativePath.replace(/^[\\\/]+/, '').replaceAll('/', '\\');
+    return `${cleanBase}\\${cleanRel}`;
+  }
+  return path.join(baseDir, relativePath);
+}
+
+/**
  * Execute a terminal command (PowerShell / Bash) on the user's active laptop
  */
 export async function runLaptopCommand(userId, command, cwd) {

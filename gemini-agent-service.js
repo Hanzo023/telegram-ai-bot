@@ -10,6 +10,8 @@ import {
   listLaptopDirectory,
   getLaptopStatus,
   isLaptopConnected,
+  joinLaptopPath,
+  isPathAbsolute,
 } from './laptop-bridge.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
@@ -406,10 +408,7 @@ export async function executeTool(name, args = {}, context = {}) {
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
-      let effectivePath = rawPath;
-      if (effectivePath && !path.isAbsolute(effectivePath) && context.userDirectory) {
-        effectivePath = path.join(context.userDirectory, effectivePath);
-      }
+      const effectivePath = joinLaptopPath(context.userDirectory, rawPath);
       try {
         const res = await readLaptopFile(context.userId, effectivePath, args.max_lines);
         return JSON.stringify(res);
@@ -424,10 +423,7 @@ export async function executeTool(name, args = {}, context = {}) {
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
-      let effectivePath = rawPath;
-      if (effectivePath && !path.isAbsolute(effectivePath) && context.userDirectory) {
-        effectivePath = path.join(context.userDirectory, effectivePath);
-      }
+      const effectivePath = joinLaptopPath(context.userDirectory, rawPath);
       try {
         const res = await writeLaptopFile(context.userId, effectivePath, content);
         return JSON.stringify(res);
@@ -500,19 +496,15 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
         input: prompt,
         tools: AGENT_TOOLS,
         system_instruction:
-          'You are an autonomous AI Agent in Telegram with access to tools (web search, YouTube, drive files, calculations, system status, AND live laptop control). ' +
-          `User laptop target directory: "${userDirectory || 'default working directory'}". ` +
-          '\n\nAUTONOMOUS SCRIPT CREATION, INSTALLATION & EXECUTION RULES:\n' +
-          '• When the user asks you to run commands, install software, download or create a file, or write and run a Python/Node script on their laptop:\n' +
-          '  1. INSTALL DEPENDENCIES: If any external packages or libraries are required (e.g. pip install requests, pip install beautifulsoup4, npm install axios), execute them first using run_laptop_terminal.\n' +
-          '  2. WRITE FILE: Write the complete, production-ready script with zero omissions or placeholders using write_laptop_file into their target folder.\n' +
-          '  3. RUN SCRIPT: Execute the script on their laptop using run_laptop_terminal (e.g. "python myscript.py") to verify it works and observe the output.\n' +
-          '  4. GUIDE USER: In your final answer, clearly tell them:\n' +
-          '     • What packages you installed.\n' +
-          '     • Exactly what file was created and its path on their machine.\n' +
-          '     • The output produced by the script.\n' +
-          '     • What to do next or how they can run it again.\n' +
-          '• If the laptop is disconnected, explain that their runner is offline (instruct them to use /setup_laptop to receive their personalized runner files or 1-line PowerShell installer directly in Telegram), and provide the complete script and exact manual terminal commands as a fallback.',
+          'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical laptop.\n' +
+          `User\'s target folder on their laptop: "${userDirectory || 'default working directory'}".\n\n` +
+          'CRITICAL EXECUTION AND GROUNDING RULES:\n' +
+          '1. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s laptop. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
+          '2. ZERO FAKE TOOLS: NEVER output text claiming you executed tools (e.g. "Executed Tools:", "run_code()", "run_shell_command()", "run_script()"). The Telegram interface automatically displays verified tools executed by the system. NEVER simulate tool runs in markdown text.\n' +
+          '3. NEVER LIE ABOUT SAVING: NEVER claim a file has been saved to their laptop unless you actually called `write_laptop_file` and received `{ success: true }`.\n' +
+          '4. TARGET PATH: When saving files without an explicit absolute path, save them into the user\'s target folder ("' + (userDirectory || 'default working directory') + '"). If the user asks for Desktop, save to their Desktop.\n' +
+          '5. INSTALLING & RUNNING: To install packages (e.g. pip install pygame), execute `run_laptop_terminal(command="pip install ...")`. To run scripts, execute `run_laptop_terminal(command="python ...")`.\n' +
+          '6. DISCONNECTED STATE: If a laptop tool returns that the laptop is offline or disconnected, explain honestly that the agent runner is offline and provide the full code in a markdown block so they can save it manually.',
       });
 
       let stepCount = 0;
@@ -524,7 +516,7 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
 
         if (!functionCallStep) {
           // No more tool calls; final answer reached
-          const finalAnswer =
+          let finalAnswer =
             currentResponse.output_text ||
             steps
               .filter((s) => s.type === 'text')
@@ -532,6 +524,60 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
               .join('\n')
               .trim() ||
             'Task completed.';
+
+          // Strip hallucinated tool execution sections that LLMs sometimes generate
+          finalAnswer = finalAnswer.replace(/(?:⚙️|🛠️)?\s*Executed Tools:[\s\S]*?(?=\n\n[#A-Z📁🎮]|$)/i, '').trim();
+
+          // Safety net: If user asked to save/create a file on their laptop and the LLM did not call write_laptop_file,
+          // but generated a code block, automatically write it to the laptop disk!
+          const isSaveRequest = /(save|create|write|put|store|download).*?(file|game|script|code|desktop|local|folder|drive)/i.test(prompt) ||
+                                /(local file|my folder|my local)/i.test(prompt);
+          const wroteFile = stepsExecuted.some((s) => s.name === 'write_laptop_file');
+
+          if (isSaveRequest && !wroteFile && userId) {
+            const codeBlockMatch = finalAnswer.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]+?)```/);
+            if (codeBlockMatch) {
+              const codeContent = codeBlockMatch[1].trim();
+              let detectedFilename = null;
+              const fileMatch = finalAnswer.match(/(?:saved it directly to|saved to|named|path:?|file:?)\s*[`"']?([A-Za-z0-9_\\\/\.:-]+\.[a-zA-Z0-9]+)[`"']?/i);
+              if (fileMatch && !fileMatch[1].includes(' ')) {
+                detectedFilename = fileMatch[1];
+              }
+
+              if (!detectedFilename) {
+                if (/import turtle|import pygame|def main/i.test(codeContent)) {
+                  detectedFilename = 'space_dodge_game.py';
+                } else if (/console\.log|import|const /i.test(codeContent)) {
+                  detectedFilename = 'script.js';
+                } else {
+                  detectedFilename = 'script.py';
+                }
+              }
+
+              let baseDir = userDirectory || STORAGE_DIR;
+              if (/(?:to|on)\s+(?:my\s+)?desktop/i.test(prompt) || /(?:desktop)/i.test(detectedFilename)) {
+                baseDir = 'C:\\Users\\dsoph\\Desktop';
+              }
+              const destPath = joinLaptopPath(baseDir, detectedFilename);
+
+              if (isLaptopConnected(userId)) {
+                try {
+                  const saveRes = await writeLaptopFile(userId, destPath, codeContent);
+                  if (saveRes?.success) {
+                    stepsExecuted.push({
+                      name: 'write_laptop_file',
+                      args: { file_path: destPath, size_bytes: saveRes.sizeBytes || codeContent.length },
+                    });
+                    finalAnswer += `\n\n✅ *Physically written directly to your laptop:*\n📁 \`${destPath}\``;
+                  }
+                } catch (saveErr) {
+                  finalAnswer += `\n\n⚠️ *Could not write file to laptop:* ${saveErr.message}`;
+                }
+              } else {
+                finalAnswer += `\n\n⚠️ *Notice:* Your laptop runner is offline, so this file could not be written to disk automatically. Ensure your background runner is active.`;
+              }
+            }
+          }
 
           return {
             finalAnswer,
@@ -572,8 +618,11 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
       }
 
       // If max steps reached, extract whatever output exists
+      let finalAnswer = currentResponse.output_text || 'Completed maximum agent tool iterations.';
+      finalAnswer = finalAnswer.replace(/(?:⚙️|🛠️)?\s*Executed Tools:[\s\S]*?(?=\n\n[#A-Z📁🎮]|$)/i, '').trim();
+
       return {
-        finalAnswer: currentResponse.output_text || 'Completed maximum agent tool iterations.',
+        finalAnswer,
         stepsExecuted,
         success: true,
       };
