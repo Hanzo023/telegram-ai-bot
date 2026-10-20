@@ -1,0 +1,2 @@
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -Command ""if (-not (Get-CimInstance Win32_Process -Filter \""CommandLine like '%%laptop-runner.js%%'\"\" -ErrorAction SilentlyContinue)) { Start-Process node.exe -ArgumentList 'D:\projects\telegram-ai-bot\laptop-runner.js --user 8199950189 --server https://telegram-ai-bot-znei.onrender.com' -WorkingDirectory 'D:\projects\telegram-ai-bot' -WindowStyle Hidden }""", 0, False
