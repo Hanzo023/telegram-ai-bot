@@ -116,6 +116,39 @@ let reconnectTimer = null;
 let reconnectAttempts = 0;
 let isExiting = false;
 
+let cachedHardwareExtra = {
+  gpu: '',
+  battery: '',
+  disks: [],
+  lastRefreshed: 0,
+};
+
+async function refreshHardwareInfo(force = false) {
+  if (os.platform() !== 'win32') return cachedHardwareExtra;
+  if (!force && Date.now() - cachedHardwareExtra.lastRefreshed < 10000) {
+    return cachedHardwareExtra;
+  }
+  return new Promise((resolve) => {
+    const cmd = `powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name) -join ';;'; (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -ExpandProperty EstimatedChargeRemaining); (Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { $_.DeviceID + ' ' + [math]::Round($_.FreeSpace/1GB,1) + ' GB free of ' + [math]::Round($_.Size/1GB,1) + ' GB' }) -join ';;'"`;
+    exec(cmd, { timeout: 8000 }, (err, stdout) => {
+      if (!err && stdout) {
+        const lines = stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+        if (lines[0]) {
+          cachedHardwareExtra.gpu = lines[0].split(';;').map((g) => g.trim()).filter(Boolean).join(' + ');
+        }
+        if (lines[1]) {
+          cachedHardwareExtra.battery = `${lines[1]}%`;
+        }
+        if (lines[2]) {
+          cachedHardwareExtra.disks = lines[2].split(';;').map((d) => d.trim()).filter(Boolean);
+        }
+        cachedHardwareExtra.lastRefreshed = Date.now();
+      }
+      resolve(cachedHardwareExtra);
+    });
+  });
+}
+
 function connect() {
   if (isExiting) return;
   if (reconnectTimer) {
@@ -152,8 +185,9 @@ function connect() {
     ws.on('open', async () => {
       reconnectAttempts = 0;
       log('✅ Connected to Cloud Agent Bridge! Waiting for commands from Telegram...');
-      // Broadcast live hardware specs immediately upon connection for instant /status caching
+      // Broadcast live hardware specs immediately upon connection for instant /status and /spec caching
       try {
+        await refreshHardwareInfo(true);
         const specs = await handleTask('status', {});
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'initial_status', storageDir: RUNNER_STORAGE_DIR, ...specs }));
@@ -419,11 +453,15 @@ async function handleTask(action, payload) {
       }
     }
 
+    case 'spec':
+    case 'specs':
     case 'status': {
+      await refreshHardwareInfo(action === 'spec' || action === 'specs');
       const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
       const freeMemMb = Math.round(os.freemem() / 1024 / 1024);
       const cpus = os.cpus();
       const cpuModel = cpus && cpus.length > 0 ? cpus[0].model.trim() : 'Processor';
+      const cpuSpeedGhz = cpus && cpus.length > 0 && cpus[0].speed ? (cpus[0].speed / 1000).toFixed(2) : '';
       return {
         success: true,
         deviceName: DEVICE_NAME,
@@ -434,7 +472,11 @@ async function handleTask(action, payload) {
         arch: os.arch(),
         cpuCores: cpus.length,
         cpuModel,
+        cpuSpeedGhz: cpuSpeedGhz ? `${cpuSpeedGhz} GHz` : '',
         uptimeHours: (os.uptime() / 3600).toFixed(2),
+        gpu: cachedHardwareExtra.gpu || '',
+        battery: cachedHardwareExtra.battery || '',
+        disks: cachedHardwareExtra.disks || [],
         memory: {
           totalMb: totalMemMb,
           freeMb: freeMemMb,

@@ -14,6 +14,16 @@ const connectedLaptops = new Map();
  */
 const pendingRequests = new Map();
 
+/**
+ * Cached specs per user for instant /spec responses even when briefly offline
+ * Map<userId, specsObject>
+ */
+const lastKnownSpecs = new Map();
+
+export function getLastKnownSpecs(userId) {
+  return lastKnownSpecs.get(Number(userId)) || null;
+}
+
 let botApiRef = null;
 let onStorageDirCallback = null;
 
@@ -251,21 +261,24 @@ export async function getLaptopStatus(userId) {
     throw new Error('No active laptop connected for your account.');
   }
 
-  // Fast live query with 2s timeout; fallback to cached specs immediately
+  // Fast live query with 3s timeout; fallback to cached specs immediately
   try {
-    const live = await sendLaptopTask(userId, 'status', {}, 2000);
+    const live = await sendLaptopTask(userId, 'spec', {}, 3500);
     if (live && live.success) {
       activeDevice.lastStatus = live;
+      lastKnownSpecs.set(Number(userId), live);
       return live;
     }
   } catch (err) {
     // Timeout or network blip: fall back gracefully to cached connection specs
     if (activeDevice.lastStatus) {
+      lastKnownSpecs.set(Number(userId), activeDevice.lastStatus);
       return activeDevice.lastStatus;
     }
   }
 
   if (activeDevice.lastStatus) {
+    lastKnownSpecs.set(Number(userId), activeDevice.lastStatus);
     return activeDevice.lastStatus;
   }
 
@@ -420,6 +433,7 @@ export function setupLaptopBridge(server, allowedUserIds) {
           // Handle initial hardware specs broadcast from runner
           if (msg.type === 'initial_status') {
             deviceRecord.lastStatus = msg;
+            lastKnownSpecs.set(Number(userId), msg);
             console.log(`[Laptop Bridge] 📊 Cached live system specs from "${deviceName}"`);
             if (msg.storageDir && onStorageDirCallback) {
               try {

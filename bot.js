@@ -53,6 +53,8 @@ import {
   deleteLaptopFile,
   renameLaptopFile,
   disableLaptopRunner,
+  getLaptopStatus,
+  getLastKnownSpecs,
   joinLaptopPath,
   isPathAbsolute,
 } from './laptop-bridge.js';
@@ -2258,15 +2260,135 @@ bot.command('status', async (ctx) => {
   const statusOptions = { parse_mode: 'Markdown' };
   if (!hasLaptop) {
     statusOptions.reply_markup = new InlineKeyboard()
-      .text('💻 Setup My Laptop', `setup_laptop_${userId}`)
+      .text('💻 Laptop Specs', `view_spec_${userId}`)
       .text('🔄 Refresh Status', `refresh_status_${userId}`);
   } else {
     statusOptions.reply_markup = new InlineKeyboard()
-      .text('🔄 Refresh Status', `refresh_status_${userId}`)
+      .text('💻 Laptop Specs', `view_spec_${userId}`)
+      .text('🔄 Refresh', `refresh_status_${userId}`)
+      .row()
       .text('🛑 Disable Laptop Agent', `disable_laptop_${userId}`);
   }
 
   await ctx.reply(statusMessage, statusOptions);
+});
+
+/**
+ * Handle /spec and /specs command: displays deep hardware & system profile
+ */
+async function handleSpecCommand(ctx, userId, isCallback = false) {
+  const hasLaptop = isLaptopConnected(userId);
+  const userDir = getUserStorageDir(userId) || STORAGE_DIR;
+  let laptop = null;
+  let isLive = false;
+
+  if (hasLaptop) {
+    try {
+      laptop = await getLaptopStatus(userId);
+      isLive = laptop && laptop.success;
+    } catch {}
+  }
+
+  if (!laptop || !laptop.success) {
+    laptop = getLastKnownSpecs(userId);
+  }
+
+  if (!laptop) {
+    const msg =
+      `💻 *Laptop Specifications*\n\n` +
+      `🔴 **No laptop is currently connected for your account.**\n\n` +
+      `• **Host Profile:** Not recorded yet.\n` +
+      `• **Storage Directory:** \`${userDir || 'Not set'}\`\n\n` +
+      `💡 _To view your live hardware specs (CPU, GPU, RAM, Battery, Disks):_\n` +
+      `1. Double-click \`Start-Silent-Agent.vbs\` (or \`start-agent.bat\`) on your laptop.\n` +
+      `2. Send `/spec` again!`;
+
+    const kb = new InlineKeyboard()
+      .text('🔄 Check Connection', `refresh_spec_${userId}`)
+      .text('📊 System Status', `refresh_status_${userId}`);
+
+    if (isCallback) {
+      await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+      await ctx.answerCallbackQuery().catch(() => {});
+    } else {
+      await ctx.reply(msg, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+    return;
+  }
+
+  // Format RAM
+  const memTotalGb = laptop.memory ? (laptop.memory.totalMb / 1024).toFixed(1) : '16.0';
+  const memUsedGb = laptop.memory ? (laptop.memory.usedMb / 1024).toFixed(1) : '0.0';
+  const memFreeGb = laptop.memory ? (laptop.memory.freeMb / 1024).toFixed(1) : '0.0';
+  const memPercent = laptop.memory ? laptop.memory.usedPercent : '0.0';
+
+  // Format CPU
+  const cpuSpeed = laptop.cpuSpeedGhz ? ` (${laptop.cpuSpeedGhz})` : '';
+  const cpuText = `${laptop.cpuModel || 'CPU'} — ${laptop.cpuCores || 1} Cores${cpuSpeed}`;
+
+  // Format GPU
+  const gpuText = laptop.gpu ? laptop.gpu.replace(/;;/g, ' + ') : 'Integrated / Standard Graphics';
+
+  // Format Battery
+  const batteryText = laptop.battery ? `🔋 *Battery & Power:* ${laptop.battery}\n` : '';
+
+  // Format Disks
+  let diskSection = '';
+  if (Array.isArray(laptop.disks) && laptop.disks.length > 0) {
+    diskSection = `💾 *Storage & Drives*\n`;
+    for (const d of laptop.disks) {
+      diskSection += `├─ \`${d}\`\n`;
+    }
+    diskSection += '\n';
+  }
+
+  // Device & OS
+  const osLabel = laptop.osVersion ? `${laptop.platform} - ${laptop.osVersion}` : `${laptop.platform} (${laptop.arch || 'x64'})`;
+  const statusBadge = isLive ? '🟢 Online & Ready (Live)' : '🟡 Offline / Cached (Last Reported)';
+
+  const text =
+    `💻 *Hardware Specifications — ${laptop.deviceName || 'Laptop'}*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🖥️ *System & Host*\n` +
+    `├─ Device: *${laptop.deviceName || 'Laptop'}* (\`${laptop.hostname || 'Local'}\`)\n` +
+    `├─ OS: \`${osLabel}\`\n` +
+    `├─ User Account: \`${laptop.username || 'User'}\`\n` +
+    `├─ Uptime: ${laptop.uptimeHours || '0'} hrs\n` +
+    `└─ Status: ${statusBadge}\n\n` +
+    `⚙️ *Processor (CPU)*\n` +
+    `├─ Model: *${cpuText}*\n` +
+    `└─ Architecture: \`${laptop.arch || 'x64'}\`\n\n` +
+    `🎮 *Graphics (GPU)*\n` +
+    `└─ ${gpuText}\n\n` +
+    `🧠 *Memory (RAM)*\n` +
+    `├─ Used: *${memUsedGb} GB* / ${memTotalGb} GB (${memPercent}%)\n` +
+    `└─ Free: *${memFreeGb} GB*\n\n` +
+    (batteryText ? `${batteryText}\n` : '') +
+    diskSection +
+    `📁 *Project Folder:* \`${userDir}\``;
+
+  const kb = new InlineKeyboard()
+    .text('🔄 Refresh Specs', `refresh_spec_${userId}`)
+    .text('📊 System Status', `refresh_status_${userId}`)
+    .row()
+    .text('📁 Open Library', 'lib_sources')
+    .text('🛑 Stop Runner', `disable_runner_${userId}`);
+
+  if (isCallback) {
+    await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+    await ctx.answerCallbackQuery({ text: 'Specs refreshed!' }).catch(() => {});
+  } else {
+    await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+  }
+}
+
+bot.command(['spec', 'specs'], async (ctx) => {
+  await handleSpecCommand(ctx, ctx.from.id);
+});
+
+bot.callbackQuery(/^(?:refresh|view)_spec_(\d+)$/, async (ctx) => {
+  const targetUid = Number(ctx.match[1]) || ctx.from.id;
+  await handleSpecCommand(ctx, targetUid, true);
 });
 
 function formatBytes(bytes) {
@@ -5512,6 +5634,7 @@ const botCommands = [
   { command: 'agent', description: '🤖 One-time task with live tools (web, files, math)' },
   { command: 'agent_mode', description: '🎚️ Toggle Agent as default for all chats (or /cancel)' },
   { command: 'devices', description: '💻 View connected laptop status for Agent' },
+  { command: 'spec', description: '💻 View detailed laptop hardware specs (CPU, GPU, RAM, Disks)' },
   { command: 'deep_research', description: '🔬 Deep Research report (deep-research-2026)' },
 
   // 🎙️ Real-Time Voice & Live Calls
