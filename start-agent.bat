@@ -13,6 +13,9 @@ if %errorlevel% neq 0 (
 
 if "%1"=="--foreground" goto FOREGROUND
 if "%1"=="-f" goto FOREGROUND
+if "%1"=="--disable" goto DISABLE
+if "%1"=="--stop" goto DISABLE
+if "%1"=="-d" goto DISABLE
 
 :: Check if already running in background
 for /f "tokens=*" %%P in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \"Name = 'node.exe'\" | Where-Object { $_.CommandLine -like '*laptop-runner.js*' }).ProcessId"') do set "RUNNER_PID=%%P"
@@ -57,3 +60,8 @@ exit /b 0
 :FOREGROUND
 echo Starting in foreground mode (press Ctrl+C to stop)...
 node laptop-runner.js --user 8199950189 --server https://telegram-ai-bot-znei.onrender.com %*
+exit /b 0
+
+:DISABLE
+call "%~dp0disable-agent.bat"
+exit /b 0

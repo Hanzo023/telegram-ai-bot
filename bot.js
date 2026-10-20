@@ -51,9 +51,14 @@ import {
   writeLaptopFile,
   deleteLaptopFile,
   renameLaptopFile,
+  disableLaptopRunner,
   joinLaptopPath,
   isPathAbsolute,
 } from './laptop-bridge.js';
+
+// Pending file save session cache & custom path state
+const pendingFiles = new Map(); // userId -> { code: string, filename: string, suggestedPath: string, createdAt: number }
+const userAwaitingCustomSavePath = new Set(); // userId
 
 const userAgentMode = new Map(); // userId -> boolean
 
@@ -843,6 +848,145 @@ async function handleLiveVoiceReply(ctx, textPrompt) {
   }
 }
 
+
+/**
+ * Prompt user to save generated code with interactive buttons or /save command
+ */
+async function promptPendingFileSave(ctx, userId, fileInfo) {
+  const userDir = getUserStorageDir(userId) || STORAGE_DIR;
+  const filename = fileInfo.filename || 'game.py';
+  const suggestedPath = fileInfo.suggestedPath || joinLaptopPath(userDir, filename);
+
+  pendingFiles.set(userId, {
+    code: fileInfo.code,
+    filename,
+    suggestedPath,
+    createdAt: Date.now(),
+  });
+
+  const keyboard = new InlineKeyboard()
+    .text('📁 Target Folder', 'save_pending_default')
+    .text('🖥️ Desktop', 'save_pending_desktop')
+    .row()
+    .text('☁️ Cloud Vault', 'save_pending_cloud')
+    .text('✏️ Custom Path', 'save_pending_custom')
+    .row()
+    .text('❌ Discard', 'cancel_pending_save');
+
+  const text =
+    `🎮 **Code Ready to Save!**\n\n` +
+    `• **File:** \`${filename}\`\n` +
+    `• **Default target:** \`${suggestedPath}\`\n` +
+    `• **Size:** ${fileInfo.code.length} characters\n\n` +
+    `*Tap an option below, or reply with:*\n` +
+    `• \`/save\` to accept the default\n` +
+    `• \`/save <path_or_filename>\` to set a custom destination\n` +
+    `• \`/cancel\` to discard`;
+
+  await ctx.reply(text, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+}
+
+/**
+ * Execute saving of a pending generated file
+ */
+async function executeSavePendingFile(ctx, userId, targetDestination, isCallback = false) {
+  if (!pendingFiles.has(userId)) {
+    if (isCallback) {
+      await ctx.answerCallbackQuery({ text: 'No pending file to save!' }).catch(() => {});
+    }
+    await ctx.reply('❌ **No pending file to save.** (Generate code with `/agent` first!)', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const fileInfo = pendingFiles.get(userId);
+  const userDir = getUserStorageDir(userId) || STORAGE_DIR;
+  let dest = (targetDestination || '').trim();
+
+  // If saving to Cloud Vault
+  if (dest === '__cloud__') {
+    try {
+      const buffer = Buffer.from(fileInfo.code, 'utf8');
+      const cat = getFileCategory(fileInfo.filename.split('.').pop() || 'py');
+      await ctx.replyWithDocument(new InputFile(buffer, fileInfo.filename), {
+        caption: `☁️ **Saved to Telegram Cloud Vault** [${cat.name}]`,
+        parse_mode: 'Markdown',
+      });
+      pendingFiles.delete(userId);
+      userAwaitingCustomSavePath.delete(userId);
+      if (isCallback) {
+        await ctx.answerCallbackQuery({ text: 'Saved to Cloud Vault!' }).catch(() => {});
+      }
+      return;
+    } catch (cloudErr) {
+      console.warn('[PendingSave] Cloud vault error:', cloudErr.message);
+      await ctx.reply(`❌ Failed to save to Cloud Vault: ${cloudErr.message}`);
+      return;
+    }
+  }
+
+  // Determine physical target path on laptop
+  let targetPath;
+  if (/^desktop$/i.test(dest) || /^[\/\\]?desktop[\/\\]/i.test(dest)) {
+    targetPath = `C:\\Users\\dsoph\\Desktop\\${fileInfo.filename}`;
+  } else if (isPathAbsolute(dest)) {
+    targetPath = dest;
+  } else {
+    // Relative path or filename - resolve inside user's storage directory
+    const cleanRel = dest.replace(/^[\/\\]+/, '');
+    targetPath = joinLaptopPath(userDir, cleanRel || fileInfo.filename);
+  }
+
+  // Basic sanity validation
+  if (/[<>:"|?*]/.test(path.basename(targetPath))) {
+    await ctx.reply('⚠️ **Invalid filename:** File path contains disallowed characters.', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const hasLaptop = isLaptopConnected(userId);
+  if (!hasLaptop) {
+    if (isCallback) {
+      await ctx.answerCallbackQuery({ text: 'Laptop runner is offline!' }).catch(() => {});
+    }
+    await ctx.reply(
+      `⚠️ **Laptop Runner Offline**\n\n` +
+      `Cannot save to \`${targetPath}\` because your laptop runner is disconnected.\n\n` +
+      `• Run \`start-agent.bat\` or \`Enable-Laptop-Agent.bat\` on your laptop.\n` +
+      `• Or tap **Cloud Vault** to save to Telegram Cloud instead.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: new InlineKeyboard()
+          .text('☁️ Save to Cloud Vault Instead', 'save_pending_cloud')
+          .text('❌ Discard', 'cancel_pending_save'),
+      }
+    );
+    return;
+  }
+
+  try {
+    const saveRes = await writeLaptopFile(userId, targetPath, fileInfo.code);
+    if (saveRes && saveRes.success) {
+      pendingFiles.delete(userId);
+      userAwaitingCustomSavePath.delete(userId);
+      if (isCallback) {
+        await ctx.answerCallbackQuery({ text: 'File saved successfully!' }).catch(() => {});
+      }
+      await ctx.reply(
+        `✅ **Saved successfully!**\n` +
+        `📁 \`${targetPath}\`\n\n` +
+        `Triggering sync daemon...`,
+        { parse_mode: 'Markdown' }
+      );
+    } else {
+      await ctx.reply(`❌ Could not save file to laptop: ${saveRes?.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    await ctx.reply(`❌ Save error: ${err.message}`);
+  }
+}
+
 async function handleAgentCommand(ctx, prompt) {
   const userId = ctx.from.id;
   const statusMsg = await ctx.reply('🤖 *Gemini Agent initialized...*', { parse_mode: 'Markdown' });
@@ -879,6 +1023,11 @@ async function handleAgentCommand(ctx, prompt) {
 
     const { safeText } = sanitizeAndCheckSecrets(reply, 'chat_reply');
     await sendLongMessage(ctx, safeText);
+
+    // If code was generated, prompt user before writing to disk
+    if (result.pendingFile && result.pendingFile.code) {
+      await promptPendingFileSave(ctx, userId, result.pendingFile);
+    }
 
     // Persist to conversation history
     const history = conversationHistory.get(userId) || [];
@@ -1876,6 +2025,13 @@ bot.command('cancel', async (ctx) => {
     setUserLiveMode(userId, false);
   }
 
+  if (pendingFiles.has(userId)) {
+    const p = pendingFiles.get(userId);
+    pendingFiles.delete(userId);
+    userAwaitingCustomSavePath.delete(userId);
+    cancelled.push(`📁 Pending code save (${p.filename})`);
+  }
+
   const cancelled = [];
   if (active) {
     const modeNames = {
@@ -1904,6 +2060,43 @@ bot.command('cancel', async (ctx) => {
       `You are already in normal AI chat mode with Claude. Send any message, photo, or question to chat!`,
       { parse_mode: 'Markdown' }
     );
+  }
+});
+
+
+// Save command for pending generated files
+bot.command('save', async (ctx) => {
+  const userId = ctx.from.id;
+  const rawArg = ctx.message.text.replace(/^\/save\s*/i, '').trim();
+
+  if (!pendingFiles.has(userId)) {
+    await ctx.reply('❌ **No pending file to save.** (Generate code with `/agent` first!)', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const fileInfo = pendingFiles.get(userId);
+  const target = rawArg || fileInfo.suggestedPath || fileInfo.filename;
+  await executeSavePendingFile(ctx, userId, target);
+});
+
+// Disable laptop agent command
+bot.command(['disable_laptop', 'stop_laptop'], async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isLaptopConnected(userId)) {
+    await ctx.reply('ℹ️ Your laptop runner is already offline / disconnected.');
+    return;
+  }
+  try {
+    await disableLaptopRunner(userId);
+    await ctx.reply(
+      `🛑 **Laptop Agent Disabled & Stopped!**\n\n` +
+      `• Terminated background runner process.\n` +
+      `• Removed auto-start on Windows boot/login.\n\n` +
+      `_To re-enable anytime, run \`Enable-Laptop-Agent.bat\` on your Desktop._`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Could not disable runner: ${err.message}`);
   }
 });
 
@@ -2043,6 +2236,10 @@ bot.command('status', async (ctx) => {
     statusOptions.reply_markup = new InlineKeyboard()
       .text('💻 Setup My Laptop', `setup_laptop_${userId}`)
       .text('🔄 Refresh Status', `refresh_status_${userId}`);
+  } else {
+    statusOptions.reply_markup = new InlineKeyboard()
+      .text('🔄 Refresh Status', `refresh_status_${userId}`)
+      .text('🛑 Disable Laptop Agent', `disable_laptop_${userId}`);
   }
 
   await ctx.reply(statusMessage, statusOptions);
@@ -4957,6 +5154,78 @@ bot.on('callback_query:data', async (ctx) => {
 });
 
 bot.on(['message:voice', 'message:audio'], handleVoiceMessage);
+
+// Pending File Save Callbacks
+bot.callbackQuery('save_pending_default', async (ctx) => {
+  const userId = ctx.from.id;
+  const fileInfo = pendingFiles.get(userId);
+  if (!fileInfo) {
+    await ctx.answerCallbackQuery({ text: 'No pending file to save!' });
+    return;
+  }
+  await executeSavePendingFile(ctx, userId, fileInfo.suggestedPath, true);
+});
+
+bot.callbackQuery('save_pending_desktop', async (ctx) => {
+  const userId = ctx.from.id;
+  await executeSavePendingFile(ctx, userId, 'desktop', true);
+});
+
+bot.callbackQuery('save_pending_cloud', async (ctx) => {
+  const userId = ctx.from.id;
+  await executeSavePendingFile(ctx, userId, '__cloud__', true);
+});
+
+bot.callbackQuery('save_pending_custom', async (ctx) => {
+  const userId = ctx.from.id;
+  const fileInfo = pendingFiles.get(userId);
+  if (!fileInfo) {
+    await ctx.answerCallbackQuery({ text: 'No pending file to save!' });
+    return;
+  }
+  userAwaitingCustomSavePath.add(userId);
+  await ctx.answerCallbackQuery({ text: 'Reply with your custom destination path.' });
+  await ctx.reply(
+    `✏️ **Custom Destination Path**\n\n` +
+    `Please reply with the path or filename where you want to save \`${fileInfo.filename}\` on your laptop:\n\n` +
+    `_Examples:_\n` +
+    `• \`D:\\projects\\my_game.py\`\n` +
+    `• \`C:\\Users\\dsoph\\Desktop\\game.py\`\n` +
+    `• \`games\\space.py\` (relative to your storage folder)\n\n` +
+    `Or reply \`/cancel\` to discard.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.callbackQuery('cancel_pending_save', async (ctx) => {
+  const userId = ctx.from.id;
+  pendingFiles.delete(userId);
+  userAwaitingCustomSavePath.delete(userId);
+  await ctx.answerCallbackQuery({ text: 'Pending file discarded.' });
+  await ctx.editMessageText('❌ **Pending code save discarded.**', { parse_mode: 'Markdown' }).catch(() => {});
+});
+
+bot.callbackQuery(/^disable_laptop_(\d+)$/, async (ctx) => {
+  const targetUid = Number(ctx.match[1]);
+  if (!isLaptopConnected(targetUid)) {
+    await ctx.answerCallbackQuery({ text: 'Laptop runner is already offline!' });
+    return;
+  }
+  await ctx.answerCallbackQuery({ text: 'Disabling laptop runner...' });
+  try {
+    await disableLaptopRunner(targetUid);
+    await ctx.reply(
+      `🛑 **Laptop Agent Disabled & Stopped!**\n\n` +
+      `• Terminated background runner on your laptop.\n` +
+      `• Removed auto-start from Windows Startup & Registry.\n\n` +
+      `_To re-enable anytime, double-click \`Enable-Laptop-Agent.bat\` on your Desktop._`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Could not disable runner: ${err.message}`);
+  }
+});
+
 bot.on('message:photo', handlePhotoMessage);
 
 bot.on('message:text', async (ctx) => {
@@ -4967,6 +5236,19 @@ bot.on('message:text', async (ctx) => {
   }
 
   const userId = ctx.from.id;
+
+  // Check if user is replying with a custom path to save pending code
+  if (userAwaitingCustomSavePath.has(userId)) {
+    userAwaitingCustomSavePath.delete(userId);
+    const customPath = userMessage.trim();
+    if (customPath.toLowerCase() === 'cancel' || customPath === '/cancel') {
+      pendingFiles.delete(userId);
+      await ctx.reply('❌ **Pending code save discarded.**', { parse_mode: 'Markdown' });
+      return;
+    }
+    await executeSavePendingFile(ctx, userId, customPath);
+    return;
+  }
 
   // Check if user is awaiting input for renaming a file (Cloud or Laptop)
   if (userAwaitingRename.has(userId)) {

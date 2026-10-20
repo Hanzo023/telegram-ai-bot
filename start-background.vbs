@@ -17,8 +17,7 @@ For Each objProcess In colProcesses
 Next
 
 If Not isRunning Then
-    Set objProcess = objWMIService.Get("Win32_Process")
     cmd = "node.exe ""D:\projects\telegram-ai-bot\laptop-runner.js"" --user 8199950189 --server https://telegram-ai-bot-znei.onrender.com"
     cwd = "D:\projects\telegram-ai-bot"
-    objProcess.Create cmd, cwd, Null, intProcessID
+    objWMIService.Get("Win32_Process").Create cmd, cwd, Nothing, intProcessID
 End If

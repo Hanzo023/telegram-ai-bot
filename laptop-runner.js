@@ -401,6 +401,34 @@ async function handleTask(action, payload) {
       };
     }
 
+    case 'disable_runner':
+    case 'stop_runner': {
+      console.log('[Runner] Remote disable/stop signal received from Telegram.');
+      try {
+        const appData = process.env.APPDATA;
+        if (appData) {
+          const startupVbs = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'TelegramAILaptopRunner.vbs');
+          if (fs.existsSync(startupVbs)) fs.unlinkSync(startupVbs);
+        }
+      } catch (err) {
+        console.warn('[Runner] Could not remove startup vbs:', err.message);
+      }
+
+      try {
+        exec('reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v TelegramAILaptopRunner /f', () => {});
+      } catch {}
+
+      setTimeout(() => {
+        console.log('[Runner] Shutting down runner process gracefully.');
+        process.exit(0);
+      }, 500);
+
+      return {
+        success: true,
+        message: 'Laptop runner disabled and stopped. Auto-start removed.',
+      };
+    }
+
     default:
       return { success: false, error: `Unknown action: ${action}` };
   }

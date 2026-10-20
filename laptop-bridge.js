@@ -218,6 +218,13 @@ export async function listLaptopDirectory(userId, dirPath) {
 }
 
 /**
+ * Stop and disable the user's active laptop runner
+ */
+export async function disableLaptopRunner(userId) {
+  return await sendLaptopTask(userId, 'disable_runner', {}, 15000);
+}
+
+/**
  * Get system status (CPU, memory, uptime, battery) from the user's active laptop
  */
 export async function getLaptopStatus(userId) {

@@ -528,61 +528,45 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
           // Strip hallucinated tool execution sections that LLMs sometimes generate
           finalAnswer = finalAnswer.replace(/(?:⚙️|🛠️)?\s*Executed Tools:[\s\S]*?(?=\n\n[#A-Z📁🎮]|$)/i, '').trim();
 
-          // Safety net: If user asked to save/create a file on their laptop and the LLM did not call write_laptop_file,
-          // but generated a code block, automatically write it to the laptop disk!
-          const isSaveRequest = /(save|create|write|put|store|download).*?(file|game|script|code|desktop|local|folder|drive)/i.test(prompt) ||
-                                /(local file|my folder|my local)/i.test(prompt);
-          const wroteFile = stepsExecuted.some((s) => s.name === 'write_laptop_file');
+          // Hold generated code in pending state so user is prompted before writing to disk
+          let pendingFile = null;
+          const codeBlockMatch = finalAnswer.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]+?)```/);
+          if (codeBlockMatch) {
+            const codeContent = codeBlockMatch[1].trim();
+            let detectedFilename = null;
+            const fileMatch = finalAnswer.match(/(?:saved it directly to|saved to|named|path:?|file:?)\s*[`"']?([A-Za-z0-9_\\\/\.:-]+\.[a-zA-Z0-9]+)[`"']?/i);
+            if (fileMatch && !fileMatch[1].includes(' ')) {
+              detectedFilename = path.basename(fileMatch[1]);
+            }
 
-          if (isSaveRequest && !wroteFile && userId) {
-            const codeBlockMatch = finalAnswer.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]+?)```/);
-            if (codeBlockMatch) {
-              const codeContent = codeBlockMatch[1].trim();
-              let detectedFilename = null;
-              const fileMatch = finalAnswer.match(/(?:saved it directly to|saved to|named|path:?|file:?)\s*[`"']?([A-Za-z0-9_\\\/\.:-]+\.[a-zA-Z0-9]+)[`"']?/i);
-              if (fileMatch && !fileMatch[1].includes(' ')) {
-                detectedFilename = fileMatch[1];
-              }
-
-              if (!detectedFilename) {
-                if (/import turtle|import pygame|def main/i.test(codeContent)) {
-                  detectedFilename = 'space_dodge_game.py';
-                } else if (/console\.log|import|const /i.test(codeContent)) {
-                  detectedFilename = 'script.js';
-                } else {
-                  detectedFilename = 'script.py';
-                }
-              }
-
-              let baseDir = userDirectory || STORAGE_DIR;
-              if (/(?:to|on)\s+(?:my\s+)?desktop/i.test(prompt) || /(?:desktop)/i.test(detectedFilename)) {
-                baseDir = 'C:\\Users\\dsoph\\Desktop';
-              }
-              const destPath = joinLaptopPath(baseDir, detectedFilename);
-
-              if (isLaptopConnected(userId)) {
-                try {
-                  const saveRes = await writeLaptopFile(userId, destPath, codeContent);
-                  if (saveRes?.success) {
-                    stepsExecuted.push({
-                      name: 'write_laptop_file',
-                      args: { file_path: destPath, size_bytes: saveRes.sizeBytes || codeContent.length },
-                    });
-                    finalAnswer += `\n\n✅ *Physically written directly to your laptop:*\n📁 \`${destPath}\``;
-                  }
-                } catch (saveErr) {
-                  finalAnswer += `\n\n⚠️ *Could not write file to laptop:* ${saveErr.message}`;
-                }
+            if (!detectedFilename) {
+              if (/import turtle|import pygame|def main/i.test(codeContent)) {
+                detectedFilename = 'game.py';
+              } else if (/console\.log|import|const /i.test(codeContent)) {
+                detectedFilename = 'script.js';
               } else {
-                finalAnswer += `\n\n⚠️ *Notice:* Your laptop runner is offline, so this file could not be written to disk automatically. Ensure your background runner is active.`;
+                detectedFilename = 'script.py';
               }
             }
+
+            let baseDir = userDirectory || STORAGE_DIR;
+            if (/(?:to|on)\s+(?:my\s+)?desktop/i.test(prompt)) {
+              baseDir = 'C:\\Users\\dsoph\\Desktop';
+            }
+            const destPath = joinLaptopPath(baseDir, detectedFilename);
+
+            pendingFile = {
+              code: codeContent,
+              filename: detectedFilename,
+              suggestedPath: destPath,
+            };
           }
 
           return {
             finalAnswer,
             stepsExecuted,
             success: true,
+            pendingFile,
           };
         }
 
@@ -621,10 +605,27 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
       let finalAnswer = currentResponse.output_text || 'Completed maximum agent tool iterations.';
       finalAnswer = finalAnswer.replace(/(?:⚙️|🛠️)?\s*Executed Tools:[\s\S]*?(?=\n\n[#A-Z📁🎮]|$)/i, '').trim();
 
+      let pendingFile = null;
+      const codeBlockMatch = finalAnswer.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]+?)```/);
+      if (codeBlockMatch) {
+        const codeContent = codeBlockMatch[1].trim();
+        let detectedFilename = 'script.py';
+        if (/import turtle|import pygame|def main/i.test(codeContent)) {
+          detectedFilename = 'game.py';
+        }
+        const baseDir = userDirectory || STORAGE_DIR;
+        pendingFile = {
+          code: codeContent,
+          filename: detectedFilename,
+          suggestedPath: joinLaptopPath(baseDir, detectedFilename),
+        };
+      }
+
       return {
         finalAnswer,
         stepsExecuted,
         success: true,
+        pendingFile,
       };
     } catch (err) {
       console.warn(`[Gemini Agent] Model ${model} failed:`, sanitizeError(err));
