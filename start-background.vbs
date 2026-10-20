@@ -1,23 +1,8 @@
-' Telegram AI Remote Laptop Agent Runner - Silent Background Launcher
-' Pure Win32 WMI process creation - 100% windowless background daemon
-
-Set objWMIService = GetObject("winmgmts:\\.\root\cimv2")
-Set colProcesses = objWMIService.ExecQuery("Select ProcessId, CommandLine from Win32_Process Where Name = 'node.exe'")
-
-Dim isRunning
-isRunning = False
-
-For Each objProcess In colProcesses
-    If Not IsNull(objProcess.CommandLine) Then
-        If InStr(1, objProcess.CommandLine, "laptop-runner.js", 1) > 0 Then
-            isRunning = True
-            Exit For
-        End If
-    End If
-Next
-
-If Not isRunning Then
-    cmd = "node.exe ""D:\projects\telegram-ai-bot\laptop-runner.js"" --user 8199950189 --server https://telegram-ai-bot-znei.onrender.com"
-    cwd = "D:\projects\telegram-ai-bot"
-    objWMIService.Get("Win32_Process").Create cmd, cwd, Nothing, intProcessID
-End If
+' Telegram AI Remote Laptop Agent Runner - 100% Silent Background Launcher
+' Uses WScript.Shell with SW_HIDE (0) so zero CMD or terminal windows ever appear
+Set WshShell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+currentDir = "D:\projects\telegram-ai-bot"
+WshShell.CurrentDirectory = currentDir
+WshShell.Run Chr(34) & currentDir & "\run.bat" & Chr(34), 0, False
+Set WshShell = Nothing

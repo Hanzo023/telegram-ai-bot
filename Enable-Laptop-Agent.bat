@@ -12,10 +12,7 @@ set "STARTUP_VBS=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Telegra
 copy /y "D:\projects\telegram-ai-bot\start-background.vbs" "%STARTUP_VBS%" >nul
 echo [OK] Restored to Windows Startup folder.
 
-:: 2. Re-register HKCU Run key
-powershell -NoProfile -Command "Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'TelegramAILaptopRunner' -Value 'wscript.exe \"D:\projects\telegram-ai-bot\start-background.vbs\"'; Write-Host '[OK] Restored HKCU Run registry auto-start key.'"
-
-:: 3. Launch background process
+:: 2. Launch background process
 start "" wscript.exe "D:\projects\telegram-ai-bot\start-background.vbs"
 echo [OK] Started silent background runner!
 
