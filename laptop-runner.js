@@ -33,6 +33,7 @@ if (!/^wss?:\/\//i.test(normalizedUrl) && !/^https?:\/\//i.test(normalizedUrl)) 
 const SERVER_URL = normalizedUrl;
 
 const RUNNER_SECRET =
+  getCliArg('--secret') ||
   process.env.LAPTOP_RUNNER_SECRET ||
   (process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.slice(0, 20) : 'default_runner_secret');
 
@@ -102,8 +103,37 @@ function connect() {
   try {
     ws = new WebSocket(wsUrl);
 
-    ws.on('open', () => {
+    // Keepalive ping timer to prevent cloud reverse proxy (Render) from timing out after 100s idle
+    const pingInterval = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.ping();
+        } catch {}
+      }
+    }, 20000);
+
+    ws.on('open', async () => {
       console.log('✅ Connected to Cloud Agent Bridge! Waiting for commands from Telegram...');
+      // Broadcast live hardware specs immediately upon connection for instant /status caching
+      try {
+        const specs = await handleTask('status', {});
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'initial_status', ...specs }));
+          console.log('[Runner] 📊 Live system specs transmitted to server.');
+        }
+      } catch (specErr) {
+        console.warn('[Runner] Could not send initial specs:', specErr.message);
+      }
+    });
+
+    ws.on('ping', () => {
+      try {
+        ws.pong();
+      } catch {}
+    });
+
+    ws.on('pong', () => {
+      // Server pong received, connection is healthy
     });
 
     ws.on('message', async (data) => {
@@ -128,6 +158,7 @@ function connect() {
     });
 
     ws.on('close', (code, reason) => {
+      clearInterval(pingInterval);
       const reasonStr = reason ? reason.toString() : '';
       let diag = '';
       if (code === 4001) {
@@ -153,11 +184,11 @@ function connect() {
 function scheduleReconnect() {
   if (isExiting) return;
   if (reconnectTimer) return;
-  console.log('[Runner] Reconnecting in 5 seconds...');
+  console.log('[Runner] Reconnecting in 3 seconds...');
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
-  }, 5000);
+  }, 3000);
 }
 
 /**

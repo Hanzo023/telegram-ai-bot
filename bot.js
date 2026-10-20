@@ -47,6 +47,7 @@ import {
   isLaptopConnected,
   getConnectedLaptopsList,
   getAllConnectedLaptops,
+  getExpectedSecret,
 } from './laptop-bridge.js';
 
 const userAgentMode = new Map(); // userId -> boolean
@@ -88,7 +89,8 @@ function getPublicBotUrl(req) {
   return 'https://telegram-ai-bot-znei.onrender.com';
 }
 
-function generateStartAgentBat({ userId, serverUrl }) {
+function generateStartAgentBat({ userId, serverUrl, secret }) {
+  const runnerSecret = secret || getExpectedSecret();
   return `@echo off
 title Telegram AI Laptop Agent Runner
 cd /d "%~dp0"
@@ -109,18 +111,25 @@ if %errorlevel% neq 0 (
 
 set "SERVER_URL=${serverUrl}"
 set "USER_ID=${userId}"
+set "RUNNER_SECRET=${runnerSecret}"
 
 if not exist laptop-runner.js (
   echo [INFO] Downloading laptop-runner.js from cloud server...
-  powershell -Command "Invoke-WebRequest -Uri '%SERVER_URL%/download/laptop-runner.js' -OutFile 'laptop-runner.js'"
+  powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile('%SERVER_URL%/download/laptop-runner.js', 'laptop-runner.js')"
+) else (
+  findstr /i "getCliArg.*secret" laptop-runner.js >nul 2>nul
+  if %errorlevel% neq 0 (
+    echo [INFO] Updating laptop-runner.js to the latest version...
+    powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object Net.WebClient).DownloadFile('%SERVER_URL%/download/laptop-runner.js', 'laptop-runner.js')"
+  )
 )
 
 if not exist node_modules\\ws (
   echo [INFO] Installing required dependencies (ws, dotenv)...
-  call npm install ws dotenv
+  call npm install ws dotenv --no-audit --no-fund
 )
 
-node laptop-runner.js --user %USER_ID% --server %SERVER_URL% %*
+node laptop-runner.js --user %USER_ID% --server %SERVER_URL% --secret %RUNNER_SECRET% %*
 if %errorlevel% neq 0 (
   echo.
   echo [ERROR] Runner stopped with error code %errorlevel%.
@@ -151,7 +160,8 @@ const server = http.createServer((req, res) => {
     if (pathname === '/download/start-agent.bat' || pathname.startsWith('/download/start-agent')) {
       const uid = url.searchParams.get('userId') || allowedUserId || '';
       const serverUrl = getPublicBotUrl(req);
-      const batContent = generateStartAgentBat({ userId: uid, serverUrl });
+      const secret = getExpectedSecret();
+      const batContent = generateStartAgentBat({ userId: uid, serverUrl, secret });
 
       res.writeHead(200, {
         'Content-Type': 'application/x-bat',
@@ -166,11 +176,13 @@ const server = http.createServer((req, res) => {
     if (setupPs1Match || pathname === '/setup.ps1') {
       const uid = (setupPs1Match && setupPs1Match[1]) || url.searchParams.get('userId') || allowedUserId || '';
       const serverUrl = getPublicBotUrl(req);
+      const secret = getExpectedSecret();
       const ps1Content =
 `# Telegram AI Laptop Agent Setup
 $ErrorActionPreference = 'Stop'
 $targetUserId = "${uid}"
 $serverUrl = "${serverUrl}"
+$secret = "${secret}"
 $agentDir = Join-Path $HOME "telegram-ai-agent"
 
 Write-Host "========================================================" -ForegroundColor Cyan
@@ -190,10 +202,11 @@ if (-not (Test-Path $agentDir)) {
 Set-Location $agentDir
 
 Write-Host "[1/3] Downloading latest laptop-runner.js..." -ForegroundColor Gray
-Invoke-WebRequest -Uri "$serverUrl/download/laptop-runner.js" -OutFile (Join-Path $agentDir "laptop-runner.js")
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+(New-Object Net.WebClient).DownloadFile("$serverUrl/download/laptop-runner.js", (Join-Path $agentDir "laptop-runner.js"))
 
 Write-Host "[2/3] Downloading start-agent.bat..." -ForegroundColor Gray
-Invoke-WebRequest -Uri "$serverUrl/download/start-agent.bat?userId=$targetUserId" -OutFile (Join-Path $agentDir "start-agent.bat")
+(New-Object Net.WebClient).DownloadFile("$serverUrl/download/start-agent.bat?userId=$targetUserId", (Join-Path $agentDir "start-agent.bat"))
 
 if (-not (Test-Path (Join-Path $agentDir "node_modules/ws"))) {
     Write-Host "[3/3] Installing dependencies (ws, dotenv)..." -ForegroundColor Gray
@@ -201,7 +214,7 @@ if (-not (Test-Path (Join-Path $agentDir "node_modules/ws"))) {
 }
 
 Write-Host "\`n✅ Setup complete! Launching laptop agent..." -ForegroundColor Green
-node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $serverUrl
+node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $serverUrl --secret $secret
 `;
 
       res.writeHead(200, {
@@ -353,6 +366,11 @@ async function persistUserSettings() {
   } catch (err) {
     console.warn('[User Settings] Failed to persist user_settings.json:', sanitizeError(err));
   }
+
+  // Also sync to Telegram pinned backup so settings survive container resets
+  try {
+    await persistCloudVault();
+  } catch {}
 }
 
 async function initUserSettings() {
@@ -374,6 +392,11 @@ async function initUserSettings() {
     }
   } catch (err) {
     console.warn('[User Settings] Failed to load user_settings.json:', sanitizeError(err));
+  }
+
+  // If local settings were empty (e.g. fresh Render container restart), restore from Telegram backup
+  if (userLocalStorageDir.size === 0 && allowedUserId) {
+    await restoreVaultFromTelegram();
   }
 }
 
@@ -1224,7 +1247,7 @@ async function sendLaptopRunnerSetup(ctx, targetUserId) {
 
   // Attach the personalized start-agent.bat file directly to the chat
   try {
-    const batContent = generateStartAgentBat({ userId: uid, serverUrl });
+    const batContent = generateStartAgentBat({ userId: uid, serverUrl, secret: getExpectedSecret() });
     await ctx.replyWithDocument(new InputFile(Buffer.from(batContent, 'utf-8'), 'start-agent.bat'), {
       caption: `💻 *start-agent.bat (Pre-configured for User ${uid})*\nSave to any folder on your laptop and double-click to start!`,
       parse_mode: 'Markdown',
@@ -1248,7 +1271,7 @@ bot.callbackQuery(/^dl_bat_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery({ text: 'Sending pre-configured start-agent.bat...' }).catch(() => {});
   const targetUid = Number(ctx.match[1]);
   const serverUrl = getPublicBotUrl();
-  const batContent = generateStartAgentBat({ userId: targetUid, serverUrl });
+  const batContent = generateStartAgentBat({ userId: targetUid, serverUrl, secret: getExpectedSecret() });
   await ctx.replyWithDocument(new InputFile(Buffer.from(batContent, 'utf-8'), 'start-agent.bat'), {
     caption: `💻 *start-agent.bat (User ${targetUid})*\nSave to your laptop and double-click to run!`,
     parse_mode: 'Markdown',
@@ -1923,28 +1946,38 @@ bot.command('status', async (ctx) => {
   if (hasLaptop) {
     try {
       const laptop = await getLaptopStatus(userId);
-      if (laptop && laptop.success) {
+      if (laptop && laptop.success && laptop.memory) {
         const memTotalGb = (laptop.memory.totalMb / 1024).toFixed(1);
         const memUsedGb = (laptop.memory.usedMb / 1024).toFixed(1);
         const memFreeGb = (laptop.memory.freeMb / 1024).toFixed(1);
 
-        const osLabel = laptop.osVersion ? `${laptop.platform} - ${laptop.osVersion}` : `${laptop.platform} (${laptop.arch})`;
+        const osLabel = laptop.osVersion ? `${laptop.platform} - ${laptop.osVersion}` : `${laptop.platform} (${laptop.arch || 'x64'})`;
         const userLabel = laptop.username ? ` | User: \`${laptop.username}\`` : '';
 
         laptopSpecsText =
           `💻 *Your Connected Laptop Specs (Live)*\n` +
-          `├─ Device: *${laptop.deviceName}* (\`${laptop.hostname}\`)${userLabel}\n` +
+          `├─ Device: *${laptop.deviceName || 'Laptop'}* (\`${laptop.hostname || 'Local'}\`)${userLabel}\n` +
           `├─ OS: \`${osLabel}\`\n` +
-          `├─ CPU: ${laptop.cpuModel || 'CPU'} (${laptop.cpuCores} cores)\n` +
+          `├─ CPU: ${laptop.cpuModel || 'CPU'} (${laptop.cpuCores || 1} cores)\n` +
           `├─ RAM: ${memUsedGb} GB / ${memTotalGb} GB used (${laptop.memory.usedPercent}%)\n` +
           `├─ Free RAM: ${memFreeGb} GB\n` +
           `├─ Laptop Uptime: ${laptop.uptimeHours} hrs\n` +
           `└─ Status: 🟢 Online & Ready for remote scripts\n\n`;
+      } else {
+        const devList = getConnectedLaptopsList(userId);
+        const firstDev = devList[0] || {};
+        laptopSpecsText =
+          `💻 *Your Connected Laptop*\n` +
+          `├─ Device: *${firstDev.deviceName || 'Laptop'}* (\`${firstDev.hostname || 'Local'}\`)\n` +
+          `└─ Status: 🟢 Online & Connected\n\n`;
       }
     } catch (laptopErr) {
       console.warn(`[Status] Error querying laptop for user ${userId}:`, laptopErr.message);
+      const devList = getConnectedLaptopsList(userId);
+      const firstDev = devList[0] || {};
       laptopSpecsText =
         `💻 *Your Connected Laptop*\n` +
+        `├─ Device: *${firstDev.deviceName || 'Laptop'}* (\`${firstDev.hostname || 'Local'}\`)\n` +
         `└─ Status: 🟡 Connected (Runner responding slowly)\n\n`;
     }
   } else {
@@ -2281,16 +2314,34 @@ async function persistCloudVault() {
         .join('\n');
       const moreCount = cloudVault.length > 15 ? `\n...and ${cloudVault.length - 15} more` : '';
 
-      const compactData = JSON.stringify(
-        cloudVault.map((f) => ({
-          n: f.name,
-          f: f.file_id,
-          e: f.ext,
-          s: f.size,
-          d: f.date,
-          h: f.hash ? f.hash.slice(0, 16) : undefined,
-        }))
-      );
+      const vaultFiles = cloudVault.map((f) => ({
+        n: f.name,
+        f: f.file_id,
+        e: f.ext,
+        s: f.size,
+        d: f.date,
+        h: f.hash ? f.hash.slice(0, 16) : undefined,
+      }));
+
+      const storageDirs = {};
+      for (const [uid, dir] of userLocalStorageDir.entries()) {
+        storageDirs[uid] = dir;
+      }
+      const storageModes = {};
+      for (const [uid, mode] of userStorageMode.entries()) {
+        storageModes[uid] = mode;
+      }
+
+      const payload = {
+        v: 2,
+        files: vaultFiles,
+        settings: {
+          dirs: storageDirs,
+          modes: storageModes,
+        },
+      };
+
+      const compactData = JSON.stringify(payload);
 
       const msgText =
         `☁️ Telegram Cloud Vault Index\n` +
@@ -2343,9 +2394,33 @@ async function restoreVaultFromTelegram() {
     if (pinned.text && pinned.text.includes('VAULT_DATA:')) {
       const idx = pinned.text.indexOf('VAULT_DATA:');
       const jsonStr = pinned.text.slice(idx + 'VAULT_DATA:'.length).trim();
-      const compactList = JSON.parse(jsonStr);
-      if (Array.isArray(compactList)) {
-        cloudVault = compactList.map((item, i) => ({
+      const parsedData = JSON.parse(jsonStr);
+      let fileList = [];
+
+      if (Array.isArray(parsedData)) {
+        // Format v1: array of files
+        fileList = parsedData;
+      } else if (parsedData && typeof parsedData === 'object') {
+        // Format v2: { v: 2, files: [...], settings: { dirs: {...}, modes: {...} } }
+        if (Array.isArray(parsedData.files)) {
+          fileList = parsedData.files;
+        }
+        if (parsedData.settings && typeof parsedData.settings === 'object') {
+          if (parsedData.settings.dirs && typeof parsedData.settings.dirs === 'object') {
+            for (const [uid, dir] of Object.entries(parsedData.settings.dirs)) {
+              userLocalStorageDir.set(Number(uid), dir);
+            }
+          }
+          if (parsedData.settings.modes && typeof parsedData.settings.modes === 'object') {
+            for (const [uid, mode] of Object.entries(parsedData.settings.modes)) {
+              userStorageMode.set(Number(uid), mode);
+            }
+          }
+        }
+      }
+
+      if (fileList.length > 0 || parsedData?.settings) {
+        cloudVault = fileList.map((item, i) => ({
           id: String(item.d || Date.now() - i),
           name: item.n || item.name,
           file_id: item.f || item.file_id,
@@ -2356,7 +2431,7 @@ async function restoreVaultFromTelegram() {
         }));
         vaultPinnedMessageId = pinned.message_id;
         await fsp.writeFile(VAULT_FILE, JSON.stringify(cloudVault, null, 2), 'utf-8');
-        console.log(`Restored ${cloudVault.length} files from Telegram pinned message into Cloud Vault.`);
+        console.log(`Restored ${cloudVault.length} files and settings for ${userLocalStorageDir.size} user directories from Telegram pinned message.`);
         return true;
       }
     }

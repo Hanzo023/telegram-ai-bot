@@ -26,7 +26,7 @@ export function setBotApi(botApi) {
 /**
  * Get configured runner secret
  */
-function getExpectedSecret() {
+export function getExpectedSecret() {
   return (
     process.env.LAPTOP_RUNNER_SECRET ||
     (process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.slice(0, 20) : 'default_runner_secret')
@@ -181,7 +181,30 @@ export async function listLaptopDirectory(userId, dirPath) {
  * Get system status (CPU, memory, uptime, battery) from the user's active laptop
  */
 export async function getLaptopStatus(userId) {
-  return await sendLaptopTask(userId, 'status', {}, 15000);
+  const userDevices = connectedLaptops.get(Number(userId));
+  let activeDevice = null;
+  if (userDevices) {
+    for (const dev of userDevices.values()) {
+      if (dev.ws && dev.ws.readyState === WebSocket.OPEN) {
+        activeDevice = dev;
+        break;
+      }
+    }
+  }
+
+  try {
+    const live = await sendLaptopTask(userId, 'status', {}, 5000);
+    if (activeDevice && live && live.success) {
+      activeDevice.lastStatus = live;
+    }
+    return live;
+  } catch (err) {
+    // If live query timed out or errored, immediately fall back to cached specs from connection
+    if (activeDevice && activeDevice.lastStatus) {
+      return activeDevice.lastStatus;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -231,6 +254,21 @@ export function setupLaptopBridge(server, allowedUserIds) {
       }
       const userDevices = connectedLaptops.get(userId);
 
+      // Clean up and close any stale or previous sockets for this user
+      let previousStatus = null;
+      for (const [prevId, prevDev] of userDevices.entries()) {
+        if (prevDev.lastStatus) {
+          previousStatus = prevDev.lastStatus;
+        }
+        try {
+          if (prevDev.ws && prevDev.ws !== ws && prevDev.ws.readyState === WebSocket.OPEN) {
+            console.log(`[Laptop Bridge] Closing prior connection for User ${userId}`);
+            prevDev.ws.close(1000, 'Replaced by new connection');
+          }
+        } catch {}
+      }
+      userDevices.clear();
+
       const deviceRecord = {
         ws,
         deviceName,
@@ -240,6 +278,7 @@ export function setupLaptopBridge(server, allowedUserIds) {
         osVersion,
         connectedAt: new Date().toISOString(),
         lastPing: Date.now(),
+        lastStatus: previousStatus,
       };
 
       userDevices.set(deviceId, deviceRecord);
@@ -291,6 +330,13 @@ export function setupLaptopBridge(server, allowedUserIds) {
         try {
           const msg = JSON.parse(data.toString());
 
+          // Handle initial hardware specs broadcast from runner
+          if (msg.type === 'initial_status') {
+            deviceRecord.lastStatus = msg;
+            console.log(`[Laptop Bridge] 📊 Cached live system specs from "${deviceName}"`);
+            return;
+          }
+
           // Handle response to pending task
           if (msg.id && pendingRequests.has(msg.id)) {
             const { resolve, reject, timer } = pendingRequests.get(msg.id);
@@ -310,8 +356,13 @@ export function setupLaptopBridge(server, allowedUserIds) {
 
       ws.on('close', () => {
         clearInterval(pingInterval);
-        userDevices.delete(deviceId);
-        console.log(`[Laptop Bridge] 💻 Device disconnected: "${deviceName}" for User ${userId}`);
+        const currentDev = userDevices.get(deviceId);
+        if (currentDev && currentDev.ws === ws) {
+          userDevices.delete(deviceId);
+          console.log(`[Laptop Bridge] 💻 Device disconnected: "${deviceName}" for User ${userId}`);
+        } else {
+          console.log(`[Laptop Bridge] 🔄 Stale socket closed for "${deviceName}" (newer socket active).`);
+        }
       });
 
       ws.on('error', (err) => {
