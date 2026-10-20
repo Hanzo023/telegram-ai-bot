@@ -1,220 +1,459 @@
-# 🤖 Telegram AI Agent & Remote Laptop Bridge
+# 🤖 Telegram AI Bot & Autonomous Remote Agent Guide
 
-> An end-to-end autonomous AI assistant on Telegram powered by **Claude 3.5 Sonnet** and **Google Gemini 2.5 Flash**, featuring bidirectional voice calls, document intelligence, live web research, and a secure **outbound reverse-tunnel remote agent** to control your local computer from anywhere in the world.
-
----
-
-## 🌟 The Evolution: From Simple Chatbot to Autonomous Agent
-
-Over a week of development, this project evolved from a basic text chatbot into a full-fledged autonomous computing companion:
-
-```
-[Day 1: Simple Bot] ────────► [Day 3: Multimodal & Voice] ────────► [Day 5: Cloud Vault & Research] ────────► [Day 7: Full Autonomous Remote Agent]
-• Claude 3.5 Sonnet            • Voice note transcription           • PDF & document parsing           • Outbound WebSocket reverse tunnel
-• Multi-turn chat memory       • Voice audio responses              • Telegram Cloud Vault             • Remote terminal command execution
-• User whitelist security      • Real-time duplex voice calls       • Deep Research & Web Search       • Pending code review & inline save UI
-                                                                                                       • Background daemon (PM2 & silent VBS)
-```
-
-### 1. 🧠 Intelligent Conversational Core
-* Powered by **Anthropic Claude 3.5 Sonnet** with thoughtful, nuanced, human-like reasoning.
-* **Persistent Context Management**: Multi-turn conversation sessions persisted to disk and automatically synchronized across cloud container resets.
-* **Strict Whitelist Security**: Restricts access exclusively to authorized Telegram User IDs (`ALLOWED_USER_ID`), blocking unauthorized users.
-
-### 2. 🎙️ Multimodal & Real-Time Voice
-* **Voice Note Transcription**: Send any Telegram voice message or audio file — transcribed with Google Gemini.
-* **Voice Audio Replies**: Toggle `/live` mode to receive voice audio responses directly in chat.
-* **Live Duplex Calls (`/call`)**: Integrated Telegram WebApp with low-latency bidirectional voice communication powered by the Gemini Live API.
-* **Voice Personas (`/voice`)**: Choose between expressive voices (Aoede, Charon, Fenrir, Kore, Puck).
-
-### 3. ☁️ Telegram Cloud Vault & Document Intelligence
-* **Document Parsing**: Upload PDFs, text files, Python scripts, JSON, Markdown, or spreadsheets. The bot extracts text, maintains active document context, and generates interactive quizzes (`/quiz`).
-* **Telegram Cloud Vault (`/storage`)**: Free, permanent cloud storage backed by Telegram's cloud storage.
-* **Ephemeral Cloud Resilience**: Automatically creates and updates a pinned vault index (`VAULT_DATA`) so file records and user settings survive ephemeral cloud resets (like Render dyno restarts).
-* **Storage Modes**: `/local` (Dual sync), `/cloud` (Cloud only), and `/nosave` (Laptop only).
-
-### 4. 🔬 Deep Research, Search & Creation
-* **Live Web Grounding (`/search`)**: Real-time Google search grounding with clickable citation links.
-* **Deep Research (`/deep_research`)**: Autonomous multi-step research reports synthesized across multiple search queries.
-* **YouTube Discovery (`/youtube`)**: Search and discover relevant YouTube videos and channels.
-* **AI Image Generation (`/image`)**: High-resolution image synthesis using Gemini.
-
-### 5. 💻 Remote Laptop Agent & Fleet Bridge (`/agent`, `/devices`, `/status`)
-* **Outbound Reverse Tunnel**: Connects your laptop to the cloud bot via a persistent outbound WebSocket (`wss://`). **Zero open ports, zero port forwarding, and fully secure on public Wi-Fi.**
-* **Terminal Execution**: Run PowerShell or Bash scripts on your laptop right from Telegram (`/agent`).
-* **Interactive Code Review & Pending Saves**: When code is generated, the bot holds it in state and prompts you with inline buttons (`[📁 Target Folder]`, `[🖥️ Desktop]`, `[☁️ Cloud Vault]`, `[✏️ Custom Path]`, `[❌ Discard]`) rather than blindly writing to disk.
-* **Zero Terminal Footprint**: Run as a silent background daemon with PM2 or VBScript launcher. No CMD windows required.
-* **Multi-User Fleet Monitoring**: Supports teams and multi-device setups — `/devices` and `/status` track each authorized user's laptop name, OS, and online state.
-* **Permanent 4-Layer Memory**: Remembers your configured storage directory (`/directory`) across laptop disconnects, reboots, and cloud container redeployments.
+> A comprehensive, battle-tested engineering blueprint for building a private, production-ready AI companion on Telegram. This guide details everything developed inside `D:\projects\telegram-ai-bot`: from the initial webhook chatbot to multimodal voice comprehension, hybrid Claude + Gemini model orchestration, token optimization, Telegram Cloud Vault document sorting, and an outbound reverse-tunnel remote agent that monitors your laptop hardware and executes terminal commands securely from anywhere in the world.
 
 ---
 
-## 🏗️ Architecture
+## 📑 Table of Contents
+
+- [Architectural Overview](#-architectural-overview)
+- [Part 1: Setting Up the Telegram Bot Foundation](#-part-1-setting-up-the-telegram-bot-foundation)
+  - [1.1 Creating the Bot with BotFather](#11-creating-the-bot-with-botfather)
+  - [1.2 Telegram User ID Discovery & Security Whitelisting](#12-telegram-user-id-discovery--security-whitelisting)
+  - [1.3 Project Initialization & Framework Selection](#13-project-initialization--framework-selection)
+  - [1.4 Webhook vs Long-Polling on Cloud Providers](#14-webhook-vs-long-polling-on-cloud-providers)
+  - [1.5 Unified HTTP Server & Health Checks](#15-unified-http-server--health-checks)
+- [Part 2: Command Architecture, Voice Understanding & Spoken Replies](#-part-2-command-architecture-voice-understanding--spoken-replies)
+  - [2.1 Scalable Command Routing & Autocomplete Menus](#21-scalable-command-routing--autocomplete-menus)
+  - [2.2 Voice Note Capture & Audio Processing](#22-voice-note-capture--audio-processing)
+  - [2.3 Multimodal Voice-to-Text Transcription via Gemini](#23-multimodal-voice-to-text-transcription-via-gemini)
+  - [2.4 Natural Spoken Audio Responses (`/live` Mode)](#24-natural-spoken-audio-responses-live-mode)
+  - [2.5 Real-Time Bidirectional Duplex Voice Calls (`/call`)](#25-real-time-bidirectional-duplex-voice-calls-call)
+- [Part 3: The Hybrid Claude + Gemini Engine, Token Management & File Organization](#-part-3-the-hybrid-claude--gemini-engine-token-management--file-organization)
+  - [3.1 Why a Dual-Brain Engine? (Claude 3.5 + Gemini 2.5)](#31-why-a-dual-brain-engine-claude-35--gemini-25)
+  - [3.2 Token Budgeting & Sliding Context Window](#32-token-budgeting--sliding-context-window)
+  - [3.3 Document Parsing Engine (PDF, Text, Code)](#33-document-parsing-engine-pdf-text-code)
+  - [3.4 A-Z Categorization & Interactive Library (`/library`)](#34-a-z-categorization--interactive-library-library)
+  - [3.5 Telegram Cloud Vault with Pinned Index Recovery](#35-telegram-cloud-vault-with-pinned-index-recovery)
+- [Part 4: Remote Hardware Monitoring & Live Multi-User Agent Fleet](#-part-4-remote-hardware-monitoring--live-multi-user-agent-fleet)
+  - [4.1 The Outbound-Only WebSocket Reverse Tunnel](#41-the-outbound-only-websocket-reverse-tunnel)
+  - [4.2 Comprehensive Laptop Hardware & Spec Inspector (`/spec`)](#42-comprehensive-laptop-hardware--spec-inspector-spec)
+  - [4.3 Multi-User Fleet Monitoring (`/devices`, `/status`)](#43-multi-user-fleet-monitoring-devices-status)
+  - [4.4 Installing and Daemonizing the Local Runner (PM2 vs Silent VBScript)](#44-installing-and-daemonizing-the-local-runner-pm2-vs-silent-vbscript)
+- [Part 5: Agent Optimization, Interactive Code Review & Fine-Tuning](#-part-5-agent-optimization-interactive-code-review--fine-tuning)
+  - [5.1 Autonomous Tool-Calling Agent (`/agent`)](#51-autonomous-tool-calling-agent-agent)
+  - [5.2 The "Hold-in-Memory" Safety Pattern for Generated Code](#52-the-hold-in-memory-safety-pattern-for-generated-code)
+  - [5.3 Permanent 4-Layer Directory Persistence](#53-permanent-4-layer-directory-persistence)
+  - [5.4 One-Click Desktop Controls & Remote Kill Switch](#54-one-click-desktop-controls--remote-kill-switch)
+  - [5.5 Command Autocomplete Reference Table](#55-command-autocomplete-reference-table)
+
+---
+
+## 🏛️ Architectural Overview
 
 ```
-                  ┌────────────────────────────────────────────────────────┐
-                  │                 Telegram Client (Phone / PC)            │
-                  └───────────────────────────┬────────────────────────────┘
-                                              │ Telegram Bot API (HTTPS)
-                                              ▼
-                  ┌────────────────────────────────────────────────────────┐
-                  │          Cloud Bot Engine (Render / Docker Host)       │
-                  │  • grammY Telegram Framework                           │
-                  │  • Claude 3.5 Sonnet / Gemini 2.5 API Integrations     │
-                  │  • WebSocket Tunnel Server (/ws/laptop-agent)          │
-                  │  • Pinned Cloud Vault Sync & Memory Cache              │
-                  └───────────────────────────┬────────────────────────────┘
-                                              │
-                      Outbound Secure WSS Tunnel (Reverse Connection)
-                      No inbound open ports required on user machine
-                                              │
-                                              ▼
-                  ┌────────────────────────────────────────────────────────┐
-                  │           Local Laptop Agent Runner (Your PC)          │
-                  │  • Background Daemon: PM2 or WMI Silent VBScript       │
-                  │  • System Hardware Monitoring (CPU, RAM, Uptime)       │
-                  │  • PowerShell Command Execution Engine                 │
-                  │  • Direct File Read / Write / Rename / Delete API      │
-                  └────────────────────────────────────────────────────────┘
+                      ┌──────────────────────────────────────────────┐
+                      │          Telegram Client (Mobile / PC)       │
+                      └──────────────────────┬───────────────────────┘
+                                             │ HTTPS (Bot API / Webhook)
+                                             ▼
+                      ┌──────────────────────────────────────────────┐
+                      │         Render Cloud Host (bot.js)           │
+                      │  • grammY Dispatcher & Command Middleware    │
+                      │  • Token Budgeter & Context Sliding Window   │
+                      │  • Claude 3.5 Sonnet (Reasoning & Code)      │
+                      │  • Gemini 2.5 Flash (Voice, Search, Tools)   │
+                      │  • Pinned Cloud Vault Sync Index             │
+                      │  • WebSocket Server (/ws/laptop-agent)       │
+                      └──────────────────────┬───────────────────────┘
+                                             │
+                       Persistent Outbound WSS Tunnel (Reverse Sync)
+                       (0 open firewall ports; secure on any Wi-Fi)
+                                             │
+                                             ▼
+                      ┌──────────────────────────────────────────────┐
+                      │      Local Laptop Agent (laptop-runner.js)   │
+                      │  • Detached Process: PM2 or Silent VBScript  │
+                      │  • Hardware Spec Collector (CPU, GPU, RAM)   │
+                      │  • Safe Directory Sandbox & File Operations  │
+                      │  • PowerShell / Bash Remote Execution Engine │
+                      └──────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🚀 Quick Start Guide
+## 🚀 Part 1: Setting Up the Telegram Bot Foundation
 
-### Step 1: Clone the Repository & Install Dependencies
+### 1.1 Creating the Bot with BotFather
+1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
+2. Start the chat and issue the command:
+   ```text
+   /newbot
+   ```
+3. Follow the interactive prompts to assign:
+   * **Display Name**: E.g., `My Autonomous AI Assistant`
+   * **Username**: Must end with `bot` (e.g., `my_private_ai_bot`)
+4. BotFather returns an HTTP API token formatted like:
+   `8758364117:AAHIOxa7vOmFgNCbLKEXRUyI8IJ_kL8XqTk`
+   *Save this token securely — it is your `TELEGRAM_BOT_TOKEN`.*
 
+### 1.2 Telegram User ID Discovery & Security Whitelisting
+Because your bot will possess remote execution and personal file access capabilities, **never leave it open to the public**. Implement a strict ID whitelist from day one:
+1. Message [@userinfobot](https://t.me/userinfobot) on Telegram.
+2. Note your numerical ID (e.g., `8199950189`).
+3. In your configuration, support comma-separated multi-user authorization:
+   ```javascript
+   const rawAllowed = process.env.ALLOWED_USER_ID || '';
+   const allowedUserIds = new Set(
+     (rawAllowed.match(/-?\d+/g) || []).map((id) => parseInt(id, 10))
+   );
+
+   bot.use(async (ctx, next) => {
+     const senderId = ctx.from?.id;
+     if (!senderId || !allowedUserIds.has(senderId)) {
+       console.warn(`[Security] Blocked unauthorized access attempt from ID: ${senderId}`);
+       return; // Silently drop or reply with an unauthorized message
+     }
+     await next();
+   });
+   ```
+
+### 1.3 Project Initialization & Framework Selection
+We chose **grammY** over legacy frameworks (`node-telegram-bot-api` or `telegraf`) for its native TypeScript support, modern async middleware pipeline, built-in concurrency control, and zero-overhead WebApp support.
+
+Initialize the project with ES Modules:
 ```bash
-git clone https://github.com/Hanzo023/telegram-ai-bot.git
-cd telegram-ai-bot
-npm install
+npm init -y
+npm install grammy @anthropic-ai/sdk @google/genai dotenv ws pdf-parse
 ```
 
-### Step 2: Configure Environment Variables
-
-Copy the example environment configuration:
-```bash
-cp .env.example .env
+Ensure `"type": "module"` is set in `package.json`:
+```json
+{
+  "name": "telegram-ai-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "laptop": "node laptop-runner.js"
+  }
+}
 ```
 
-Edit `.env` with your preferred text editor:
-```env
-# Telegram Bot Token from @BotFather
-TELEGRAM_BOT_TOKEN="1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+### 1.4 Webhook vs Long-Polling on Cloud Providers
+* **Local Development**: Long-polling (`bot.start()`) is ideal because you do not need a domain name or SSL certificate.
+* **Production on Cloud (Render, Fly.io, Railway)**: Cloud hosts require binding to an HTTP port (`$PORT`) to keep containers alive and pass health checks. Use grammY's built-in `webhookCallback`:
 
-# AI Model Credentials
-ANTHROPIC_API_KEY="sk-ant-api03-..."
-ANTHROPIC_BASE_URL="https://api.anthropic.com"
-ANTHROPIC_MODEL="claude-3-5-sonnet-20241022"
-GEMINI_API_KEY="AIzaSy..."
+```javascript
+import { Bot, webhookCallback } from 'grammy';
+import http from 'http';
 
-# Authorization (Your Telegram numeric user ID, find via @userinfobot)
-# Supports comma-separated IDs for multiple users (e.g. 11111111,22222222)
-ALLOWED_USER_ID="8199950189"
+const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
+const server = http.createServer();
 
-# Local Storage Directory
-STORAGE_DIR="D:\\drive-download-20260715T073323Z-1-001"
+const isProduction = !!process.env.RENDER_EXTERNAL_URL;
 
-# Remote Agent Bridge Configuration
-SERVER_URL="https://your-bot-app.onrender.com"
-LAPTOP_RUNNER_SECRET="choose_a_strong_secret_phrase"
-DEVICE_NAME="My-Main-Laptop"
+if (isProduction) {
+  const secretToken = process.env.TELEGRAM_BOT_TOKEN.slice(0, 20);
+  server.on('request', (req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+    }
+    if (req.url === '/webhook') {
+      return webhookCallback(bot, 'http', { secretToken })(req, res);
+    }
+    res.writeHead(404).end();
+  });
+
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, async () => {
+    const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
+    await bot.api.setWebhook(webhookUrl, { secret_token: secretToken });
+    console.log(`[Production] Webhook mounted at ${webhookUrl}`);
+  });
+} else {
+  bot.start();
+  console.log('[Development] Long-polling active.');
+}
 ```
+
+### 1.5 Unified HTTP Server & Health Checks
+Mounting a `/health` endpoint serves two crucial purposes:
+1. **Cloud Keepalive**: Free/Standard cloud tiers (such as Render) require continuous HTTP pinging or activity to prevent cold-sleeps.
+2. **Reverse Proxy Tunnel Endpoint**: The same HTTP server is upgraded to handle WebSocket connections (`/ws/laptop-agent`), unifying webhooks, health probes, and remote agent tunnels under a single port.
 
 ---
 
-### Step 3: Run or Deploy the Cloud Bot
+## 🎙️ Part 2: Command Architecture, Voice Understanding & Spoken Replies
 
-#### Option A: Local / Development
-```bash
-npm start
+### 2.1 Scalable Command Routing & Autocomplete Menus
+Telegram bots can automatically register their autocomplete menu with the Telegram API so that when users type `/`, a rich cheat-sheet with descriptions appears:
+
+```javascript
+const botCommands = [
+  { command: 'agent', description: '🤖 Autonomous task with terminal, files, and research' },
+  { command: 'spec', description: '💻 View detailed laptop hardware specs (CPU, GPU, RAM, Disks)' },
+  { command: 'status', description: '📊 System health, hardware status, and cloud bot uptime' },
+  { command: 'live', description: '🎙️ Toggle voice reply mode (spoken audio responses)' },
+  { command: 'call', description: '📞 Live duplex real-time voice call WebApp' },
+  { command: 'storage', description: '☁️ Cloud Vault & local storage hub' },
+  { command: 'library', description: '📁 Browse saved files categorized A-Z' },
+  { command: 'directory', description: '📁 Set or view your local project folder path' },
+  { command: 'clear', description: '🧹 Clear recent chat history' }
+];
+
+await bot.api.setMyCommands(botCommands);
+await bot.api.setMyCommands(botCommands, { scope: { type: 'all_private_chats' } });
 ```
 
-#### Option B: Deploy to Render (Cloud Host)
-1. Push your repository to GitHub.
-2. In [Render Dashboard](https://dashboard.render.com/), create a new **Web Service**.
-3. Connect your repository.
-4. Set:
-   * **Runtime**: `Node`
-   * **Build Command**: `npm install`
-   * **Start Command**: `npm start`
-5. In **Environment Variables**, add the variables from `.env` (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `ALLOWED_USER_ID`, `LAPTOP_RUNNER_SECRET`).
-6. Deploy! Render will provide your public URL (e.g., `https://telegram-ai-bot-znei.onrender.com`).
+### 2.2 Voice Note Capture & Audio Processing
+When a user sends a voice message, Telegram delivers a `.oga` (Ogg Opus) audio file. The bot downloads the audio stream directly into memory:
+
+```javascript
+bot.on('message:voice', async (ctx) => {
+  await ctx.replyWithChatAction('typing');
+  const file = await ctx.getFile();
+  const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+  
+  const response = await fetch(fileUrl);
+  const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+  // Pass buffer to transcription
+  const transcription = await transcribeAudioWithGemini(audioBuffer, 'audio/ogg');
+  
+  // Forward transcription to conversational brain
+  await handleUserMessage(ctx, transcription);
+});
+```
+
+### 2.3 Multimodal Voice-to-Text Transcription via Gemini
+We use **Google Gemini 2.5 Flash** for transcription due to its sub-second latency and zero external dependency footprint (avoiding heavyweight local Python Whisper builds):
+
+```javascript
+import { GoogleGenAI } from '@google/genai';
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+async function transcribeAudioWithGemini(buffer, mimeType = 'audio/ogg') {
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [
+      {
+        parts: [
+          {
+            inlineData: {
+              data: buffer.toString('base64'),
+              mimeType: mimeType,
+            },
+          },
+          {
+            text: 'Transcribe this voice note verbatim. Output ONLY the raw transcript without notes or commentary.',
+          },
+        ],
+      },
+    ],
+  });
+  return response.text.trim();
+}
+```
+
+### 2.4 Natural Spoken Audio Responses (`/live` Mode)
+Users can toggle `/live` to receive spoken replies rather than text blocks. When `/live` is active:
+1. Claude or Gemini generates the conversational reply text.
+2. The bot synthesizes speech using the Gemini Text-to-Speech API.
+3. The resulting audio buffer is transmitted back to Telegram via `ctx.replyWithVoice`:
+
+```javascript
+if (userLiveMode.get(ctx.from.id)) {
+  const speechBuffer = await synthesizeSpeechWithGemini(replyText, userVoicePersona.get(ctx.from.id) || 'Kore');
+  await ctx.replyWithVoice(new InputFile(speechBuffer, 'response.ogg'));
+} else {
+  await ctx.reply(replyText, { parse_mode: 'Markdown' });
+}
+```
+
+### 2.5 Real-Time Bidirectional Duplex Voice Calls (`/call`)
+For conversational hands-free interaction, the bot includes a Telegram WebApp that establishes a bidirectional WebSocket stream with Gemini Live:
+* **Audio In**: Web Audio API captures microphone input as 16kHz PCM chunks and streams them over the WebSocket.
+* **Audio Out**: Incoming audio frames from Gemini Live are queued and played back seamlessly in the browser.
+* **Voice Personas (`/voice`)**: Allows users to select expressive voices (e.g., *Aoede, Charon, Fenrir, Kore, Puck*).
 
 ---
 
-### Step 4: Run the Local Laptop Agent (Background)
+## 🧠 Part 3: The Hybrid Claude + Gemini Engine, Token Management & File Organization
 
-Choose your preferred background runner mode on your laptop:
+### 3.1 Why a Dual-Brain Engine? (Claude 3.5 + Gemini 2.5)
+Rather than relying on a single AI provider, our architecture pairs two industry-leading models:
 
-#### Method 1: PM2 Process Manager (Recommended)
-PM2 provides auto-restart on crashes and background daemonization:
+| Provider & Model | Primary Responsibilities | Why Selected |
+| :--- | :--- | :--- |
+| **Anthropic Claude 3.5 Sonnet** | General chat, code generation, system architecture, document analysis | Unmatched nuance, thoughtful reasoning, low hallucination rate, and superior software engineering output. |
+| **Google Gemini 2.5 Flash** | Voice transcription, audio synthesis, live Google Search grounding, image generation, fast tool execution | Ultra-fast multimodal processing, native Web search grounding, generous rate limits, and built-in TTS. |
+
+### 3.2 Token Budgeting & Sliding Context Window
+Without active context management, conversation history rapidly balloons, causing high API costs and latency. We implemented a multi-stage budgeting system:
+
+1. **Message Count Cap (`MAX_HISTORY_MESSAGES = 50`)**: Keeps the conversation context within the last 25 turns.
+2. **Session Expiration (`CONVERSATION_SESSION_TIMEOUT_HOURS = 24`)**: If the user is inactive for more than 24 hours, the session history resets automatically.
+3. **Sliding Truncation**: When history exceeds token boundaries, older turns are pruned while preserving system prompts and the active document context:
+   ```javascript
+   function trimHistory(history, maxTokens = 12000) {
+     while (history.length > 2 && estimateTokenCount(history) > maxTokens) {
+       history.splice(0, 2); // Remove oldest user + assistant pair
+     }
+     return history;
+   }
+   ```
+
+### 3.3 Document Parsing Engine (PDF, Text, Code)
+When users send files to the bot, it detects the file extension and extracts content automatically:
+* **PDFs**: Parsed via `pdf-parse` into clean text representations.
+* **Source Code (`.py`, `.js`, `.json`, `.md`, `.sql`)**: Read directly as UTF-8 text with syntax highlighting tags.
+* **Interactive Quizzes (`/quiz`)**: Users can load a lecture slide or code file and type `/quiz` — the bot synthesizes an interactive 5-question multiple-choice quiz testing comprehension.
+
+### 3.4 A-Z Categorization & Interactive Library (`/library`)
+Files uploaded or synced from the laptop are organized into standard categories:
+* 📄 **Documents**: `.pdf`, `.docx`, `.txt`, `.md`
+* 💻 **Code & Scripts**: `.py`, `.js`, `.ts`, `.html`, `.css`, `.json`, `.sql`
+* 📊 **Data & Sheets**: `.csv`, `.xlsx`, `.sqlite`, `.db`
+* 🎨 **Media & Images**: `.png`, `.jpg`, `.jpeg`, `.gif`, `.mp3`, `.wav`
+
+The `/library` command provides an interactive BotFather-style inline keyboard allowing users to browse their storage alphabetical index (A-Z), inspect file sizes, preview contents, rename files, or delete them remotely.
+
+### 3.5 Telegram Cloud Vault with Pinned Index Recovery
+Cloud hosts like Render use ephemeral filesystems — whenever code is redeployed or containers restart, locally stored files are wiped.
+
+**The Solution: Free Permanent Storage via Telegram Cloud Vault**
+1. When a file is uploaded, the bot forwards it to Telegram's cloud storage and records its permanent `file_id`.
+2. The index is serialized into a compact JSON payload (`VAULT_DATA`) and pinned in the user's private chat.
+3. On every container reboot, `restoreVaultFromTelegram()` inspects the pinned message, instantly recovering the full file registry, user settings, and local directory configurations!
+
+---
+
+## 💻 Part 4: Remote Hardware Monitoring & Live Multi-User Agent Fleet
+
+### 4.1 The Outbound-Only WebSocket Reverse Tunnel
+Traditional remote access methods require opening inbound ports, configuring dynamic DNS, or paying for third-party VPNs. If your laptop is on a mobile hotspot, corporate network, or public Wi-Fi, inbound connections are blocked by Carrier-Grade NAT (CGNAT).
+
+**Our Outbound Reverse-Tunnel Architecture**:
+1. When your laptop boots, [`laptop-runner.js`](file:///D:/projects/telegram-ai-bot/laptop-runner.js) initiates an **outgoing** WebSocket connection (`wss://`) to the Cloud Bot Engine.
+2. Firewalls and routers permit outbound HTTPS/WSS traffic without special configuration.
+3. The Cloud Bot keeps the tunnel open. When you send `/agent` or `/spec` in Telegram, the cloud server dispatches RPC tasks down through the established tunnel.
+4. **Security**: No open ports on your PC, secret handshake token verification, and strict user whitelist checks.
+
+```
+[Your Laptop] ──(Outbound WSS:443)──► [Cloud Bot on Render] ◄──(HTTPS)── [Telegram App]
+```
+
+### 4.2 Comprehensive Laptop Hardware & Spec Inspector (`/spec`)
+Sending `/spec` queries live hardware metrics from the laptop daemon in real-time:
+* **Processor (CPU)**: Model name, architecture, active core/thread count, and base clock frequency.
+* **Dual GPU Detection**: Queries `Win32_VideoController` to detect both integrated and dedicated graphics (e.g., *AMD Radeon Graphics + NVIDIA GeForce RTX 3060 Laptop GPU*).
+* **Memory (RAM)**: Real-time calculation of Total, Used, and Free RAM with usage percentage.
+* **Power & Battery**: Queries `Win32_Battery` to report remaining charge percentage.
+* **Storage Drives**: Calculates total capacity and free gigabytes across all mounted physical drives (`C:`, `D:`).
+* **Offline Resilience**: If the laptop is asleep or restarting, the bot automatically serves the last reported hardware profile with a `🟡 Offline / Cached` indicator.
+
+### 4.3 Multi-User Fleet Monitoring (`/devices`, `/status`)
+For shared workspaces or team setups, the bridge supports multiple concurrent devices and users:
+* Each connected machine registers its own `hostname`, `deviceName`, and `userId`.
+* Sending `/devices` lists all authorized members and shows who has an active laptop runner online.
+* Sending `/status` displays the caller's live laptop specs, other team members' devices, active storage directories, loaded documents, and cloud bot memory health.
+
+### 4.4 Installing and Daemonizing the Local Runner (PM2 vs Silent VBScript)
+The local runner should run permanently in the background without cluttering your desktop with open terminal windows. We configured two robust methods:
+
+#### Method 1: PM2 Process Manager (Recommended for Developers)
 ```powershell
-# 1. Start with PM2
+# Install PM2 globally
+npm install -g pm2
+
+# Start the agent in the background
+cd D:\projects\telegram-ai-bot
 pm2 start laptop-runner.js --name "telegram-agent"
 pm2 save
 
-# Helper 1-click batch files available:
-# • pm2-status.bat  (View status & memory)
-# • pm2-logs.bat    (View real-time logs)
-# • pm2-stop.bat    (Stop the runner)
+# Management Shortcuts:
+# • pm2-status.bat  -> View status & RAM usage
+# • pm2-logs.bat    -> View real-time RPC logs
+# • pm2-stop.bat    -> Stop the agent
 ```
 
-#### Method 2: Silent VBScript Launcher (Zero CMD Windows)
-Double-click [`start_silent.vbs`](file:///D:/projects/telegram-ai-bot/start_silent.vbs) or use the Desktop shortcut [`Start-Silent-Agent.vbs`](file:///C:/Users/dsoph/Desktop/Start-Silent-Agent.vbs).
-* Runs completely in the background with zero terminal windows.
-* Verified handshake will appear in `runner.log`.
-
-#### Managing the Runner:
-* **Disable / Stop**:
-  * Tap **`[ 🛑 Disable Laptop Agent ]`** inside Telegram under `/status`
-  * Or double-click [`Disable-Laptop-Agent.bat`](file:///C:/Users/dsoph/Desktop/Disable-Laptop-Agent.bat) on your Desktop.
-* **Enable / Start**:
-  * Double-click [`Enable-Laptop-Agent.bat`](file:///C:/Users/dsoph/Desktop/Enable-Laptop-Agent.bat) or [`Start-Silent-Agent.vbs`](file:///C:/Users/dsoph/Desktop/Start-Silent-Agent.vbs).
+#### Method 2: Silent VBScript Launcher (Zero Terminal Windows)
+For users who do not want to install PM2, [`start_silent.vbs`](file:///D:/projects/telegram-ai-bot/start_silent.vbs) launches `run.bat` in completely hidden window mode (`0`):
+```vbscript
+Set WshShell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+currentDir = fso.GetParentFolderName(WScript.ScriptFullName)
+WshShell.CurrentDirectory = currentDir
+WshShell.Run Chr(34) & currentDir & "\run.bat" & Chr(34), 0, False
+Set WshShell = Nothing
+```
+Double-clicking the Desktop shortcut [`Start-Silent-Agent.vbs`](file:///C:/Users/dsoph/Desktop/Start-Silent-Agent.vbs) launches the agent with **zero CMD or terminal windows visible**.
 
 ---
 
-## 📱 Telegram Commands Reference
+## 🛠️ Part 5: Agent Optimization, Interactive Code Review & Fine-Tuning
 
-| Command | Category | Description |
+### 5.1 Autonomous Tool-Calling Agent (`/agent`)
+The `/agent` command transforms the bot into an autonomous problem-solving agent with four live capabilities:
+1. **PowerShell / Terminal Execution**: Can install npm/pip packages, run compilation scripts, or query system diagnostics.
+2. **File System Inspection & Editing**: Can read source files, apply targeted diffs, or delete temporary assets.
+3. **Live Web Research**: Uses Google Search grounding to retrieve current documentation or API changes.
+4. **Multi-Step Execution Loop**: Autonomously inspects command exit codes, diagnoses error outputs, and self-corrects scripts until the task is complete.
+
+### 5.2 The "Hold-in-Memory" Safety Pattern for Generated Code
+To prevent AI from accidentally overwriting production files, we implemented an interactive code review pipeline:
+1. When code is generated, the agent **does not write directly to disk**.
+2. It caches the code buffer in memory and presents an interactive Telegram inline menu:
+   * **`[ 📁 Target Folder ]`**: Saves to your configured project folder.
+   * **`[ 🖥️ Desktop ]`**: Saves directly to your Windows Desktop.
+   * **`[ ☁️ Cloud Vault ]`**: Uploads only to Telegram Cloud (0 local disk usage).
+   * **`[ ✏️ Custom Path ]`**: Prompts you to specify an exact relative or absolute file path.
+   * **`[ ❌ Discard ]`**: Discards the generated buffer safely.
+
+### 5.3 Permanent 4-Layer Directory Persistence
+One of the most persistent challenges in cloud-hosted bots is remembering user directory settings when containers reset. We solved this with a 4-layer fallback architecture:
+
+```
+[Layer 1: Runtime Memory] ──► [Layer 2: Local & Default JSON] ──► [Layer 3: Telegram Pinned Sync] ──► [Layer 4: Runner Handshake]
+Checked first             Fallback if container restarts      Restores from chat pinned index     Syncs laptop folder on connect
+```
+
+* **Default Config File**: [`default_user_settings.json`](file:///D:/projects/telegram-ai-bot/default_user_settings.json) is committed to git so fresh cloud instances boot with correct folder knowledge.
+* **Handshake Sync**: Whenever `laptop-runner.js` connects, it passes its local working folder in the query parameters (`storageDir`), which the cloud server automatically registers.
+* **Result**: The bot **never forgets your path**, even when the agent is disconnected or offline.
+
+### 5.4 One-Click Desktop Controls & Remote Kill Switch
+Total user control over when the laptop agent is running:
+* **Desktop Shortcuts**:
+  * [**`Disable-Laptop-Agent.bat`**](file:///C:/Users/dsoph/Desktop/Disable-Laptop-Agent.bat): Kills the running node runner and removes Windows Startup / Registry auto-run entries.
+  * [**`Enable-Laptop-Agent.bat`**](file:///C:/Users/dsoph/Desktop/Enable-Laptop-Agent.bat): Restores auto-run and starts the background runner.
+* **Telegram Remote Kill**:
+  * In Telegram `/status`, tap **`[ 🛑 Disable Laptop Agent ]`** or type `/disable_laptop` to shut down the runner on your laptop remotely from your phone.
+
+---
+
+### 5.5 Command Autocomplete Reference Table
+
+| Command | Category | Functionality |
 | :--- | :--- | :--- |
-| `/agent <task>` | 🤖 Agent | Execute autonomous tasks with live tools (terminal, files, research) |
-| `/agent_mode` | 🤖 Agent | Toggle Agent mode as default for all general chat messages |
-| `/devices` | 🤖 Agent | View online status of all authorized users' laptops |
-| `/deep_research`| 🔬 Research | Generate comprehensive multi-source factual research reports |
-| `/search <query>`| 🌐 Research | Live Google Search grounding with verified source links |
+| `/spec` | 💻 System | View complete laptop hardware specifications (CPU, dual GPUs, RAM, battery, drives) |
+| `/status` | 📊 System | Check cloud bot uptime, runner connection state, and memory health |
+| `/devices` | 👥 Team | View all authorized users' laptops and their online status |
+| `/agent <task>` | 🤖 Agent | Run autonomous tasks with live terminal tools, file editing, and research |
+| `/agent_mode` | 🎚️ Agent | Toggle Agent mode as default for all messages (or `/cancel` to restore Claude) |
+| `/live` | 🎙️ Voice | Toggle spoken audio voice replies for all bot responses |
+| `/call` | 📞 Voice | Launch low-latency bidirectional voice call WebApp |
+| `/voice` | 🗣️ Voice | Switch Gemini Live voice persona (Aoede, Charon, Fenrir, Kore, Puck) |
+| `/deep_research`| 🔬 Research | Perform exhaustive multi-source web research with synthesized report |
+| `/search <query>`| 🌐 Research | Live Google Search grounding with verified citation links |
 | `/youtube <query>`| 🎥 Media | Search YouTube videos, channels, and playlists |
 | `/image <prompt>` | 🎨 Creative | Generate high-quality images via Gemini |
-| `/live` | 🎙️ Voice | Toggle spoken voice responses for all bot replies |
-| `/call` | 📞 Voice | Open real-time duplex bidirectional voice WebApp |
-| `/voice` | 🗣️ Voice | Switch Gemini voice persona (Aoede, Charon, Fenrir, etc.) |
-| `/storage` | ☁️ Files | Open the interactive Cloud Vault & Local storage hub |
-| `/directory <path>`| 📁 Files | Set or view your local project folder path |
-| `/save [path]` | 💾 Files | Save pending generated code to your target directory |
-| `/cancel` | ❌ Files | Discard pending code save or cancel directory input |
-| `/library` | 📚 Files | Browse files saved in your local folder or Cloud Vault |
-| `/quiz` | 📝 Learning | Generate an interactive multiple-choice quiz from loaded document |
-| `/spec` | 💻 System | View detailed laptop hardware specifications (CPU, GPU, RAM, Battery, Disks) |
-| `/status` | 📊 System | View live laptop hardware specs (CPU, RAM, uptime) & bot engine health |
-| `/clear` | 🧹 Chat | Clear recent conversation history while retaining loaded files |
-| `/clearall` | 🧹 Chat | Clear all conversation history, sessions, and active documents |
+| `/storage` | ☁️ Files | Open the interactive Cloud Vault & local storage control hub |
+| `/directory [path]`| 📁 Files | View or update your laptop's target project directory |
+| `/library` | 📁 Files | Browse files stored locally or in Cloud Vault sorted A-Z |
+| `/quiz` | 📝 Learning | Generate an interactive multiple-choice quiz on any loaded document |
+| `/save [path]` | 💾 Files | Accept and save pending generated code to disk |
+| `/cancel` | ❌ Control | Discard pending code save, cancel directory prompt, or exit command modes |
+| `/clear` | 🧹 Chat | Clear recent conversation turns while retaining loaded files |
+| `/clearall` | 🗑️ Chat | Wipe all conversation history, sessions, and active documents |
 
 ---
 
-## 🔒 Security Architecture
+## 📄 License & Credits
 
-1. **Outbound-Only Tunneling**:
-   * The local runner initiates an outgoing secure WebSocket connection (`wss://`) to the cloud server.
-   * No inbound ports are opened on your router or laptop, making it completely safe from external port scans.
-2. **Secret Handshake & Token Authentication**:
-   * Every connection validates `LAPTOP_RUNNER_SECRET` and matches the user's numeric Telegram ID against `ALLOWED_USER_ID`.
-3. **Directory Boundary Protection**:
-   * Path traversal guards (`..` sanitization) prevent rogue script execution outside designated project paths.
-4. **Interactive Code Confirmation**:
-   * Generated files are kept in memory and require interactive confirmation via inline buttons before writing to disk.
+Created and maintained by **Din Sopheakyuth** with autonomous pair-programming by **Antigravity (Google DeepMind)**.
 
----
-
-## 📄 License
-
-MIT License.
+Licensed under the [MIT License](LICENSE).
