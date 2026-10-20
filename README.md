@@ -454,6 +454,10 @@ Total user control over when the laptop agent is running:
 
 ## 📄 License & Credits
 
-Created and maintained by **Din Sopheakyuth** with autonomous pair-programming by **Antigravity (Google DeepMind)**.
+* **Creator & Maintainer**: **Din Sopheakyuth**
+* **AI Architecture & Intelligence**:
+  * **Google Gemini & Google DeepMind**: For powering multimodal voice comprehension, Gemini 3.8 Flash / Live APIs, live search grounding, ideation, and architectural solutions throughout the development lifecycle.
+  * **Anthropic Claude**: For powering deep reasoning, nuanced conversation, and software engineering capabilities via Claude Sonnet 5.5.
+  * **Antigravity (Google DeepMind)**: For autonomous pair-programming and rapid development assistance.
 
 Licensed under the [MIT License](LICENSE).
