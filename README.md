@@ -13,7 +13,8 @@
   - [1.3 Project Initialization & Framework Selection](#13-project-initialization--framework-selection)
   - [1.4 Webhook vs Long-Polling on Cloud Providers](#14-webhook-vs-long-polling-on-cloud-providers)
   - [1.5 Unified HTTP Server, Live Health Checks & Remote Restart](#15-unified-http-server-live-health-checks--remote-restart)
-  - [1.6 Self-Healing Polling Watchdog & Container Auto-Recovery](#16-self-healing-polling-watchdog--container-auto-recovery)
+  - [1.6 Keeping Render Awake 24/7 via UptimeRobot (Free Cloud Tier)](#16-keeping-render-awake-247-via-uptimerobot-free-cloud-tier)
+  - [1.7 Self-Healing Polling Watchdog & Container Auto-Recovery](#17-self-healing-polling-watchdog--container-auto-recovery)
 - [Part 2: Command Architecture, Voice Understanding & Spoken Replies](#-part-2-command-architecture-voice-understanding--spoken-replies)
   - [2.1 Scalable Command Routing & Autocomplete Menus](#21-scalable-command-routing--autocomplete-menus)
   - [2.2 Voice Note Capture & Audio Processing](#22-voice-note-capture--audio-processing)
@@ -190,7 +191,39 @@ Mounting an integrated Node.js HTTP server alongside Telegram polling serves thr
    }
    ```
 
-### 1.6 Self-Healing Polling Watchdog & Container Auto-Recovery
+### 1.6 Keeping Render Awake 24/7 via UptimeRobot (Free Cloud Tier)
+By default, Render's free tier spins down (puts to sleep) any Web Service after **15 minutes of inactivity** (when no incoming HTTP requests are received). Once a service is sleeping:
+- Outbound Telegram long-polling is suspended, so the bot will not receive or respond to incoming messages.
+- Even if a webhook arrives, waking the container takes 30–50+ seconds ("cold start" latency).
+
+#### The Solution: Automated External Ping (Every 5–10 Minutes)
+Because our bot features an internal HTTP server that listens on port `10000`, we can keep Render awake 24/7 completely free by setting up an external ping monitor via [UptimeRobot](https://uptimerobot.com) (or [cron-job.org](https://cron-job.org)):
+
+```
+┌─────────────────────────┐          HTTP GET /health (Every 5 min)          ┌─────────────────────────┐
+│       UptimeRobot       │ ───────────────────────────────────────────────► │   Render Cloud Webhook  │
+│  (Free External Pinger) │                                                  │     (bot.js : 10000)    │
+│                         │ ◄─────────────────────────────────────────────── │                         │
+└─────────────────────────┘             HTTP 200 OK (Keepalive)              └─────────────────────────┘
+                                          or HTTP 503 (Alert!)
+```
+
+#### Step-by-Step Setup Guide:
+1. Go to [uptimerobot.com](https://uptimerobot.com) and create a free account (includes up to 50 monitors).
+2. Click **+ Add New Monitor**.
+3. Fill in the monitor settings:
+   * **Monitor Type**: Select `HTTP(s)`
+   * **Friendly Name**: `Telegram AI Bot (Render Keepalive)`
+   * **URL (or IP)**: `https://your-app-name.onrender.com/health` (e.g. `https://telegram-ai-bot-znei.onrender.com/health`)
+   * **Monitoring Interval**: Set to **`5 minutes`** (or `10 minutes` — must be **under 15 minutes** to prevent sleep).
+   * **Monitor Timeout**: `30 seconds`
+4. Click **Create Monitor**.
+
+> [!TIP]
+> **Dual Benefit (Keepalive + Failure Alerting)**:
+> In addition to preventing Render from going to sleep, our [`/health`](#15-unified-http-server-live-health-checks--remote-restart) endpoint returns **`503 Service Unavailable`** if the Telegram polling loop ever drops. UptimeRobot will immediately catch the 503 response and notify you via email or push notification, ensuring you are immediately aware if the bot requires attention!
+
+### 1.7 Self-Healing Polling Watchdog & Container Auto-Recovery
 In long-running production deployments (24/7 on Render or Docker), Telegram long-polling can occasionally stall due to transient upstream network disconnects, TCP keepalive timeouts, or temporary instance concurrency conflicts (`409 Conflict: terminated by other getUpdates request`).
 
 To achieve 99.99% unattended uptime, the bot implements a dual-layer watchdog architecture:
