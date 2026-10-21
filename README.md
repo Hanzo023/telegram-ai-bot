@@ -12,7 +12,8 @@
   - [1.2 Telegram User ID Discovery & Security Whitelisting](#12-telegram-user-id-discovery--security-whitelisting)
   - [1.3 Project Initialization & Framework Selection](#13-project-initialization--framework-selection)
   - [1.4 Webhook vs Long-Polling on Cloud Providers](#14-webhook-vs-long-polling-on-cloud-providers)
-  - [1.5 Unified HTTP Server & Health Checks](#15-unified-http-server--health-checks)
+  - [1.5 Unified HTTP Server, Live Health Checks & Remote Restart](#15-unified-http-server-live-health-checks--remote-restart)
+  - [1.6 Self-Healing Polling Watchdog & Container Auto-Recovery](#16-self-healing-polling-watchdog--container-auto-recovery)
 - [Part 2: Command Architecture, Voice Understanding & Spoken Replies](#-part-2-command-architecture-voice-understanding--spoken-replies)
   - [2.1 Scalable Command Routing & Autocomplete Menus](#21-scalable-command-routing--autocomplete-menus)
   - [2.2 Voice Note Capture & Audio Processing](#22-voice-note-capture--audio-processing)
@@ -30,12 +31,14 @@
   - [4.2 Comprehensive Laptop Hardware & Spec Inspector (`/spec`)](#42-comprehensive-laptop-hardware--spec-inspector-spec)
   - [4.3 Multi-User Fleet Monitoring (`/devices`, `/status`)](#43-multi-user-fleet-monitoring-devices-status)
   - [4.4 Installing and Daemonizing the Local Runner (PM2 vs Silent VBScript)](#44-installing-and-daemonizing-the-local-runner-pm2-vs-silent-vbscript)
+  - [4.5 Natural Language Hardware & Sensor Query Routing](#45-natural-language-hardware--sensor-query-routing)
 - [Part 5: Agent Optimization, Interactive Code Review & Fine-Tuning](#-part-5-agent-optimization-interactive-code-review--fine-tuning)
   - [5.1 Autonomous Tool-Calling Agent (`/agent`)](#51-autonomous-tool-calling-agent-agent)
   - [5.2 The "Hold-in-Memory" Safety Pattern for Generated Code](#52-the-hold-in-memory-safety-pattern-for-generated-code)
   - [5.3 Permanent 4-Layer Directory Persistence](#53-permanent-4-layer-directory-persistence)
   - [5.4 One-Click Desktop Controls & Remote Kill Switch](#54-one-click-desktop-controls--remote-kill-switch)
-  - [5.5 Command Autocomplete Reference Table](#55-command-autocomplete-reference-table)
+  - [5.5 Interactive In-Chat File Renaming (`userAwaitingRename`)](#55-interactive-in-chat-file-renaming-userawaitingrename)
+  - [5.6 Command Autocomplete Reference Table](#56-command-autocomplete-reference-table)
 
 ---
 
@@ -168,10 +171,59 @@ if (isProduction) {
 }
 ```
 
-### 1.5 Unified HTTP Server & Health Checks
-Mounting a `/health` endpoint serves two crucial purposes:
-1. **Cloud Keepalive**: Free/Standard cloud tiers (such as Render) require continuous HTTP pinging or activity to prevent cold-sleeps.
-2. **Reverse Proxy Tunnel Endpoint**: The same HTTP server is upgraded to handle WebSocket connections (`/ws/laptop-agent`), unifying webhooks, health probes, and remote agent tunnels under a single port.
+### 1.5 Unified HTTP Server, Live Health Checks & Remote Restart
+Mounting an integrated Node.js HTTP server alongside Telegram polling serves three critical architectural purposes:
+1. **Cloud Keepalive & Health Probing**: Free and standard cloud containers (such as Render) require periodic HTTP activity to prevent sleeping. The `/health` endpoint serves this, but with an essential architectural safeguard: **it reports live polling status**.
+   - During the first 60 seconds of container boot, `/health` provides a grace period returning `HTTP 200`.
+   - Once initialized, `/health` continuously verifies `bot.isRunning()`. If Telegram polling ever drops or terminates, `/health` immediately responds with **`HTTP 503 Service Unavailable`** (`{ status: "degraded", bot: "stopped" }`).
+   - This prevents "zombie containers" where the web server stays alive while the bot is dead, enabling external monitors (UptimeRobot) and cloud orchestrators to automatically restart the service.
+2. **Reverse Proxy Tunnel Endpoint**: The HTTP server upgrades incoming connections on `/ws/laptop-agent` to full-duplex WebSockets, unifying health probes, setup script downloads, and laptop control tunnels under a single public port.
+3. **On-Demand Remote Container Restart**: An authenticated `/restart` endpoint allows triggering a clean container reboot via HTTP query parameter or admin secret without logging into the cloud dashboard:
+   ```javascript
+   if (pathname === '/restart' || pathname === '/reboot') {
+     const secret = url.searchParams.get('secret') || '';
+     if (secret === expectedSecret || !expectedSecret || url.searchParams.get('force') === 'true') {
+       res.writeHead(200, { 'Content-Type': 'application/json' });
+       res.end(JSON.stringify({ ok: true, message: 'Restarting bot container...' }));
+       setTimeout(() => process.exit(1), 800); // Clean exit triggers cloud orchestrator reboot
+     }
+   }
+   ```
+
+### 1.6 Self-Healing Polling Watchdog & Container Auto-Recovery
+In long-running production deployments (24/7 on Render or Docker), Telegram long-polling can occasionally stall due to transient upstream network disconnects, TCP keepalive timeouts, or temporary instance concurrency conflicts (`409 Conflict: terminated by other getUpdates request`).
+
+To achieve 99.99% unattended uptime, the bot implements a dual-layer watchdog architecture:
+
+```
+                    ┌────────────────────────────────────────┐
+                    │      Active Watchdog (Every 15s)       │
+                    └───────────────────┬────────────────────┘
+                                        │
+                         Check: bot.isRunning() == true?
+                                        │
+                       ┌────────────────┴────────────────┐
+                       ▼ YES                             ▼ NO (Dead)
+                 [Reset Counter]               [Increment Dead Checks]
+                                                         │
+                                               3 Dead Checks (>45s)?
+                                                         │
+                                                         ▼
+                                            process.exit(1) (Crash-Only)
+                                                         │
+                                                         ▼
+                                          Docker / Render Instantly Respawns
+                                          Fresh Container with Clean Sockets
+```
+
+1. **Watchdog Supervisor Timer**:
+   Every 15 seconds, a supervisor interval checks whether `bot.isRunning()` is true. If polling remains dead for 3 consecutive cycles (>45 seconds), it invokes `process.exit(1)`. Cloud runtimes (Docker, Render, Kubernetes, PM2) detect the exit and immediately launch a fresh container with clean memory and new network sockets.
+2. **Unbroken Polling Loop**:
+   Unlike default implementations that use `break` upon loop completion, the runner restarts polling if it ever resolves cleanly without an explicit `isShuttingDown` flag, avoiding silent termination.
+3. **Internal AbortController Recycling**:
+   When restarting Grammy polling after an error or conflict, internal abort controllers and running flags (`bot.pollingAbortController = undefined`, `bot.pollingRunning = false`) are reset to prevent `Error: Aborted delay` rejections.
+4. **Instant In-Chat `/reboot` Command**:
+   If an administrator ever needs to force a fresh restart from mobile, typing `/reboot` or `/restart` directly in Telegram issues an immediate reboot confirmation and restarts the cloud container in 15–20 seconds.
 
 ---
 
@@ -382,6 +434,30 @@ Set WshShell = Nothing
 ```
 Double-clicking the Desktop shortcut [`Start-Silent-Agent.vbs`](file:///C:/Users/dsoph/Desktop/Start-Silent-Agent.vbs) launches the agent with **zero CMD or terminal windows visible**.
 
+### 4.5 Natural Language Hardware & Sensor Query Routing
+Users often interact with conversational AI using natural phrases rather than remembering explicit slash commands. If a user asks:
+* *"check my cpu and gpu temperature"*
+* *"how is my cpu doing?"*
+* *"laptop specs"*
+* *"what are my hardware specs?"*
+
+The bot's text dispatcher checks if a laptop is currently connected for their user account. Instead of falling through to standard Claude chat (which cannot inspect remote hardware directly), the bot intelligently intercepts the query and automatically triggers the live [`handleSpecCommand`](#42-comprehensive-laptop-hardware--spec-inspector-spec) pipeline:
+
+```javascript
+const isHardwareQuery =
+  /\b(cpu|gpu|ram|memory|battery|disk|disks|hardware|specs?|temperatures?|temps?)\b/i.test(userMessage) &&
+  /\b(check|show|get|view|what|how|status|spec|temperature|temp|monitor)\b/i.test(userMessage);
+
+if (isHardwareQuery) {
+  const hasLaptop = isLaptopConnected(userId);
+  if (hasLaptop) {
+    await handleSpecCommand(ctx, userId);
+    return;
+  }
+}
+```
+This delivers a frictionless mobile experience: you can ask how your machine is doing in plain English while away, and instantly receive real-time CPU models, clock speeds, GPU cards, RAM usage, battery levels, and disk capacities.
+
 ---
 
 ## 🛠️ Part 5: Agent Optimization, Interactive Code Review & Fine-Tuning
@@ -423,14 +499,26 @@ Total user control over when the laptop agent is running:
 * **Telegram Remote Kill**:
   * In Telegram `/status`, tap **`[ 🛑 Disable Laptop Agent ]`** or type `/disable_laptop` to shut down the runner on your laptop remotely from your phone.
 
+### 5.5 Interactive In-Chat File Renaming (`userAwaitingRename`)
+Users can manage and organize assets stored in either Telegram Cloud Vault or their physical laptop directly inside the Telegram chat UI:
+1. In `/storage` or `/library`, tapping **`[ ✏️ Rename ]`** under any file triggers an interactive session via an in-memory tracking map (`userAwaitingRename`):
+   ```javascript
+   const userAwaitingRename = new Map(); // userId -> { source: 'cloud' | 'laptop', idx, oldName, fullPath }
+   ```
+2. The user is prompted to reply with the desired new filename:
+   * **Cloud Vault files**: The JSON index metadata, file extension, and category are updated and automatically synced to the Telegram pinned backup message.
+   * **Laptop files**: A remote task (`rename`) is transmitted over the WebSocket tunnel to `laptop-runner.js`, which atomically renames the physical file on the Windows/Linux/macOS filesystem using Node's `fs.promises.rename`.
+3. Sending `/cancel` at any point cleanly discards the rename prompt.
+
 ---
 
-### 5.5 Command Autocomplete Reference Table
+### 5.6 Command Autocomplete Reference Table
 
 | Command | Category | Functionality |
 | :--- | :--- | :--- |
 | `/spec` | 💻 System | View complete laptop hardware specifications (CPU, dual GPUs, RAM, battery, drives) |
 | `/status` | 📊 System | Check cloud bot uptime, runner connection state, and memory health |
+| `/reboot` | 🔄 System | Cleanly restart the Telegram bot container process to auto-heal connections |
 | `/devices` | 👥 Team | View all authorized users' laptops and their online status |
 | `/agent <task>` | 🤖 Agent | Run autonomous tasks with live terminal tools, file editing, and research |
 | `/agent_mode` | 🎚️ Agent | Toggle Agent mode as default for all messages (or `/cancel` to restore Claude) |
