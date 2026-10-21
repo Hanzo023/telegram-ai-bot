@@ -236,20 +236,43 @@ node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $ser
       });
       return res.end(ps1Content);
     }
+
+    // 4. Remote /restart or /reboot endpoint to self-heal or restart container on demand
+    if (pathname === '/restart' || pathname === '/reboot') {
+      const secret = url.searchParams.get('secret') || '';
+      const expectedSecret = getExpectedSecret();
+      if (!expectedSecret || secret === expectedSecret || url.searchParams.get('force') === 'true') {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+        });
+        res.end(JSON.stringify({ ok: true, message: 'Restarting bot container process now...' }));
+        console.log('[HTTP Server] 🔄 Restart triggered via HTTP /restart endpoint. Exiting process with code 1 to allow container restart...');
+        setTimeout(() => process.exit(1), 800);
+        return;
+      } else {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Unauthorized: invalid secret' }));
+      }
+    }
   } catch (err) {
     console.warn('[HTTP Server] Route handler error:', err.message);
   }
 
-  // Always return 200 OK for any path (/, /health, /health/, /healthz, etc.) so Render health checks always pass
-  res.writeHead(200, {
+  // Health check: accurately reports whether Telegram polling is alive
+  // Grace period of 60s allows initial startup before marking degraded
+  const uptimeSec = Math.floor(process.uptime());
+  const isHealthy = bot.isRunning() || (uptimeSec < 60);
+
+  res.writeHead(isHealthy ? 200 : 503, {
     'Content-Type': 'application/json',
     'Cache-Control': 'no-cache',
     'Connection': 'close',
   });
   res.end(JSON.stringify({
-    status: 'ok',
-    bot: 'running',
-    uptime: Math.floor(process.uptime()),
+    status: isHealthy ? 'ok' : 'degraded',
+    bot: bot.isRunning() ? 'running' : 'stopped',
+    uptime: uptimeSec,
     timestamp: new Date().toISOString(),
   }));
 });
@@ -1589,6 +1612,17 @@ bot.command(['clearall', 'clear_all'], handleClearAll);
 bot.hears(/^clear\s+all$/i, handleClearAll);
 bot.hears(/^clear$/i, handleClear);
 
+bot.command(['reboot', 'restart'], async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!allowedUserIds.has(Number(userId))) return;
+  await ctx.reply(
+    '🔄 *Rebooting Telegram Bot container...*\n\nThe process is exiting to trigger a clean container restart on Render. Polling will resume automatically in ~15-25 seconds!',
+    { parse_mode: 'Markdown' }
+  );
+  console.log(`[Admin] 🔄 User ${userId} requested container reboot via /reboot command.`);
+  setTimeout(() => process.exit(1), 800);
+});
+
 bot.callbackQuery('confirm_clear_all', async (ctx) => {
   await ctx.answerCallbackQuery().catch(() => {});
   await handleClearAll(ctx);
@@ -1850,7 +1884,7 @@ async function generateGeminiImage(prompt) {
     'gemini-nano-banana-2.1',
     'nano-banana-pro-preview',
     'gemini-3.1-flash-image',
-    'gemini-2.5-flash-image',
+    'imagen-3.0-generate-002',
   ];
 
   let lastGeminiErr = null;
@@ -5541,6 +5575,20 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
+  // Natural language laptop & hardware status intercept:
+  // e.g. "check my cpu and gpu temperature", "check my cpu", "laptop specs", "check gpu"
+  const isHardwareQuery =
+    /\b(cpu|gpu|ram|memory|battery|disk|disks|hardware|specs?|temperatures?|temps?)\b/i.test(userMessage) &&
+    /\b(check|show|get|view|what|how|status|spec|temperature|temp|monitor)\b/i.test(userMessage);
+
+  if (isHardwareQuery) {
+    const hasLaptop = isLaptopConnected(userId);
+    if (hasLaptop) {
+      await handleSpecCommand(ctx, userId);
+      return;
+    }
+  }
+
   await ctx.replyWithChatAction('typing');
   enqueueUserMessage(ctx.from.id, {
     type: 'text',
@@ -5661,6 +5709,7 @@ const botCommands = [
   { command: 'local', description: '💾 Save files to your laptop folder & Cloud Vault' },
   { command: 'cloud', description: '☁️ Save files to Cloud Vault only' },
   { command: 'nosave', description: '💻 Save files to your laptop folder only' },
+  { command: 'reboot', description: '🔄 Cleanly restart the Telegram bot container' },
   { command: 'help', description: '📖 Command reference and cheat sheet' },
   { command: 'start', description: '✨ Welcome guide and features overview' },
 ];
@@ -5677,22 +5726,54 @@ async function registerTelegramCommands() {
 
 await registerTelegramCommands();
 
+// Active Polling Watchdog: monitors bot polling status and recovers automatically
+const WATCHDOG_INTERVAL_MS = 15000;
+let consecutiveDeadChecks = 0;
+
+setInterval(() => {
+  if (isShuttingDown) return;
+  // Allow 60s grace period during boot
+  if (process.uptime() < 60) return;
+
+  if (!bot.isRunning()) {
+    consecutiveDeadChecks++;
+    console.warn(`⚠️ [Watchdog] Bot polling is stopped! (Check ${consecutiveDeadChecks}/3, uptime: ${Math.floor(process.uptime())}s)`);
+    if (consecutiveDeadChecks >= 3) {
+      console.error('❌ [Watchdog] Bot polling has been stopped for >45s. Triggering process restart to auto-heal container...');
+      process.exit(1);
+    }
+  } else {
+    consecutiveDeadChecks = 0;
+  }
+}, WATCHDOG_INTERVAL_MS).unref();
+
 async function startBotWithRetry() {
   let attempt = 0;
   while (!isShuttingDown) {
     try {
-      console.log('Starting Telegram bot polling...');
+      attempt++;
+      console.log(`[Bot Runner] Starting Telegram bot polling (attempt ${attempt})...`);
+
+      // Reset internal Grammy abort controller and flags if previously stopped
+      bot.pollingAbortController = undefined;
+      bot.pollingRunning = false;
+
       await bot.start({
         drop_pending_updates: false,
         onStart: async (botInfo) => {
+          attempt = 0; // Reset counter on successful startup
           console.log(`✅ Telegram bot @${botInfo.username} is running and polling for updates!`);
           await registerTelegramCommands().catch(() => {});
         },
       });
-      break;
+
+      // If bot.start() resolved without throwing an error while NOT shutting down:
+      if (!isShuttingDown) {
+        console.warn('⚠️ [Bot Runner] Telegram bot polling resolved unexpectedly. Waiting 3s before resuming polling...');
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
     } catch (err) {
       if (isShuttingDown) break;
-      attempt++;
       const errMsg = err?.message || String(err);
       const isConflict =
         err?.error_code === 409 ||
@@ -5702,12 +5783,19 @@ async function startBotWithRetry() {
 
       if (isConflict) {
         console.warn(
-          `⚠️ [Polling Conflict] Telegram 409 Conflict (attempt ${attempt}): Another bot instance is currently active (e.g. previous Render container shutting down). Waiting 5s before retrying...`
+          `⚠️ [Polling Conflict] Telegram 409 Conflict (attempt ${attempt}): Another bot instance is currently active. Waiting 5s before retrying...`
         );
       } else {
         console.error(`❌ [Polling Error] (attempt ${attempt}):`, sanitizeError(err));
         console.warn('Retrying polling in 5s...');
       }
+
+      // If too many consecutive fatal polling errors occur, exit process to trigger container restart
+      if (attempt >= 5) {
+        console.error(`❌ [Bot Runner] Polling failed ${attempt} consecutive times. Exiting process with code 1 to allow container restart...`);
+        process.exit(1);
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
   }
@@ -5716,4 +5804,5 @@ async function startBotWithRetry() {
 // Start polling asynchronously with automatic retry so health check stays alive and rolling deploys succeed
 startBotWithRetry().catch((err) => {
   console.error('Fatal polling loop error:', sanitizeError(err));
+  process.exit(1);
 });
