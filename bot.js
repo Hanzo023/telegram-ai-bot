@@ -62,6 +62,7 @@ import {
 // Pending file save session cache & custom path state
 const pendingFiles = new Map(); // userId -> { code: string, filename: string, suggestedPath: string, createdAt: number }
 const userAwaitingCustomSavePath = new Set(); // userId
+const userAwaitingRename = new Map(); // userId -> { source: 'cloud' | 'laptop', idx: number, oldName: string, fullPath?: string }
 
 const userAgentMode = new Map(); // userId -> boolean
 
