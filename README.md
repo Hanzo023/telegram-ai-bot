@@ -39,6 +39,9 @@ If you just cloned this repository or are setting up your project files for the 
 | [`./search-service.js`](./search-service.js) | Google Search grounding and YouTube metadata search utilities |
 | [`./.env.example`](./.env.example) | Template of all required environment variables |
 | [`./run.bat`](./run.bat) | One-click Windows batch launcher for the local agent runner |
+| [`./start-agent.bat`](./start-agent.bat) | Interactive launcher that verifies Node, installs dependencies, and tests handshake |
+| [`./Enable-Laptop-Agent.bat`](./Enable-Laptop-Agent.bat) | Configures silent background autostart on Windows startup |
+| [`./Disable-Laptop-Agent.bat`](./Disable-Laptop-Agent.bat) | Disables and unregisters the laptop runner from Windows startup |
 | [`./start_silent.vbs`](./start_silent.vbs) | Completely invisible Windows launcher (0 terminal windows visible) |
 
 ---
@@ -549,7 +552,9 @@ Traditional remote access methods require opening inbound ports, configuring dyn
 1. When your laptop boots, [`./laptop-runner.js`](./laptop-runner.js) initiates an **outgoing** WebSocket connection (`wss://`) to the Cloud Bot Engine.
 2. Firewalls and routers permit outbound HTTPS/WSS traffic without special configuration.
 3. The Cloud Bot keeps the tunnel open. When you send `/agent` or `/spec` in Telegram, the cloud server dispatches RPC tasks down through the established tunnel.
-4. **Security**: No open ports on your PC, secret handshake token verification, and strict user whitelist checks.
+4. **High-Frequency Keepalive Heartbeat**: To prevent cloud reverse proxies (like Render) from closing idle TCP sockets after 10–15 seconds of inactivity, [`./laptop-runner.js`](./laptop-runner.js) emits keepalive pings every **5 seconds**, and the server sends pings every **10 seconds**.
+5. **Zero-Configuration Handshake Negotiation**: The runner and server authenticate via `LAPTOP_RUNNER_SECRET`. If omitted from `.env`, both seamlessly derive the identical secret from `TELEGRAM_BOT_TOKEN.slice(0, 20)`, guaranteeing matching credentials out-of-the-box.
+6. **Security**: No open ports on your PC, secret handshake token verification, and strict user whitelist checks.
 
 ```
 [Your Laptop] ──(Outbound WSS:443)──► [Cloud Bot on Render] ◄──(HTTPS)── [Telegram App]
@@ -610,8 +615,19 @@ Set WshShell = Nothing
 ```
 Double-clicking [`./start_silent.vbs`](./start_silent.vbs) launches the agent with **zero CMD or terminal windows visible**.
 
-#### Method 3: One-Click Dynamic Batch File (`./run.bat`)
-For immediate terminal output, [`./run.bat`](./run.bat) navigates dynamically using `%~dp0`:
+#### Method 3: Interactive Launcher with Handshake Verification (`./start-agent.bat`)
+[`./start-agent.bat`](./start-agent.bat) checks for Node.js, auto-installs missing dependencies (`ws`, `dotenv`), launches the silent background runner, and waits for a confirmed server handshake before quietly closing its terminal:
+```cmd
+start-agent.bat
+```
+
+#### Method 4: Permanent Windows Boot Autostart (`./Enable-Laptop-Agent.bat`)
+To ensure your laptop connects to Telegram automatically whenever you turn on your computer:
+* Double-click [`./Enable-Laptop-Agent.bat`](./Enable-Laptop-Agent.bat) to register the silent runner in your Windows Startup directory.
+* To turn it off anytime, double-click [`./Disable-Laptop-Agent.bat`](./Disable-Laptop-Agent.bat) or send `/kill_runner` in Telegram.
+
+#### Method 5: Simple Foreground Batch Runner (`./run.bat`)
+For instant interactive debugging in an active command prompt:
 ```cmd
 @echo off
 cd /d "%~dp0"
@@ -687,7 +703,7 @@ One of the most persistent challenges in cloud-hosted bots is remembering user d
 Checked first             Fallback if container restarts      Restores from chat pinned index     Syncs laptop folder on connect
 ```
 
-* **Setting Directory in Chat**: Type `/directory <path>` (e.g. `/directory D:\projects\my-app`) in Telegram.
+* **Setting Directory in Chat**: Type `/directory <path>` (e.g. `/directory C:\projects\my-app` or `/directory ./my-project`) in Telegram.
 * **Default Config File**: [`./default_user_settings.json`](./default_user_settings.json) is committed to git as a clean template so fresh cloud instances boot properly.
 * **Handshake Sync**: Whenever `laptop-runner.js` connects, it passes its local working folder in the query parameters (`storageDir`), which the cloud server automatically registers.
 * **Result**: The bot **never forgets your path**, even when the agent is disconnected or offline.

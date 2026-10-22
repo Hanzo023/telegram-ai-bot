@@ -189,7 +189,7 @@ try {
 #### 🔴 Symptom
 Agent file operations fail with corrupted paths like:
 ```text
-File not found: /opt/render/project/src/D:\projects\app\index.js
+File not found: /opt/render/project/src/C:\projects\app\index.js
 ```
 
 #### 🔍 Root Cause

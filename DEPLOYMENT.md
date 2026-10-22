@@ -93,6 +93,7 @@ In the **Environment Variables** section on your Render dashboard, configure:
 | `GEMINI_API_KEY` | Google Gemini API key from AI Studio | `AIzaSy...` |
 | `SERVER_URL` | Public Render service URL | `https://<your-app-name>.onrender.com` |
 | `STORAGE_DIR` | *(Optional)* Default working directory on laptop (defaults to `./`) | `./` |
+| `LAPTOP_RUNNER_SECRET` | *(Optional)* Custom secret for laptop runner auth. If omitted, automatically defaults to the first 20 chars of `TELEGRAM_BOT_TOKEN`. Must match runner if set. | `my_secret_token_or_omit` |
 | `YOUTUBE_COOKIES` | *(Optional)* Netscape format cookies text | Exported via *Get cookies.txt LOCALLY* extension |
 
 Click **Deploy Web Service**.
@@ -126,12 +127,15 @@ Once your cloud service is running on Render:
 3. Save `start-agent.bat` into your local project directory (e.g., `<your-project-folder>`).
 4. Double-click **`start-agent.bat`** (or run `Enable-Laptop-Agent.bat` for silent background autostart).
 5. The bot will send a confirmation in Telegram:
-   ```
+   ```text
    💻 Laptop Connected: DESKTOP-XXXX
    • Host: DESKTOP-XXXX (Windows 11 Pro)
    • Status: Active & listening for remote commands.
    ```
-6. You can now control your laptop, run terminal tasks, and inspect hardware specs from anywhere!
+6. **Built-in Keepalive & Auto-Authentication**:
+   - The runner sends automated keepalive pings every **5 seconds** to prevent cloud edge proxies from severing the idle WebSocket tunnel.
+   - Handshake authentication resolves automatically from your bot token (`TELEGRAM_BOT_TOKEN.slice(0, 20)`) or your dedicated `LAPTOP_RUNNER_SECRET`.
+7. You can now control your laptop, run terminal tasks, and inspect hardware specs from anywhere!
 
 ---
 
@@ -203,6 +207,16 @@ Telegram strictly enforces that **only one instance of a bot token can poll for 
 * **Rule**: Run `bot.js` **only in the cloud** (Render).
 * **On your local laptop**: Run **only** `laptop-runner.js` (`start-agent.bat` or `npm run laptop`).
 * If you ever run `node bot.js` on your laptop while Render is active, Telegram will throw `409 Conflict: terminated by other getUpdates request`.
+
+### 4. Regenerating Bot Tokens or Changing Secrets
+If you ever revoke and regenerate your bot token via [@BotFather](https://t.me/BotFather):
+1. Update `TELEGRAM_BOT_TOKEN` in your Render Dashboard (**Environment Variables**).
+2. Update `TELEGRAM_BOT_TOKEN` in your local `.env`.
+3. Kill any detached background runner process on your machine so it reconnects with the new token secret prefix:
+   ```powershell
+   Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*laptop-runner*" } | Stop-Process -Force
+   ```
+4. Double-click `start-agent.bat` to launch the runner with updated credentials. See [TROUBLESHOOTING.md Section 7](./TROUBLESHOOTING.md#7-laptop-runner-rejected-websocket-4001-or-4003) for details.
 
 ---
 
