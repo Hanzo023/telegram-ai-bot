@@ -1,6 +1,35 @@
 # 🤖 Telegram AI Bot & Autonomous Remote Agent Guide
 
-> A comprehensive, battle-tested engineering blueprint for building a private, production-ready AI companion on Telegram powered by **Anthropic Claude Sonnet 5.5** and **Google Gemini 3.8 Flash**. This guide details everything developed inside `D:\projects\telegram-ai-bot`: from the initial webhook chatbot to multimodal voice comprehension, hybrid Claude + Gemini model orchestration, token optimization, Telegram Cloud Vault document sorting, and an outbound reverse-tunnel remote agent that monitors your laptop hardware and executes terminal commands securely from anywhere in the world.
+> A production-grade, step-by-step engineering blueprint for setting up a private, 24/7 AI companion on Telegram powered by **Anthropic Claude Sonnet 5.5** and **Google Gemini 3.8 Flash**. This guide details everything developed inside `D:\projects\telegram-ai-bot`: from the initial webhook setup to multimodal voice comprehension, dual-brain AI orchestration, Telegram Cloud Vault document storage, and an outbound reverse-tunnel remote agent that monitors your laptop hardware and executes terminal commands securely from anywhere in the world.
+
+---
+
+## ⚡ Quick-Start Checklist for New Developers
+
+If you just cloned this repository or are setting up your project files for the first time, follow this 5-minute setup checklist:
+
+```
+[1] Clone & Install      --> git clone <repo> && npm install
+[2] Configure .env       --> Copy .env.example to .env and fill in API keys
+[3] Start Bot Server     --> npm start (runs on http://localhost:10000)
+[4] Connect Laptop Agent --> npm run laptop (or double-click run.bat)
+[5] Test in Telegram     --> Send /status or /spec to verify connection!
+```
+
+### 📁 Project Files Map
+
+| File / Folder | Purpose & Role |
+| :--- | :--- |
+| [`bot.js`](file:///D:/projects/telegram-ai-bot/bot.js) | Main entry point: grammY bot dispatcher, command routing, dual-brain orchestration, HTTP server & WebSocket bridge |
+| [`laptop-runner.js`](file:///D:/projects/telegram-ai-bot/laptop-runner.js) | Local laptop background runner: gathers CPU/GPU/RAM specs and executes RPC tasks via outbound WebSocket |
+| [`laptop-bridge.js`](file:///D:/projects/telegram-ai-bot/laptop-bridge.js) | Server-side WebSocket server: manages laptop connections, authentication, and task dispatching |
+| [`gemini-agent-service.js`](file:///D:/projects/telegram-ai-bot/gemini-agent-service.js) | Autonomous Gemini agent loop: handles multi-step tool calls, terminal execution, file editing, and web search |
+| [`gemini-live-service.js`](file:///D:/projects/telegram-ai-bot/gemini-live-service.js) | Gemini Live voice synthesis, duplex audio streaming, and voice note transcription |
+| [`live-call-server.js`](file:///D:/projects/telegram-ai-bot/live-call-server.js) | Duplex voice calling WebApp server for real-time `/call` sessions |
+| [`search-service.js`](file:///D:/projects/telegram-ai-bot/search-service.js) | Google Search grounding and YouTube metadata search utilities |
+| [`.env.example`](file:///D:/projects/telegram-ai-bot/.env.example) | Template of all required environment variables |
+| [`run.bat`](file:///D:/projects/telegram-ai-bot/run.bat) | One-click Windows batch launcher for the local agent runner |
+| [`start_silent.vbs`](file:///D:/projects/telegram-ai-bot/start_silent.vbs) | Completely invisible Windows launcher (0 terminal windows visible) |
 
 ---
 
@@ -78,50 +107,86 @@
 
 ## 🚀 Part 1: Setting Up the Telegram Bot Foundation
 
+This section guides new developers through creating their Telegram bot, locking down security, configuring project dependencies, and setting up rock-solid cloud hosting.
+
 ### 1.1 Creating the Bot with BotFather
+
 1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
-2. Start the chat and issue the command:
+2. Start the conversation and send:
    ```text
    /newbot
    ```
-3. Follow the interactive prompts to assign:
-   * **Display Name**: E.g., `My Autonomous AI Assistant`
-   * **Username**: Must end with `bot` (e.g., `my_private_ai_bot`)
-4. BotFather returns an HTTP API token formatted like:
-   `8758364117:AAHIOxa7vOmFgNCbLKEXRUyI8IJ_kL8XqTk`
-   *Save this token securely — it is your `TELEGRAM_BOT_TOKEN`.*
-
-### 1.2 Telegram User ID Discovery & Security Whitelisting
-Because your bot will possess remote execution and personal file access capabilities, **never leave it open to the public**. Implement a strict ID whitelist from day one:
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram.
-2. Note your numerical ID (e.g., `8199950189`).
-3. In your configuration, support comma-separated multi-user authorization:
-   ```javascript
-   const rawAllowed = process.env.ALLOWED_USER_ID || '';
-   const allowedUserIds = new Set(
-     (rawAllowed.match(/-?\d+/g) || []).map((id) => parseInt(id, 10))
-   );
-
-   bot.use(async (ctx, next) => {
-     const senderId = ctx.from?.id;
-     if (!senderId || !allowedUserIds.has(senderId)) {
-       console.warn(`[Security] Blocked unauthorized access attempt from ID: ${senderId}`);
-       return; // Silently drop or reply with an unauthorized message
-     }
-     await next();
-   });
+3. Follow BotFather's interactive prompts:
+   - **Display Name**: E.g. `My Private AI Companion`
+   - **Username**: Must end with `bot` (e.g. `my_awesome_ai_bot`)
+4. BotFather returns your unique HTTP API Token formatted like:
+   ```text
+   8758364117:AAHIOxa7vOmFgNCbLKEXRUyI8IJ_kL8XqTk
+   ```
+5. Create a file named `.env` in the root of `D:\projects\telegram-ai-bot` (copy from `.env.example`) and paste your token:
+   ```env
+   TELEGRAM_BOT_TOKEN="8758364117:AAHIOxa7vOmFgNCbLKEXRUyI8IJ_kL8XqTk"
    ```
 
+> [!WARNING]
+> Keep your bot token confidential. Anyone with this token has full control over your bot and can read incoming messages. Never commit `.env` to GitHub.
+
+---
+
+### 1.2 Telegram User ID Discovery & Security Whitelisting
+
+Because this bot provides remote terminal execution and access to files on your laptop, **you must restrict access strictly to authorized Telegram users**.
+
+#### Step 1: Find Your Telegram User ID
+1. Message [@userinfobot](https://t.me/userinfobot) in Telegram.
+2. The bot will reply with your numerical user ID (e.g. `8199950189`).
+
+#### Step 2: Add ID to `.env`
+Add your ID to the `ALLOWED_USER_ID` and `TELEGRAM_USER_ID` fields:
+```env
+ALLOWED_USER_ID="8199950189"
+TELEGRAM_USER_ID="8199950189"
+```
+*(For multiple users, separate IDs with commas: `ALLOWED_USER_ID="8199950189,1509442723"`).*
+
+#### Step 3: Verify the Whitelist Middleware in `bot.js`
+In [`bot.js`](file:///D:/projects/telegram-ai-bot/bot.js), every incoming update passes through the security gatekeeper before executing any handler:
+```javascript
+const rawAllowed = process.env.ALLOWED_USER_ID || '';
+const allowedUserIds = new Set(
+  (rawAllowed.match(/-?\d+/g) || []).map((id) => parseInt(id, 10))
+);
+
+bot.use(async (ctx, next) => {
+  const senderId = ctx.from?.id;
+  const chatId = ctx.chat?.id;
+
+  const isAuthorized =
+    (senderId != null && allowedUserIds.has(Number(senderId))) ||
+    (chatId != null && allowedUserIds.has(Number(chatId)));
+
+  if (allowedUserIds.size === 0 || !isAuthorized) {
+    console.warn(`[Security] Blocked unauthorized access attempt from ID: ${senderId}`);
+    return; // Dropped silently; unauthorized users cannot interact
+  }
+  await next();
+});
+```
+
+---
+
 ### 1.3 Project Initialization & Framework Selection
+
 We chose **grammY** over legacy frameworks (`node-telegram-bot-api` or `telegraf`) for its native TypeScript support, modern async middleware pipeline, built-in concurrency control, and zero-overhead WebApp support.
 
-Initialize the project with ES Modules:
+#### Step 1: Install Dependencies
+If starting fresh or adding new dependencies, run:
 ```bash
-npm init -y
 npm install grammy @anthropic-ai/sdk @google/genai dotenv ws pdf-parse
 ```
 
-Ensure `"type": "module"` is set in `package.json`:
+#### Step 2: Configure `package.json`
+Ensure `"type": "module"` is configured in [`package.json`](file:///D:/projects/telegram-ai-bot/package.json) so ES Module imports (`import`/`export`) are enabled:
 ```json
 {
   "name": "telegram-ai-bot",
@@ -129,14 +194,19 @@ Ensure `"type": "module"` is set in `package.json`:
   "type": "module",
   "scripts": {
     "start": "node bot.js",
-    "laptop": "node laptop-runner.js"
+    "laptop": "node laptop-runner.js",
+    "sync": "node sync-drive-d.js"
   }
 }
 ```
 
+---
+
 ### 1.4 Webhook vs Long-Polling on Cloud Providers
-* **Local Development**: Long-polling (`bot.start()`) is ideal because you do not need a domain name or SSL certificate.
-* **Production on Cloud (Render, Fly.io, Railway)**: Cloud hosts require binding to an HTTP port (`$PORT`) to keep containers alive and pass health checks. Use grammY's built-in `webhookCallback`:
+
+The bot automatically switches its transport mode depending on where it runs:
+* **Local Development (`npm start`)**: Uses Long-Polling (`bot.start()`). No domain name, public IP, or SSL certificate is required.
+* **Cloud Hosting (Render, Fly.io, Railway)**: Cloud platforms require binding to an HTTP port (`$PORT`) to keep containers alive and pass health checks. GrammY's `webhookCallback` mounts smoothly to the internal HTTP server:
 
 ```javascript
 import { Bot, webhookCallback } from 'grammy';
@@ -144,7 +214,6 @@ import http from 'http';
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
 const server = http.createServer();
-
 const isProduction = !!process.env.RENDER_EXTERNAL_URL;
 
 if (isProduction) {
@@ -172,14 +241,20 @@ if (isProduction) {
 }
 ```
 
+---
+
 ### 1.5 Unified HTTP Server, Live Health Checks & Remote Restart
-Mounting an integrated Node.js HTTP server alongside Telegram polling serves three critical architectural purposes:
-1. **Cloud Keepalive & Health Probing**: Free and standard cloud containers (such as Render) require periodic HTTP activity to prevent sleeping. The `/health` endpoint serves this, but with an essential architectural safeguard: **it reports live polling status**.
+
+The integrated Node.js HTTP server listens on port `10000` (or `process.env.PORT`) and serves three vital architectural functions:
+
+1. **Live Health Verification (`/health`)**:
    - During the first 60 seconds of container boot, `/health` provides a grace period returning `HTTP 200`.
-   - Once initialized, `/health` continuously verifies `bot.isRunning()`. If Telegram polling ever drops or terminates, `/health` immediately responds with **`HTTP 503 Service Unavailable`** (`{ status: "degraded", bot: "stopped" }`).
-   - This prevents "zombie containers" where the web server stays alive while the bot is dead, enabling external monitors (UptimeRobot) and cloud orchestrators to automatically restart the service.
-2. **Reverse Proxy Tunnel Endpoint**: The HTTP server upgrades incoming connections on `/ws/laptop-agent` to full-duplex WebSockets, unifying health probes, setup script downloads, and laptop control tunnels under a single public port.
-3. **On-Demand Remote Container Restart**: An authenticated `/restart` endpoint allows triggering a clean container reboot via HTTP query parameter or admin secret without logging into the cloud dashboard:
+   - Once running, `/health` continuously verifies `bot.isRunning()`. If Telegram polling ever drops or terminates, `/health` immediately responds with **`HTTP 503 Service Unavailable`** (`{ status: "degraded", bot: "stopped" }`).
+   - This ensures monitoring systems (like UptimeRobot) can alert you if the bot stalls.
+2. **Reverse Proxy Tunnel Endpoint (`/ws/laptop-agent`)**:
+   - Upgrades incoming WebSocket connections from `laptop-runner.js`, unifying health probes, setup script downloads, and laptop control tunnels under a single public port.
+3. **On-Demand Remote Container Restart (`/reboot` or `/restart`)**:
+   - An authenticated `/restart` endpoint allows triggering a clean container reboot via HTTP or Telegram chat without logging into the cloud dashboard:
    ```javascript
    if (pathname === '/restart' || pathname === '/reboot') {
      const secret = url.searchParams.get('secret') || '';
@@ -191,13 +266,13 @@ Mounting an integrated Node.js HTTP server alongside Telegram polling serves thr
    }
    ```
 
+---
+
 ### 1.6 Keeping Render Awake 24/7 via UptimeRobot (Free Cloud Tier)
+
 By default, Render's free tier spins down (puts to sleep) any Web Service after **15 minutes of inactivity** (when no incoming HTTP requests are received). Once a service is sleeping:
 - Outbound Telegram long-polling is suspended, so the bot will not receive or respond to incoming messages.
 - Even if a webhook arrives, waking the container takes 30–50+ seconds ("cold start" latency).
-
-#### The Solution: Automated External Ping (Every 5–10 Minutes)
-Because our bot features an internal HTTP server that listens on port `10000`, we can keep Render awake 24/7 completely free by setting up an external ping monitor via [UptimeRobot](https://uptimerobot.com) (or [cron-job.org](https://cron-job.org)):
 
 ```
 ┌─────────────────────────┐          HTTP GET /health (Every 5 min)          ┌─────────────────────────┐
@@ -215,15 +290,18 @@ Because our bot features an internal HTTP server that listens on port `10000`, w
    * **Monitor Type**: Select `HTTP(s)`
    * **Friendly Name**: `Telegram AI Bot (Render Keepalive)`
    * **URL (or IP)**: `https://your-app-name.onrender.com/health` (e.g. `https://telegram-ai-bot-znei.onrender.com/health`)
-   * **Monitoring Interval**: Set to **`5 minutes`** (or `10 minutes` — must be **under 15 minutes** to prevent sleep).
+   * **Monitoring Interval**: Set to **`5 minutes`** (must be **under 15 minutes** to prevent sleep).
    * **Monitor Timeout**: `30 seconds`
 4. Click **Create Monitor**.
 
 > [!TIP]
 > **Dual Benefit (Keepalive + Failure Alerting)**:
-> In addition to preventing Render from going to sleep, our [`/health`](#15-unified-http-server-live-health-checks--remote-restart) endpoint returns **`503 Service Unavailable`** if the Telegram polling loop ever drops. UptimeRobot will immediately catch the 503 response and notify you via email or push notification, ensuring you are immediately aware if the bot requires attention!
+> In addition to preventing Render from going to sleep, our [`/health`](#15-unified-http-server-live-health-checks--remote-restart) endpoint returns **`503 Service Unavailable`** if the Telegram polling loop ever drops. UptimeRobot will immediately catch the 503 response and notify you via email or push notification!
+
+---
 
 ### 1.7 Self-Healing Polling Watchdog & Container Auto-Recovery
+
 In long-running production deployments (24/7 on Render or Docker), Telegram long-polling can occasionally stall due to transient upstream network disconnects, TCP keepalive timeouts, or temporary instance concurrency conflicts (`409 Conflict: terminated by other getUpdates request`).
 
 To achieve 99.99% unattended uptime, the bot implements a dual-layer watchdog architecture:
@@ -249,22 +327,23 @@ To achieve 99.99% unattended uptime, the bot implements a dual-layer watchdog ar
                                           Fresh Container with Clean Sockets
 ```
 
-1. **Watchdog Supervisor Timer**:
-   Every 15 seconds, a supervisor interval checks whether `bot.isRunning()` is true. If polling remains dead for 3 consecutive cycles (>45 seconds), it invokes `process.exit(1)`. Cloud runtimes (Docker, Render, Kubernetes, PM2) detect the exit and immediately launch a fresh container with clean memory and new network sockets.
-2. **Unbroken Polling Loop**:
-   Unlike default implementations that use `break` upon loop completion, the runner restarts polling if it ever resolves cleanly without an explicit `isShuttingDown` flag, avoiding silent termination.
-3. **Internal AbortController Recycling**:
-   When restarting Grammy polling after an error or conflict, internal abort controllers and running flags (`bot.pollingAbortController = undefined`, `bot.pollingRunning = false`) are reset to prevent `Error: Aborted delay` rejections.
-4. **Instant In-Chat `/reboot` Command**:
-   If an administrator ever needs to force a fresh restart from mobile, typing `/reboot` or `/restart` directly in Telegram issues an immediate reboot confirmation and restarts the cloud container in 15–20 seconds.
+1. **Watchdog Supervisor Timer**: Every 15 seconds, a supervisor interval checks whether `bot.isRunning()` is true. If polling remains dead for 3 consecutive cycles (>45 seconds), it invokes `process.exit(1)`. Cloud runtimes detect the exit and immediately launch a fresh container with clean memory and new network sockets.
+2. **Unbroken Polling Loop**: Unlike default implementations that break upon loop completion, the runner restarts polling if it ever resolves cleanly without an explicit shutdown flag.
+3. **Internal AbortController Recycling**: When restarting Grammy polling after an error or conflict, internal abort controllers and running flags are reset to prevent `Error: Aborted delay` rejections.
+4. **Instant In-Chat `/reboot` Command**: If you ever need to force a fresh restart from mobile, typing `/reboot` directly in Telegram restarts the cloud container in 15–20 seconds.
 
 ---
 
 ## 🎙️ Part 2: Command Architecture, Voice Understanding & Spoken Replies
 
-### 2.1 Scalable Command Routing & Autocomplete Menus
-Telegram bots can automatically register their autocomplete menu with the Telegram API so that when users type `/`, a rich cheat-sheet with descriptions appears:
+This section covers setting up command autocomplete menus, processing audio voice notes, and establishing real-time duplex voice conversations.
 
+### 2.1 Scalable Command Routing & Autocomplete Menus
+
+When users open the bot and type `/`, Telegram displays an interactive command palette with descriptions.
+
+#### How to Register Commands in Telegram:
+In [`bot.js`](file:///D:/projects/telegram-ai-bot/bot.js), we define and register the command list on startup:
 ```javascript
 const botCommands = [
   { command: 'agent', description: '🤖 Autonomous task with terminal, files, and research' },
@@ -282,8 +361,11 @@ await bot.api.setMyCommands(botCommands);
 await bot.api.setMyCommands(botCommands, { scope: { type: 'all_private_chats' } });
 ```
 
+---
+
 ### 2.2 Voice Note Capture & Audio Processing
-When a user sends a voice message, Telegram delivers a `.oga` (Ogg Opus) audio file. The bot downloads the audio stream directly into memory:
+
+When a user speaks into Telegram, the app delivers a `.oga` (Ogg Opus) audio payload. The bot downloads the audio directly into memory:
 
 ```javascript
 bot.on('message:voice', async (ctx) => {
@@ -302,8 +384,11 @@ bot.on('message:voice', async (ctx) => {
 });
 ```
 
+---
+
 ### 2.3 Multimodal Voice-to-Text Transcription via Gemini
-We use **Google Gemini 3.8 Flash** for transcription due to its sub-second latency and zero external dependency footprint (avoiding heavyweight local Python Whisper builds):
+
+Instead of maintaining heavy local Python Whisper models or FFmpeg binaries, we use **Google Gemini 3.8 Flash** via [`@google/genai`](file:///D:/projects/telegram-ai-bot/gemini-live-service.js) for sub-second, highly accurate audio transcription:
 
 ```javascript
 import { GoogleGenAI } from '@google/genai';
@@ -333,11 +418,14 @@ async function transcribeAudioWithGemini(buffer, mimeType = 'audio/ogg') {
 }
 ```
 
+---
+
 ### 2.4 Natural Spoken Audio Responses (`/live` Mode)
-Users can toggle `/live` to receive spoken replies rather than text blocks. When `/live` is active:
+
+Users can type `/live` in Telegram to toggle spoken replies. When `/live` is active:
 1. Claude or Gemini generates the conversational reply text.
-2. The bot synthesizes speech using the Gemini Text-to-Speech API.
-3. The resulting audio buffer is transmitted back to Telegram via `ctx.replyWithVoice`:
+2. The bot synthesizes realistic speech using the Gemini TTS API.
+3. The generated audio buffer is transmitted back to Telegram via `ctx.replyWithVoice`:
 
 ```javascript
 if (userLiveMode.get(ctx.from.id)) {
@@ -348,17 +436,24 @@ if (userLiveMode.get(ctx.from.id)) {
 }
 ```
 
+---
+
 ### 2.5 Real-Time Bidirectional Duplex Voice Calls (`/call`)
-For conversational hands-free interaction, the bot includes a Telegram WebApp that establishes a bidirectional WebSocket stream with Gemini Live:
-* **Audio In**: Web Audio API captures microphone input as 16kHz PCM chunks and streams them over the WebSocket.
-* **Audio Out**: Incoming audio frames from Gemini Live are queued and played back seamlessly in the browser.
-* **Voice Personas (`/voice`)**: Allows users to select expressive voices (e.g., *Aoede, Charon, Fenrir, Kore, Puck*).
+
+For hands-free conversational interaction while driving, walking, or coding, the bot features a duplex voice calling WebApp powered by Gemini Live:
+* **Launch**: Tap `/call` in chat to open the full-screen Telegram WebApp.
+* **Audio Input**: The Web Audio API captures microphone audio as 16kHz PCM chunks and streams them via WebSocket.
+* **Audio Output**: Incoming audio chunks from Gemini Live are queued and played back seamlessly in the browser.
+* **Voice Personas (`/voice`)**: Allows users to switch expressive voices (*Aoede, Charon, Fenrir, Kore, Puck*).
 
 ---
 
 ## 🧠 Part 3: The Hybrid Claude + Gemini Engine, Token Management & File Organization
 
+This section covers orchestrating Claude and Gemini, managing conversation context budgets, and persisting documents permanently across cloud restarts.
+
 ### 3.1 Why a Dual-Brain Engine? (Claude Sonnet 5.5 + Gemini 3.8 Flash)
+
 Rather than relying on a single AI provider, our architecture pairs two industry-leading models:
 
 | Provider & Model | Primary Responsibilities | Why Selected |
@@ -366,7 +461,21 @@ Rather than relying on a single AI provider, our architecture pairs two industry
 | **Anthropic Claude Sonnet 5.5** | General chat, code generation, system architecture, document analysis | Unmatched nuance, thoughtful reasoning, low hallucination rate, and superior software engineering output. |
 | **Google Gemini 3.8 Flash** | Voice transcription, audio synthesis, live Google Search grounding, image generation, fast tool execution | Ultra-fast multimodal processing, native Web search grounding, generous rate limits, and built-in TTS. |
 
+#### Configuring Your API Keys in `.env`:
+```env
+# Anthropic Claude Configuration
+ANTHROPIC_API_KEY="sk-ant-api03-..."
+ANTHROPIC_BASE_URL="https://api.anthropic.com"
+ANTHROPIC_MODEL="claude-sonnet-5-5"
+
+# Google Gemini Configuration
+GEMINI_API_KEY="AIzaSy..."
+```
+
+---
+
 ### 3.2 Token Budgeting & Sliding Context Window
+
 Without active context management, conversation history rapidly balloons, causing high API costs and latency. We implemented a multi-stage budgeting system:
 
 1. **Message Count Cap (`MAX_HISTORY_MESSAGES = 50`)**: Keeps the conversation context within the last 25 turns.
@@ -381,13 +490,19 @@ Without active context management, conversation history rapidly balloons, causin
    }
    ```
 
+---
+
 ### 3.3 Document Parsing Engine (PDF, Text, Code)
-When users send files to the bot, it detects the file extension and extracts content automatically:
-* **PDFs**: Parsed via `pdf-parse` into clean text representations.
+
+When you send a file to the bot in Telegram:
+* **PDFs**: Extracted automatically using `pdf-parse` into structured text and stored in session memory.
 * **Source Code (`.py`, `.js`, `.json`, `.md`, `.sql`)**: Read directly as UTF-8 text with syntax highlighting tags.
-* **Interactive Quizzes (`/quiz`)**: Users can load a lecture slide or code file and type `/quiz` — the bot synthesizes an interactive 5-question multiple-choice quiz testing comprehension.
+* **Interactive Quizzes (`/quiz`)**: Load any lecture note or source code file and type `/quiz` — the bot generates an interactive 5-question multiple-choice quiz testing your comprehension.
+
+---
 
 ### 3.4 A-Z Categorization & Interactive Library (`/library`)
+
 Files uploaded or synced from the laptop are organized into standard categories:
 * 📄 **Documents**: `.pdf`, `.docx`, `.txt`, `.md`
 * 💻 **Code & Scripts**: `.py`, `.js`, `.ts`, `.html`, `.css`, `.json`, `.sql`
@@ -396,10 +511,13 @@ Files uploaded or synced from the laptop are organized into standard categories:
 
 The `/library` command provides an interactive BotFather-style inline keyboard allowing users to browse their storage alphabetical index (A-Z), inspect file sizes, preview contents, rename files, or delete them remotely.
 
+---
+
 ### 3.5 Telegram Cloud Vault with Pinned Index Recovery
+
 Cloud hosts like Render use ephemeral filesystems — whenever code is redeployed or containers restart, locally stored files are wiped.
 
-**The Solution: Free Permanent Storage via Telegram Cloud Vault**
+#### The Solution: Free Permanent Storage via Telegram Cloud Vault
 1. When a file is uploaded, the bot forwards it to Telegram's cloud storage and records its permanent `file_id`.
 2. The index is serialized into a compact JSON payload (`VAULT_DATA`) and pinned in the user's private chat.
 3. On every container reboot, `restoreVaultFromTelegram()` inspects the pinned message, instantly recovering the full file registry, user settings, and local directory configurations!
@@ -408,7 +526,10 @@ Cloud hosts like Render use ephemeral filesystems — whenever code is redeploye
 
 ## 💻 Part 4: Remote Hardware Monitoring & Live Multi-User Agent Fleet
 
+This section walks through connecting your physical laptop to the bot using a secure outbound WebSocket tunnel, enabling live `/spec` inspections and remote execution.
+
 ### 4.1 The Outbound-Only WebSocket Reverse Tunnel
+
 Traditional remote access methods require opening inbound ports, configuring dynamic DNS, or paying for third-party VPNs. If your laptop is on a mobile hotspot, corporate network, or public Wi-Fi, inbound connections are blocked by Carrier-Grade NAT (CGNAT).
 
 **Our Outbound Reverse-Tunnel Architecture**:
@@ -421,7 +542,10 @@ Traditional remote access methods require opening inbound ports, configuring dyn
 [Your Laptop] ──(Outbound WSS:443)──► [Cloud Bot on Render] ◄──(HTTPS)── [Telegram App]
 ```
 
+---
+
 ### 4.2 Comprehensive Laptop Hardware & Spec Inspector (`/spec`)
+
 Sending `/spec` queries live hardware metrics from the laptop daemon in real-time:
 * **Processor (CPU)**: Model name, architecture, active core/thread count, and base clock frequency.
 * **Dual GPU Detection**: Queries `Win32_VideoController` to detect both integrated and dedicated graphics (e.g., *AMD Radeon Graphics + NVIDIA GeForce RTX 3060 Laptop GPU*).
@@ -430,14 +554,20 @@ Sending `/spec` queries live hardware metrics from the laptop daemon in real-tim
 * **Storage Drives**: Calculates total capacity and free gigabytes across all mounted physical drives (`C:`, `D:`).
 * **Offline Resilience**: If the laptop is asleep or restarting, the bot automatically serves the last reported hardware profile with a `🟡 Offline / Cached` indicator.
 
+---
+
 ### 4.3 Multi-User Fleet Monitoring (`/devices`, `/status`)
+
 For shared workspaces or team setups, the bridge supports multiple concurrent devices and users:
 * Each connected machine registers its own `hostname`, `deviceName`, and `userId`.
 * Sending `/devices` lists all authorized members and shows who has an active laptop runner online.
 * Sending `/status` displays the caller's live laptop specs, other team members' devices, active storage directories, loaded documents, and cloud bot memory health.
 
+---
+
 ### 4.4 Installing and Daemonizing the Local Runner (PM2 vs Silent VBScript)
-The local runner should run permanently in the background without cluttering your desktop with open terminal windows. We configured two robust methods:
+
+The local runner should run permanently in the background without cluttering your desktop with open terminal windows. We configured three robust methods:
 
 #### Method 1: PM2 Process Manager (Recommended for Developers)
 ```powershell
@@ -465,46 +595,55 @@ WshShell.CurrentDirectory = currentDir
 WshShell.Run Chr(34) & currentDir & "\run.bat" & Chr(34), 0, False
 Set WshShell = Nothing
 ```
-Double-clicking the Desktop shortcut [`Start-Silent-Agent.vbs`](file:///C:/Users/dsoph/Desktop/Start-Silent-Agent.vbs) launches the agent with **zero CMD or terminal windows visible**.
+Double-clicking [`start_silent.vbs`](file:///D:/projects/telegram-ai-bot/start_silent.vbs) launches the agent with **zero CMD or terminal windows visible**.
+
+#### Method 3: One-Click Batch File (`run.bat`)
+For quick testing and immediate console output, run:
+```cmd
+run.bat
+```
+
+---
 
 ### 4.5 Natural Language Hardware & Sensor Query Routing
-Users often interact with conversational AI using natural phrases rather than remembering explicit slash commands. If a user asks:
+
+You do not need to remember exact slash commands. If you type:
 * *"check my cpu and gpu temperature"*
 * *"how is my cpu doing?"*
-* *"laptop specs"*
 * *"what are my hardware specs?"*
+* *"laptop battery"*
 
-The bot's text dispatcher checks if a laptop is currently connected for their user account. Instead of falling through to standard Claude chat (which cannot inspect remote hardware directly), the bot intelligently intercepts the query and automatically triggers the live [`handleSpecCommand`](#42-comprehensive-laptop-hardware--spec-inspector-spec) pipeline:
-
-```javascript
-const isHardwareQuery =
-  /\b(cpu|gpu|ram|memory|battery|disk|disks|hardware|specs?|temperatures?|temps?)\b/i.test(userMessage) &&
-  /\b(check|show|get|view|what|how|status|spec|temperature|temp|monitor)\b/i.test(userMessage);
-
-if (isHardwareQuery) {
-  const hasLaptop = isLaptopConnected(userId);
-  if (hasLaptop) {
-    await handleSpecCommand(ctx, userId);
-    return;
-  }
-}
-```
-This delivers a frictionless mobile experience: you can ask how your machine is doing in plain English while away, and instantly receive real-time CPU models, clock speeds, GPU cards, RAM usage, battery levels, and disk capacities.
+The bot's text dispatcher intercepts the phrase and automatically invokes [`handleSpecCommand`](#42-comprehensive-laptop-hardware--spec-inspector-spec) to return your live hardware specs!
 
 ---
 
 ## 🛠️ Part 5: Agent Optimization, Interactive Code Review & Fine-Tuning
 
+This section details the autonomous agent loop, file management safety patterns, directory persistence, and remote kill controls.
+
 ### 5.1 Autonomous Tool-Calling Agent (`/agent`)
-The `/agent` command transforms the bot into an autonomous problem-solving agent with four live capabilities:
-1. **PowerShell / Terminal Execution**: Can install npm/pip packages, run compilation scripts, or query system diagnostics.
-2. **File System Inspection & Editing**: Can read source files, apply targeted diffs, or delete temporary assets.
-3. **Live Web Research**: Uses Google Search grounding to retrieve current documentation or API changes.
-4. **Multi-Step Execution Loop**: Autonomously inspects command exit codes, diagnoses error outputs, and self-corrects scripts until the task is complete.
+
+The `/agent` command transforms the bot into an autonomous problem-solving agent with five live tools:
+1. **`run_laptop_terminal(command, cwd)`**: Executes PowerShell commands on your physical machine (e.g. `npm test`, `git status`, `git commit`, `git push`).
+2. **`read_laptop_file(file_path, max_lines)`**: Reads file contents from disk.
+3. **`write_laptop_file(file_path, content)`**: Writes or patches files directly.
+4. **`list_laptop_files(dir_path)`**: Lists files and folders.
+5. **`search_web(query)`**: Real-time Google Search grounding.
+
+#### Autonomous Multi-Step Problem Solving:
+When given an engineering task (e.g., *"/agent inspect tests in D:\projects\app, fix any failing assertions, and commit to git"*), the agent:
+1. Locates and reads the test file via `read_laptop_file`
+2. Diagnoses the failure
+3. Patches the file using `write_laptop_file`
+4. Runs `npm test` via `run_laptop_terminal`
+5. Confirms passing status and commits changes to Git!
+
+---
 
 ### 5.2 The "Hold-in-Memory" Safety Pattern for Generated Code
-To prevent AI from accidentally overwriting production files, we implemented an interactive code review pipeline:
-1. When code is generated, the agent **does not write directly to disk**.
+
+To prevent AI from accidentally overwriting production files when writing new standalone code, we implemented an interactive code review pipeline:
+1. When new code is generated, the agent **does not write directly to disk**.
 2. It caches the code buffer in memory and presents an interactive Telegram inline menu:
    * **`[ 📁 Target Folder ]`**: Saves to your configured project folder.
    * **`[ 🖥️ Desktop ]`**: Saves directly to your Windows Desktop.
@@ -512,7 +651,10 @@ To prevent AI from accidentally overwriting production files, we implemented an 
    * **`[ ✏️ Custom Path ]`**: Prompts you to specify an exact relative or absolute file path.
    * **`[ ❌ Discard ]`**: Discards the generated buffer safely.
 
+---
+
 ### 5.3 Permanent 4-Layer Directory Persistence
+
 One of the most persistent challenges in cloud-hosted bots is remembering user directory settings when containers reset. We solved this with a 4-layer fallback architecture:
 
 ```
@@ -520,19 +662,26 @@ One of the most persistent challenges in cloud-hosted bots is remembering user d
 Checked first             Fallback if container restarts      Restores from chat pinned index     Syncs laptop folder on connect
 ```
 
+* **Setting Directory in Chat**: Type `/directory D:\projects\telegram-ai-bot` in Telegram.
 * **Default Config File**: [`default_user_settings.json`](file:///D:/projects/telegram-ai-bot/default_user_settings.json) is committed to git so fresh cloud instances boot with correct folder knowledge.
 * **Handshake Sync**: Whenever `laptop-runner.js` connects, it passes its local working folder in the query parameters (`storageDir`), which the cloud server automatically registers.
 * **Result**: The bot **never forgets your path**, even when the agent is disconnected or offline.
 
+---
+
 ### 5.4 One-Click Desktop Controls & Remote Kill Switch
+
 Total user control over when the laptop agent is running:
 * **Desktop Shortcuts**:
-  * [**`Disable-Laptop-Agent.bat`**](file:///C:/Users/dsoph/Desktop/Disable-Laptop-Agent.bat): Kills the running node runner and removes Windows Startup / Registry auto-run entries.
-  * [**`Enable-Laptop-Agent.bat`**](file:///C:/Users/dsoph/Desktop/Enable-Laptop-Agent.bat): Restores auto-run and starts the background runner.
+  * [**`Disable-Laptop-Agent.bat`**](file:///D:/projects/telegram-ai-bot/Disable-Laptop-Agent.bat): Kills the running node runner and removes Windows Startup / Registry auto-run entries.
+  * [**`Enable-Laptop-Agent.bat`**](file:///D:/projects/telegram-ai-bot/Enable-Laptop-Agent.bat): Restores auto-run and starts the background runner.
 * **Telegram Remote Kill**:
   * In Telegram `/status`, tap **`[ 🛑 Disable Laptop Agent ]`** or type `/disable_laptop` to shut down the runner on your laptop remotely from your phone.
 
+---
+
 ### 5.5 Interactive In-Chat File Renaming (`userAwaitingRename`)
+
 Users can manage and organize assets stored in either Telegram Cloud Vault or their physical laptop directly inside the Telegram chat UI:
 1. In `/storage` or `/library`, tapping **`[ ✏️ Rename ]`** under any file triggers an interactive session via an in-memory tracking map (`userAwaitingRename`):
    ```javascript

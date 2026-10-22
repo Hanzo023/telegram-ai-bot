@@ -168,6 +168,167 @@ export const AGENT_TOOLS = [
  * Execute an individual tool call
  */
 export async function executeTool(name, args = {}, context = {}) {
+  const norm = String(name || '').toLowerCase().trim();
+
+  // 1. Terminal / Shell command execution (with common LLM aliases)
+  if (
+    [
+      'run_laptop_terminal',
+      'run_terminal_cmd',
+      'run_terminal',
+      'run_command',
+      'execute_command',
+      'exec_command',
+      'terminal',
+      'shell_cmd',
+      'run_shell',
+    ].includes(norm)
+  ) {
+    const command = args.command || args.cmd || args.command_line || args.commandLine;
+    if (!command) {
+      return JSON.stringify({ error: 'No command specified to execute.' });
+    }
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    const effectiveCwd =
+      args.cwd ||
+      args.working_dir ||
+      args.workingDirectory ||
+      context.detectedWorkingDir ||
+      undefined;
+    try {
+      const res = await runLaptopCommand(context.userId, command, effectiveCwd);
+      return JSON.stringify(res);
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // 2. Read file (with common LLM aliases)
+  if (
+    [
+      'read_laptop_file',
+      'get_file_contents',
+      'read_file',
+      'cat_file',
+      'get_file',
+      'read_file_contents',
+      'readlaptopfile',
+    ].includes(norm)
+  ) {
+    const rawPath = args.file_path || args.filePath || args.filename || args.path || args.file;
+    if (!rawPath) {
+      return JSON.stringify({ error: 'No file_path provided to read.' });
+    }
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    const baseDir = context.detectedWorkingDir || context.userDirectory;
+    const effectivePath = joinLaptopPath(baseDir, rawPath);
+    const maxLines = args.max_lines || args.maxLines || args.lines || 300;
+    try {
+      const res = await readLaptopFile(context.userId, effectivePath, maxLines);
+      return JSON.stringify(res);
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // 3. Write file (with common LLM aliases)
+  if (
+    [
+      'write_laptop_file',
+      'write_file',
+      'save_file',
+      'save_laptop_file',
+      'create_file',
+      'edit_file',
+      'update_file',
+      'writelaptopfile',
+    ].includes(norm)
+  ) {
+    const rawPath = args.file_path || args.filePath || args.filename || args.path || args.file;
+    const content =
+      args.content !== undefined
+        ? args.content
+        : args.text !== undefined
+        ? args.text
+        : args.code !== undefined
+        ? args.code
+        : args.data;
+    if (!rawPath) {
+      return JSON.stringify({ error: 'No file_path provided to write.' });
+    }
+    if (content === undefined || content === null) {
+      return JSON.stringify({ error: 'No content provided to write.' });
+    }
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    const baseDir = context.detectedWorkingDir || context.userDirectory;
+    const effectivePath = joinLaptopPath(baseDir, rawPath);
+    try {
+      const res = await writeLaptopFile(context.userId, effectivePath, content);
+      return JSON.stringify(res);
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // 4. List directory contents (with common LLM aliases)
+  if (
+    [
+      'list_laptop_files',
+      'list_directory_contents',
+      'list_files',
+      'list_dir',
+      'dir_list',
+      'ls',
+      'listlaptopfiles',
+    ].includes(norm)
+  ) {
+    const dirPath =
+      args.dir_path ||
+      args.dirPath ||
+      args.directory ||
+      args.path ||
+      args.dir ||
+      context.detectedWorkingDir ||
+      context.userDirectory;
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    try {
+      const res = await listLaptopDirectory(context.userId, dirPath);
+      return JSON.stringify(res);
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // 5. Laptop hardware status / specs (with common LLM aliases)
+  if (
+    [
+      'get_laptop_status',
+      'get_laptop_specs',
+      'laptop_status',
+      'specs',
+      'system_specs',
+      'hardware_status',
+    ].includes(norm)
+  ) {
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    try {
+      const res = await getLaptopStatus(context.userId);
+      return JSON.stringify(res);
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
   switch (name) {
     case 'search_web': {
       const query = args.query || '';
@@ -472,7 +633,14 @@ export async function executeTool(name, args = {}, context = {}) {
  * @param {number} [options.userId] - Telegram User ID to route laptop tools to
  * @returns {Promise<{ finalAnswer: string, stepsExecuted: Array, success: boolean }>}
  */
-export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, userId, userDirectory }) {
+export async function runGeminiAgent({
+  prompt,
+  onStatusUpdate,
+  maxSteps = 25,
+  userId,
+  userDirectory,
+  recentHistory = [],
+}) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not configured in environment variables.');
@@ -480,6 +648,32 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
 
   const ai = new GoogleGenAI({ apiKey });
   const stepsExecuted = [];
+
+  // Extract explicit directory path from prompt if user mentioned one (e.g. "D:\projects\telegram-ai-bot")
+  let detectedWorkingDir = null;
+  const pathMatch = prompt.match(/([a-zA-Z]:\\[^\s"'`]+)/);
+  if (pathMatch) {
+    const raw = pathMatch[1].replace(/[\\\/]+$/, '');
+    if (fs.existsSync(raw) && fs.statSync(raw).isDirectory()) {
+      detectedWorkingDir = raw;
+    } else {
+      const p = path.dirname(raw);
+      if (fs.existsSync(p)) {
+        detectedWorkingDir = p;
+      }
+    }
+  }
+
+  // Include recent conversation turns if available so the agent understands multi-turn requests
+  let inputPrompt = prompt;
+  if (recentHistory && recentHistory.length > 0) {
+    const historyText = recentHistory
+      .map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content.slice(0, 800)}`)
+      .join('\n');
+    inputPrompt = `CONVERSATION CONTEXT (Previous turns in this chat):\n${historyText}\n\nCURRENT USER REQUEST:\n${prompt}`;
+  }
+
+  const effectiveTargetDir = detectedWorkingDir || userDirectory || 'default working directory';
 
   // Models to attempt: primary (gemini-3.5-flash-lite) -> fallback (gemini-3.8-flash)
   const candidateModels = [PRIMARY_MODEL, FALLBACK_MODEL];
@@ -493,18 +687,28 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
 
       let currentResponse = await ai.interactions.create({
         model,
-        input: prompt,
+        input: inputPrompt,
         tools: AGENT_TOOLS,
         system_instruction:
           'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical laptop.\n' +
-          `User\'s target folder on their laptop: "${userDirectory || 'default working directory'}".\n\n` +
+          `User\'s target folder on their laptop: "${effectiveTargetDir}".\n\n` +
           'CRITICAL EXECUTION AND GROUNDING RULES:\n' +
           '1. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s laptop. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
-          '2. ZERO FAKE TOOLS: NEVER output text claiming you executed tools (e.g. "Executed Tools:", "run_code()", "run_shell_command()", "run_script()"). The Telegram interface automatically displays verified tools executed by the system. NEVER simulate tool runs in markdown text.\n' +
-          '3. NEVER LIE ABOUT SAVING: NEVER claim a file has been saved to their laptop unless you actually called `write_laptop_file` and received `{ success: true }`.\n' +
-          '4. TARGET PATH: When saving files without an explicit absolute path, save them into the user\'s target folder ("' + (userDirectory || 'default working directory') + '"). If the user asks for Desktop, save to their Desktop.\n' +
-          '5. INSTALLING & RUNNING: To install packages (e.g. pip install pygame), execute `run_laptop_terminal(command="pip install ...")`. To run scripts, execute `run_laptop_terminal(command="python ...")`.\n' +
-          '6. DISCONNECTED STATE: If a laptop tool returns that the laptop is offline or disconnected, explain honestly that the agent runner is offline and provide the full code in a markdown block so they can save it manually.',
+          '2. OFFICIAL TOOL NAMES:\n' +
+          '   • run_laptop_terminal: Execute shell commands on laptop (e.g. git status, git add, git commit, git push, npm test, python script.py)\n' +
+          '   • read_laptop_file: Read files on laptop (file_path, max_lines)\n' +
+          '   • write_laptop_file: Write or overwrite files on laptop (file_path, content)\n' +
+          '   • list_laptop_files: List files in a directory (dir_path)\n' +
+          '   • get_laptop_status: Inspect laptop hardware specs\n' +
+          '   • search_web: Search Google for documentation or solutions\n' +
+          '3. FULL MULTI-STEP WORKFLOWS: When requested to edit a file and push to Git:\n' +
+          '   a. Read or verify target file via `read_laptop_file`\n' +
+          '   b. Write the complete updated content via `write_laptop_file`\n' +
+          '   c. Execute git operations via `run_laptop_terminal(command="git add . && git commit -m ... && git push", cwd="' + effectiveTargetDir + '")`\n' +
+          '   d. Report the outcome with commit details in your final answer.\n' +
+          '4. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
+          '5. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
+          '6. DISCONNECTED STATE: If a tool reports the laptop is disconnected, explain clearly and provide the complete code so the user can save it manually.',
       });
 
       let stepCount = 0;
@@ -549,7 +753,7 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
               }
             }
 
-            let baseDir = userDirectory || STORAGE_DIR;
+            let baseDir = effectiveTargetDir || userDirectory || STORAGE_DIR;
             if (/(?:to|on)\s+(?:my\s+)?desktop/i.test(prompt)) {
               baseDir = 'C:\\Users\\dsoph\\Desktop';
             }
@@ -580,7 +784,12 @@ export async function runGeminiAgent({ prompt, onStatusUpdate, maxSteps = 8, use
           onStatusUpdate(`⚙️ *Executing tool:* \`${toolName}(${argsSummary})\`...`);
         }
 
-        const toolResult = await executeTool(toolName, toolArgs, { userId, userDirectory });
+        const toolResult = await executeTool(toolName, toolArgs, {
+          userId,
+          userDirectory,
+          detectedWorkingDir,
+          prompt,
+        });
 
         if (onStatusUpdate) {
           onStatusUpdate(`🧠 *Analyzing results from ${toolName}...*`);

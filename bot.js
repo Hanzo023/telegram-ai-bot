@@ -1054,12 +1054,16 @@ async function handleAgentCommand(ctx, prompt) {
   };
 
   const userDirectory = getUserStorageDir(userId);
+  const userHistory = conversationHistory.get(userId) || [];
+  const recentHistory = userHistory.slice(-6);
 
   try {
     const result = await runGeminiAgent({
       prompt,
       userId,
       userDirectory,
+      recentHistory,
+      maxSteps: 25,
       onStatusUpdate: (text) => updateStatus(text),
     });
 
@@ -1074,8 +1078,16 @@ async function handleAgentCommand(ctx, prompt) {
     const { safeText } = sanitizeAndCheckSecrets(reply, 'chat_reply');
     await sendLongMessage(ctx, safeText);
 
-    // If code was generated, prompt user before writing to disk
-    if (result.pendingFile && result.pendingFile.code) {
+    // If code was generated and NOT already written directly via write_laptop_file, prompt user before writing
+    const alreadySavedToDisk =
+      result.stepsExecuted &&
+      result.stepsExecuted.some((s) =>
+        ['write_laptop_file', 'write_file', 'save_file', 'save_laptop_file'].includes(
+          String(s.name || '').toLowerCase()
+        )
+      );
+
+    if (!alreadySavedToDisk && result.pendingFile && result.pendingFile.code) {
       await promptPendingFileSave(ctx, userId, result.pendingFile);
     }
 
