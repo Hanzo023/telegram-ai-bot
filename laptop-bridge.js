@@ -417,14 +417,14 @@ export function setupLaptopBridge(server, allowedUserIds) {
           .catch(() => {});
       }
 
-      // Keepalive ping timer
+      // Keepalive ping timer (every 10s to keep reverse proxy tunnel alive)
       const pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.ping();
         } else {
           clearInterval(pingInterval);
         }
-      }, 25000);
+      }, 10000);
 
       ws.on('message', (data) => {
         try {

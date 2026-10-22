@@ -189,14 +189,14 @@ function connect() {
   try {
     ws = new WebSocket(wsUrl);
 
-    // Keepalive ping timer to prevent cloud reverse proxy (Render) from timing out after 100s idle
+    // Keepalive ping timer (every 5 seconds) to prevent cloud reverse proxy (Render) from timing out
     pingInterval = setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         try {
           ws.ping();
         } catch {}
       }
-    }, 20000);
+    }, 5000);
 
     ws.on('open', async () => {
       reconnectAttempts = 0;
@@ -229,6 +229,11 @@ function connect() {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'connected') {
           log(`[Runner] Server handshake confirmed: ${msg.message}`);
+          return;
+        }
+
+        if (msg.type === 'error') {
+          log(`[Runner] ❌ Bridge Error: ${msg.message}`);
           return;
         }
 

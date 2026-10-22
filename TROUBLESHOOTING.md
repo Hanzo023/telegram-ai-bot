@@ -98,11 +98,12 @@ In [`runner.log`](./runner.log):
 - Intermediate routers or Render NAT close idle TCP connections after 60 seconds without data.
 
 #### 🛠️ Fix
-1. **Heartbeat Pings**: In [`laptop-bridge.js`](./laptop-bridge.js), the server sends automated ping frames every 25 seconds:
+1. **Heartbeat Pings**: Both the client (every 5 seconds in [`laptop-runner.js`](./laptop-runner.js)) and the server (every 10 seconds in [`laptop-bridge.js`](./laptop-bridge.js)) exchange automated ping frames:
    ```javascript
+   // Client ping interval: keeps edge reverse proxy tunnels alive
    const pingInterval = setInterval(() => {
-     if (ws.readyState === WebSocket.OPEN) ws.ping();
-   }, 25000);
+     if (ws && ws.readyState === WebSocket.OPEN) ws.ping();
+   }, 5000);
    ```
 2. **Exponential Reconnect Backoff**: [`laptop-runner.js`](./laptop-runner.js) automatically schedules a clean reconnection within 1.5–10 seconds.
 3. **Spec Caching**: Hardware specs are cached in memory so `/spec` queries still return the machine's profile even during a transient 3-second reconnect.
@@ -156,18 +157,30 @@ try {
 
 #### 🔴 Symptom
 ```text
+[Laptop Bridge] Unauthorized connection attempt: Invalid secret from 127.0.0.1
+-- OR --
 [Runner] Disconnected (code: 4001, reason: "Invalid secret")
 -- OR --
 [Runner] Disconnected (code: 4003, reason: "Unauthorized User ID")
 ```
 
 #### 🔍 Root Cause
-* **Code 4001**: The runner's `LAPTOP_RUNNER_SECRET` does not match the secret expected by the cloud bot.
-* **Code 4003**: The user ID running the laptop client is not listed in `ALLOWED_USER_ID` on the cloud server.
+* **Code 4001 / Invalid Secret**:
+  1. **Token Revocation Mismatch**: By default, the bridge secret is derived from the first 20 characters of `TELEGRAM_BOT_TOKEN` (`process.env.TELEGRAM_BOT_TOKEN.slice(0, 20)`). When you revoke or regenerate your bot token via [@BotFather](https://t.me/BotFather), this prefix changes.
+  2. **Zombie Background Process**: An older detached runner (spawned silently via `start-agent.bat` or `.vbs`) may still be alive in memory loaded with the old token, repeatedly trying to connect with outdated credentials.
+  3. **Cloud Environment Variable Desynchronization**: If you set `LAPTOP_RUNNER_SECRET` in your local `.env`, but omit it in the cloud dashboard (Render Environment Variables), Render falls back to your cloud bot token while your local laptop sends the custom secret.
+* **Code 4003 / Unauthorized User ID**: The numerical Telegram user ID passed by the runner is not present in the server's `ALLOWED_USER_ID` whitelist.
 
 #### 🛠️ Fix
-1. Verify `ALLOWED_USER_ID` in your `.env` contains your exact numerical ID from [@userinfobot](https://t.me/userinfobot).
-2. If `LAPTOP_RUNNER_SECRET` is omitted, the bot defaults to the first 20 characters of `TELEGRAM_BOT_TOKEN`. Ensure both machine and cloud share matching values.
+1. **Kill Zombie Background Runners**:
+   ```powershell
+   # Windows PowerShell: Terminate any orphaned node runner processes
+   Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*laptop-runner*" } | Stop-Process -Force
+   ```
+2. **Synchronize Secrets**:
+   - Easiest method: Leave `LAPTOP_RUNNER_SECRET` blank/commented out on both your local machine and your Render dashboard. Both will automatically derive matching secrets from `TELEGRAM_BOT_TOKEN.slice(0, 20)`.
+   - Explicit method: If you define a custom `LAPTOP_RUNNER_SECRET` in `.env`, ensure the identical key-value pair is saved in your cloud deployment dashboard (Render -> Environment Variables).
+3. **Verify Whitelist**: Ensure `ALLOWED_USER_ID` in both `.env` and Render contains your exact numerical ID from [@userinfobot](https://t.me/userinfobot).
 
 ---
 
