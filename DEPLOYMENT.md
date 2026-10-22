@@ -2,6 +2,9 @@
 
 This guide provides step-by-step instructions for deploying your private Telegram AI Bot & Remote Laptop Agent to run **24/7 in the cloud** without requiring your physical laptop to stay open.
 
+> 🛠️ **Encountered an issue or error?** See the [Known Errors & Troubleshooting Guide](./TROUBLESHOOTING.md) for solutions to common deployment pitfalls.  
+> 📱 **Looking for a non-technical feature tour?** See the [Product Overview & Feature Tour](./PRODUCT_OVERVIEW.md).
+
 ---
 
 ## 📑 Contents

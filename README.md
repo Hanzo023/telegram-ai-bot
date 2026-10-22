@@ -7,6 +7,9 @@ An autonomous private Telegram bot that bridges cloud AI with your local PC via 
 - **Dual AI Engine**: Claude Sonnet for reasoning/coding; Gemini Flash for voice notes, search, and TTS.
 - **24/7 Zero-Cost Deployment**: Hosted on Render with self-healing polling watchdogs and keepalive monitoring.
 
+> 📱 **Looking for a fast, non-technical introduction?** Read the [Product Overview & Feature Tour](./PRODUCT_OVERVIEW.md).  
+> 🛠️ **Building from scratch or stuck on a bug?** Check the [Known Errors & Troubleshooting Guide](./TROUBLESHOOTING.md).
+
 ---
 
 ## ⚡ Quick-Start Checklist for New Developers
@@ -25,6 +28,8 @@ If you just cloned this repository or are setting up your project files for the 
 
 | File / Folder | Purpose & Role |
 | :--- | :--- |
+| [`./PRODUCT_OVERVIEW.md`](./PRODUCT_OVERVIEW.md) | Consumer-facing feature tour, everyday use cases & cheat-sheet (no technical jargon) |
+| [`./TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) | Exhaustive catalog of known errors, root causes, and fixes from development |
 | [`./bot.js`](./bot.js) | Main entry point: grammY bot dispatcher, command routing, dual-brain orchestration, HTTP server & WebSocket bridge |
 | [`./laptop-runner.js`](./laptop-runner.js) | Local laptop background runner: gathers CPU/GPU/RAM specs and executes RPC tasks via outbound WebSocket |
 | [`./laptop-bridge.js`](./laptop-bridge.js) | Server-side WebSocket server: manages laptop connections, authentication, and task dispatching |
