@@ -82,8 +82,8 @@ In the **Environment Variables** section on your Render dashboard, configure:
 
 | Variable | Description | Example / Value |
 | :--- | :--- | :--- |
-| `TELEGRAM_BOT_TOKEN` | Bot API token from [@BotFather](https://t.me/BotFather) | `8758364117:AAHIOxa...` |
-| `ALLOWED_USER_ID` | Your numerical Telegram user ID | `8199950189` |
+| `TELEGRAM_BOT_TOKEN` | Bot API token from [@BotFather](https://t.me/BotFather) | `123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ` |
+| `ALLOWED_USER_ID` | Your numerical Telegram user ID | `<YOUR_TELEGRAM_USER_ID>` |
 | `ANTHROPIC_API_KEY` | Your Anthropic Claude API key | `sk-ant-api03-...` |
 | `ANTHROPIC_BASE_URL` | Anthropic endpoint or custom proxy | `https://api.anthropic.com` |
 | `ANTHROPIC_MODEL` | Claude model name | `claude-sonnet-5-5` |
@@ -108,14 +108,10 @@ To prevent sleeping, set up an automated pinger using [UptimeRobot](https://upti
 3. Configure the monitor:
    * **Monitor Type**: `HTTP(s)`
    * **Friendly Name**: `Telegram AI Bot (Render Keepalive)`
-   * **URL (or IP)**: `https://your-bot-name.onrender.com/health` (e.g. `https://telegram-ai-bot-znei.onrender.com/health`)
+   * **URL (or IP)**: `https://your-bot-name.onrender.com/health`
    * **Monitoring Interval**: **`5 minutes`** (or `10 minutes` — must be **under 15 minutes** to prevent sleep!)
    * **Monitor Timeout**: `30 seconds`
 4. Click **Create Monitor**.
-
-#### Dual Advantage of the `/health` Endpoint:
-* **Keeps Render Awake**: Every 5 minutes, UptimeRobot sends an HTTP GET request to `/health`, resetting Render's 15-minute sleep timer.
-* **Instant Failure Alerting**: Our `/health` endpoint checks `bot.isRunning()`. If Telegram long-polling ever stops, `/health` immediately responds with **`HTTP 503 Service Unavailable`**. UptimeRobot will instantly catch the failure and alert you via email or notification.
 
 ---
 
@@ -124,7 +120,7 @@ To prevent sleeping, set up an automated pinger using [UptimeRobot](https://upti
 Once your cloud service is running on Render:
 1. Open Telegram and send `/setup_laptop` (or `/runner`) to your bot.
 2. The bot will deliver a personalized **`start-agent.bat`** pre-configured with your user ID and cloud URL.
-3. Save `start-agent.bat` into your local project directory (e.g., `D:\projects\telegram-ai-bot`).
+3. Save `start-agent.bat` into your local project directory (e.g., `<your-project-folder>`).
 4. Double-click **`start-agent.bat`** (or run `Enable-Laptop-Agent.bat` for silent background autostart).
 5. The bot will send a confirmation in Telegram:
    ```

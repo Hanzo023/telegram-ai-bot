@@ -277,6 +277,23 @@ async function handleTask(action, payload) {
       const { command, cwd } = payload;
       if (!command) return { success: false, error: 'No command provided.' };
 
+      // Destructive command safety guard (prevent accidental wipes or prompt injection attacks)
+      const DANGEROUS_PATTERNS = [
+        /\b(?:format)\s+[a-zA-Z]:/i,
+        /\b(?:diskpart|mkfs|dd\s+if=)/i,
+        /\b(?:rmdir|rd)\s+.*[\/\\](?:s|q).*[a-zA-Z]:[\\\/]?$/i,
+        /\bdel\s+.*[\/\\](?:f|s|q).*[a-zA-Z]:[\\\/]?$/i,
+        /\b(?:shutdown|init\s+0)\b/i,
+      ];
+      for (const pattern of DANGEROUS_PATTERNS) {
+        if (pattern.test(command.trim())) {
+          return {
+            success: false,
+            error: 'Execution blocked: Command matches restricted destructive pattern for system safety.',
+          };
+        }
+      }
+
       console.log(`[Runner] ⚙️ Executing: "${command}" (cwd: ${cwd || process.cwd()})`);
 
       return new Promise((resolve) => {
