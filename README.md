@@ -1,10 +1,10 @@
 # 🤖 Telegram AI Bot & Remote Laptop Agent
 
-An autonomous private Telegram bot that bridges cloud AI with your local PC via an outbound reverse WebSocket tunnel. Run terminal commands, inspect hardware specs, and query Claude & Gemini from anywhere with zero port-forwarding.
+An autonomous private Telegram bot that bridges cloud AI with your local PC via an outbound reverse WebSocket tunnel. Run terminal commands, inspect hardware specs, and chat with AI from anywhere with zero port-forwarding.
 
 ### ⚡ Highlights
 - **Zero Firewall Hassle**: Outbound WSS tunnel traverses NAT/CGNAT without open router ports.
-- **Dual AI Engine**: Claude Sonnet for reasoning/coding; Gemini Flash for voice notes, search, and TTS.
+- **Unified AI Engine**: Powered 100% by Google Gemini (Flash, Live, Nano Banana) for conversational chat, code generation, reasoning, voice notes, live duplex calls, and web search (with optional Anthropic Claude Sonnet 5.5 hybrid mode).
 - **24/7 Zero-Cost Deployment**: Hosted on Render with self-healing polling watchdogs and keepalive monitoring.
 
 > 📱 **Looking for a fast, non-technical introduction?** Read the [Product Overview & Feature Tour](./PRODUCT_OVERVIEW.md).  
@@ -63,8 +63,8 @@ If you just cloned this repository or are setting up your project files for the 
   - [2.3 Multimodal Voice-to-Text Transcription via Gemini](#23-multimodal-voice-to-text-transcription-via-gemini)
   - [2.4 Natural Spoken Audio Responses (`/live` Mode)](#24-natural-spoken-audio-responses-live-mode)
   - [2.5 Real-Time Bidirectional Duplex Voice Calls (`/call`)](#25-real-time-bidirectional-duplex-voice-calls-call)
-- [Part 3: The Hybrid Claude + Gemini Engine, Token Management & File Organization](#-part-3-the-hybrid-claude--gemini-engine-token-management--file-organization)
-  - [3.1 Why a Dual-Brain Engine? (Claude Sonnet 5.5 + Gemini 3.8 Flash)](#31-why-a-dual-brain-engine-claude-sonnet-55--gemini-38-flash)
+- [Part 3: The Google Gemini Engine (with Optional Claude Hybrid Mode), Token Management & File Organization](#-part-3-the-google-gemini-engine-with-optional-claude-hybrid-mode-token-management--file-organization)
+  - [3.1 Native Google Gemini Engine (with Optional Hybrid Dual-Brain)](#31-native-google-gemini-engine-with-optional-hybrid-dual-brain)
   - [3.2 Token Budgeting & Sliding Context Window](#32-token-budgeting--sliding-context-window)
   - [3.3 Document Parsing Engine (PDF, Text, Code)](#33-document-parsing-engine-pdf-text-code)
   - [3.4 A-Z Categorization & Interactive Library (`/library`)](#34-a-z-categorization--interactive-library-library)
@@ -97,8 +97,8 @@ If you just cloned this repository or are setting up your project files for the 
                       │         Render Cloud Host (bot.js)           │
                       │  • grammY Dispatcher & Command Middleware    │
                       │  • Token Budgeter & Context Sliding Window   │
-                      │  • Claude Sonnet 5.5 (Reasoning & Code)      │
-                      │  • Gemini 3.8 Flash (Voice, Search, Tools)   │
+                      │  • Google Gemini 3.8 Flash (Chat, Code, Vision, Voice)│
+                      │  • (Optional) Claude Sonnet 5.5 Hybrid Engine        │
                       │  • Pinned Cloud Vault Sync Index             │
                       │  • WebSocket Server (/ws/laptop-agent)       │
                       └──────────────────────┬───────────────────────┘
@@ -461,32 +461,60 @@ For hands-free conversational interaction while driving, walking, or coding, the
 
 ---
 
-## 🧠 Part 3: The Hybrid Claude + Gemini Engine, Token Management & File Organization
+## 🧠 Part 3: The Google Gemini Engine (with Optional Claude Hybrid Mode), Token Management & File Organization
 
-This section covers orchestrating Claude and Gemini, managing conversation context budgets, and persisting documents permanently across cloud restarts.
+This section covers configuring Google Gemini as your primary all-in-one AI engine, managing conversation context budgets, and optionally setting up hybrid Claude Sonnet 5.5 operation.
 
-### 3.1 Why a Dual-Brain Engine? (Claude Sonnet 5.5 + Gemini 3.8 Flash)
+### 3.1 Native Google Gemini Engine (with Optional Hybrid Dual-Brain)
 
-Rather than relying on a single AI provider, our architecture pairs two industry-leading models:
+The bot runs 100% natively on **Google Gemini** as a unified AI brain for conversation, multimodal reasoning, tool calling, and live duplex audio:
 
-| Provider & Model | Primary Responsibilities | Why Selected |
+| Feature / Task | Primary Model | Key Strengths |
 | :--- | :--- | :--- |
-| **Anthropic Claude Sonnet 5.5** | General chat, code generation, system architecture, document analysis | Unmatched nuance, thoughtful reasoning, low hallucination rate, and superior software engineering output. |
-| **Google Gemini 3.8 Flash** | Voice transcription, audio synthesis, live Google Search grounding, image generation, fast tool execution | Ultra-fast multimodal processing, native Web search grounding, generous rate limits, and built-in TTS. |
+| **Conversational Chat & Code** | `gemini-3.8-flash` (auto-fallback to `3.5-flash` / `3.5-flash-lite`) | High-speed reasoning, 1M+ token context window, precise code generation, and automatic resilience against demand spikes. |
+| **Multimodal Vision & Documents** | `gemini-3.8-flash` | Native photo/screenshot inspection and direct PDF OCR extraction. |
+| **Real-Time Spoken Audio** | `gemini-3.8-live` | Expressive spoken voice note replies (`/live`) and sub-second bidirectional duplex calling (`/call`). |
+| **Live Web Grounding & Search** | Gemini Web Grounding + Google Search | Real-time factual web verification, YouTube search, and structured research. |
+| **Image Generation** | `gemini-nano-banana-2.1` | Instant on-demand image synthesis directly inside Telegram via `/image`. |
 
-#### Configuring Your API Keys in `.env`:
+#### Primary Configuration (Gemini-First) in `.env`:
+Only a single Gemini API key is needed to run the entire bot:
 ```env
-# Anthropic Claude Configuration
-ANTHROPIC_API_KEY="sk-ant-api03-..."
-ANTHROPIC_BASE_URL="https://api.anthropic.com"
-ANTHROPIC_MODEL="claude-sonnet-5-5"
-
-# Google Gemini Configuration
+# Google Gemini Configuration (Required)
 GEMINI_API_KEY="AIzaSy..."
+GEMINI_MODEL="gemini-3.8-flash"
 
 # Storage Directory Configuration (defaults to ./)
 STORAGE_DIR="./"
 ```
+
+---
+
+#### 🔀 Optional Hybrid Mode: Anthropic Claude Sonnet 5.5 + Gemini
+
+If you have an Anthropic Claude API key and prefer using **Claude Sonnet 5.5** for general conversational chat and coding while keeping Gemini for voice notes, live duplex calls, and web search, you can enable the optional hybrid mode:
+
+1. In your `.env` file (or Render/hosting dashboard), configure:
+```env
+# Enable Optional Hybrid Mode
+AI_PROVIDER="hybrid"
+
+# Anthropic Claude Configuration (Optional)
+ANTHROPIC_API_KEY="sk-ant-api03-..."
+ANTHROPIC_BASE_URL="https://api.anthropic.com"
+ANTHROPIC_MODEL="claude-sonnet-5-5"
+ANTHROPIC_MAX_TOKENS=20000
+
+# Google Gemini Configuration (Required for voice, search, image & agent tools)
+GEMINI_API_KEY="AIzaSy..."
+```
+
+2. **How Hybrid Mode Operates**:
+   * **General Chat & Code**: Routed to Claude Sonnet 5.5 for nuanced logic and deep coding discussion.
+   * **Spoken Voice Notes & Duplex Calls**: Handled by Gemini 3.8 Live (`/live` and `/call`).
+   * **Web Search Grounding & Deep Research**: Grounded via Gemini with live citation links.
+   * **Image Generation**: Created on demand via Gemini Nano Banana (`/image`).
+   * **Automatic Quota & Outage Fallback**: If your Claude API key expires, encounters rate limits, or suffers an outage, the bot automatically and seamlessly falls back to Gemini 3.8 Flash so your chats are never interrupted!
 
 ---
 
@@ -744,7 +772,7 @@ Users can manage and organize assets stored in either Telegram Cloud Vault or th
 | `/reboot` | 🔄 System | Cleanly restart the Telegram bot container process to auto-heal connections |
 | `/devices` | 👥 Team | View all authorized users' laptops and their online status |
 | `/agent <task>` | 🤖 Agent | Run autonomous tasks with live terminal tools, file editing, and research |
-| `/agent_mode` | 🎚️ Agent | Toggle Agent mode as default for all messages (or `/cancel` to restore Claude) |
+| `/agent_mode` | 🎚️ Agent | Toggle Agent mode as default for all messages (or `/cancel` to restore standard chat) |
 | `/live` | 🎙️ Voice | Toggle spoken audio voice replies for all bot responses |
 | `/call` | 📞 Voice | Launch low-latency bidirectional voice call WebApp |
 | `/voice` | 🗣️ Voice | Switch Gemini Live voice persona (Aoede, Charon, Fenrir, Kore, Puck) |
@@ -767,8 +795,8 @@ Users can manage and organize assets stored in either Telegram Cloud Vault or th
 
 * **Creator & Maintainer**: **Din Sopheakyuth**
 * **AI Architecture & Intelligence**:
-  * **Google Gemini & Google DeepMind**: For powering multimodal voice comprehension, Gemini 3.8 Flash / Live APIs, live search grounding, ideation, and architectural solutions throughout the development lifecycle.
-  * **Anthropic Claude**: For powering deep reasoning, nuanced conversation, and software engineering capabilities via Claude Sonnet 5.5.
+  * **Google Gemini & Google DeepMind**: For powering conversational reasoning, multimodal vision, voice comprehension, Gemini 3.8 Flash / Live APIs, live search grounding, ideation, and architectural solutions throughout the development lifecycle.
+  * **Anthropic Claude (Optional Hybrid)**: For powering deep reasoning, nuanced conversation, and software engineering capabilities via Claude Sonnet 5.5 when hybrid mode is enabled.
   * **Antigravity (Google DeepMind)**: For autonomous pair-programming and rapid development assistance.
 
 Licensed under the [MIT License](LICENSE).

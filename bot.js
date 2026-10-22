@@ -355,10 +355,19 @@ if (!telegramToken) {
 const bot = new Bot(telegramToken);
 setBotApi(bot.api);
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  ...(process.env.ANTHROPIC_BASE_URL ? { baseURL: process.env.ANTHROPIC_BASE_URL } : {}),
-});
+// AI Provider Configuration (Default: Pure Gemini; Optional: Hybrid Claude)
+const AI_PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
+const anthropicApiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
+const isHybridMode =
+  (AI_PROVIDER === 'hybrid' || AI_PROVIDER === 'claude' || AI_PROVIDER === 'anthropic') &&
+  !!anthropicApiKey;
+
+const anthropic = anthropicApiKey
+  ? new Anthropic({
+      apiKey: anthropicApiKey,
+      ...(process.env.ANTHROPIC_BASE_URL ? { baseURL: process.env.ANTHROPIC_BASE_URL } : {}),
+    })
+  : null;
 
 const anthropicModel =
   process.env.ANTHROPIC_MODEL ||
@@ -368,9 +377,133 @@ const anthropicModel =
 
 const ANTHROPIC_MAX_TOKENS = parseInt(process.env.ANTHROPIC_MAX_TOKENS, 10) || 20000;
 
-const googleAI = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
-});
+const geminiApiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
+if (!geminiApiKey && !anthropicApiKey) {
+  console.error('❌ FATAL: GEMINI_API_KEY (or GOOGLE_API_KEY) is missing or empty in environment variables!');
+  console.error('Please configure GEMINI_API_KEY in your hosting provider settings (e.g. Render dashboard) or .env file.');
+  process.exit(1);
+}
+
+const googleAI = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
+
+const geminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const candidateGeminiModels = [
+  geminiModel,
+  'gemini-3.8-flash',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+].filter(Boolean);
+const uniqueGeminiModels = [...new Set(candidateGeminiModels)];
+
+console.log(
+  `[AI Engine] Mode: ${isHybridMode ? 'Hybrid (Claude Sonnet + Gemini)' : 'Pure Google Gemini'}` +
+  ` | Model: ${isHybridMode ? anthropicModel : geminiModel}`
+);
+
+async function callGeminiWithRetry(fn, maxRetries = 3, initialDelay = 1500) {
+  let delay = initialDelay;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isRetryable =
+        err.status === 503 ||
+        err.status === 429 ||
+        err.message?.includes('503') ||
+        err.message?.includes('high demand') ||
+        err.message?.includes('RESOURCE_EXHAUSTED');
+      if (isRetryable && attempt < maxRetries) {
+        console.warn(`[Gemini] Temporary error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
+        await new Promise((r) => setTimeout(r, delay));
+        delay *= 2;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+async function callGeminiWithFallback(modelFn, models = uniqueGeminiModels) {
+  if (!googleAI) throw new Error('Gemini API is not initialized. Please configure GEMINI_API_KEY.');
+  let lastErr = null;
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    try {
+      return await callGeminiWithRetry(() => modelFn(model));
+    } catch (err) {
+      lastErr = err;
+      const isUnavailable =
+        err.status === 503 ||
+        err.status === 429 ||
+        err.status === 404 ||
+        err.message?.includes('503') ||
+        err.message?.includes('high demand') ||
+        err.message?.includes('no longer available') ||
+        err.message?.includes('NOT_FOUND') ||
+        err.message?.includes('RESOURCE_EXHAUSTED');
+      if (isUnavailable && i < models.length - 1) {
+        console.warn(`[Gemini] Model ${model} unavailable (${err.message?.slice(0, 80)}). Trying fallback model ${models[i + 1]}...`);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error('All Gemini models failed');
+}
+
+function formatHistoryForGemini(history) {
+  const contents = [];
+  for (const turn of history) {
+    const role = turn.role === 'assistant' || turn.role === 'model' ? 'model' : 'user';
+    const parts = [];
+
+    if (typeof turn.content === 'string') {
+      if (turn.content.trim()) {
+        parts.push({ text: turn.content });
+      }
+    } else if (Array.isArray(turn.content)) {
+      for (const item of turn.content) {
+        if (!item) continue;
+        if (typeof item === 'string') {
+          if (item.trim()) parts.push({ text: item });
+        } else if (item.type === 'text' && item.text) {
+          parts.push({ text: item.text });
+        } else if (item.type === 'image') {
+          if (item.source?.type === 'base64' && item.source?.data) {
+            parts.push({
+              inlineData: {
+                mimeType: item.source.media_type || 'image/jpeg',
+                data: item.source.data,
+              },
+            });
+          } else if (item.inlineData) {
+            parts.push({ inlineData: item.inlineData });
+          }
+        } else if (item.inlineData) {
+          parts.push({ inlineData: item.inlineData });
+        }
+      }
+    }
+
+    if (parts.length === 0) {
+      parts.push({ text: '...' });
+    }
+
+    // Merge consecutive turns with the same role for Gemini API compliance
+    if (contents.length > 0 && contents[contents.length - 1].role === role) {
+      contents[contents.length - 1].parts.push(...parts);
+    } else {
+      contents.push({ role, parts });
+    }
+  }
+
+  // Ensure first turn is from 'user'
+  while (contents.length > 0 && contents[0].role !== 'user') {
+    contents.shift();
+  }
+
+  return contents;
+}
 
 const conversationHistory = new Map();
 const userLastDocument = new Map();
@@ -704,7 +837,7 @@ async function triggerUserQueueExecution(userId) {
     return;
   }
 
-  // If Claude is currently generating a response for this user, do NOT fire a parallel turn.
+  // If AI is currently generating a response for this user, do NOT fire a parallel turn.
   // The items remain buffered in q.items and will be executed when the current turn finishes.
   if (q.isProcessing) {
     return;
@@ -730,14 +863,14 @@ async function triggerUserQueueExecution(userId) {
       q.latestCtx = null;
     }
 
-    // After completing the turn, check if subsequent messages arrived while Claude was responding
+    // After completing the turn, check if subsequent messages arrived while AI was responding
     if (q.activeDownloads > 0) {
       scheduleDebounce(userId);
     } else if (q.items.length > 0) {
       if (q.timer) {
         // Debounce timer is still ticking down from a recent incoming message
       } else {
-        // Debounce period already completed while Claude was generating; trigger next turn immediately
+        // Debounce period already completed while AI was generating; trigger next turn immediately
         triggerUserQueueExecution(userId).catch((err) => {
           console.error(`Error in chained user queue execution for ${userId}:`, sanitizeError(err));
         });
@@ -825,7 +958,7 @@ async function processUserBatch(userId, items, ctx) {
       text: promptText,
     });
 
-    await sendToClaudeWithHistory(ctx, multimodalContent);
+    await sendToAIWithHistory(ctx, multimodalContent);
   } else {
     // Text-only batch: join all texts chronologically
     const combinedText = textItems
@@ -839,7 +972,7 @@ async function processUserBatch(userId, items, ctx) {
       } else if (userAgentMode.get(userId)) {
         await handleAgentCommand(ctx, combinedText);
       } else {
-        await sendToClaudeWithHistory(ctx, combinedText);
+        await sendToAIWithHistory(ctx, combinedText);
       }
     }
   }
@@ -892,7 +1025,7 @@ async function handleLiveVoiceReply(ctx, textPrompt) {
       statusMsg.message_id,
       `⚠️ *Gemini Live Notice:*\n${err.message || 'Connection error'}\n\n` +
       `💡 Note: Check your Gemini API key or quota at Google AI Studio.\n\n` +
-      `Send /cancel anytime to return to standard Claude chat.`,
+      `Send /cancel anytime to return to standard chat.`,
       { parse_mode: 'Markdown' }
     ).catch(() => {});
   }
@@ -1131,9 +1264,13 @@ bot.use(async (ctx, next) => {
 });
 
 bot.command(['start', 'help'], async (ctx) => {
+  const engineDesc = isHybridMode
+    ? 'Powered by *Claude Sonnet 5.5* & *Gemini 3.8 Flash / Live*.'
+    : 'Powered by *Google Gemini 3.8 Flash & Live*.';
+
   await ctx.reply(
     '✨ *Welcome to Your Personal AI Assistant*\n' +
-    'Powered by *Claude Sonnet 5.5* & *Gemini 3.8 Flash / Live*.\n\n' +
+    `${engineDesc}\n\n` +
     'Send me any message, voice note, photo, or document and I\'ll assist you right away!\n\n' +
     '🤖 *Autonomous AI Agent*\n' +
     '• `/agent <prompt>` — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +
@@ -1188,7 +1325,7 @@ bot.command(['live', 'live_mode', 'livemode'], async (ctx) => {
     setUserLiveMode(userId, false);
     await ctx.reply(
       `📝 *Gemini Live Voice Mode: DISABLED*\n\n` +
-      `• Returned to standard Claude text chat.\n` +
+      `• Returned to standard text chat.\n` +
       `• Send \`/live\` anytime to turn Live Voice back on.`,
       { parse_mode: 'Markdown' }
     );
@@ -1207,13 +1344,13 @@ bot.command(['live', 'live_mode', 'livemode'], async (ctx) => {
         `• **Voice Persona:** *${userVoice}* (Change with /voice)\n` +
         `• **Status:** Stays active until you manually cancel it!\n\n` +
         `🗣️ *Go ahead, send any message or voice note to begin.*\n\n` +
-        `❌ Send \`/cancel\` or \`/live\` anytime to return to standard Claude chat.`,
+        `❌ Send \`/cancel\` or \`/live\` anytime to return to standard chat.`,
         { parse_mode: 'Markdown' }
       );
     } else {
       await ctx.reply(
         `📝 *Gemini Live Voice Mode: DISABLED*\n\n` +
-        `• Returned to standard Claude text chat.\n` +
+        `• Returned to standard text chat.\n` +
         `• Send \`/live\` anytime to turn Live Voice back on.`,
         { parse_mode: 'Markdown' }
       );
@@ -1330,9 +1467,9 @@ bot.command('agent', async (ctx) => {
   if (!prompt) {
     await ctx.reply(
       '🤖 *Gemini Autonomous Agent (One-Time Task)*\n\n' +
-      'Run a single objective using autonomous tools without changing your default chat with Claude.\n\n' +
+      'Run a single objective using autonomous tools without changing your default chat mode.\n\n' +
       '• **How it works:** Executes web search, YouTube, file inspection, and math calculations in a ReAct loop to solve your specific task.\n' +
-      '• **When to use `/agent`:** When you want a quick tool or research task done for this message only. Your regular chat stays with Claude.\n' +
+      '• **When to use `/agent`:** When you want a quick tool or research task done for this message only. Your regular chat stays active.\n' +
       '• **When to use `/agent_mode`:** When you want the agent to answer *all* future messages automatically without typing `/agent` each time.\n\n' +
       '*Usage Example:*\n' +
       '`/agent Search the web for latest releases in Node.js, and check my cloud vault for any notes`',
@@ -1358,6 +1495,11 @@ bot.command(['agent_mode', 'agentmode'], async (ctx) => {
 
   userAgentMode.set(userId, isEnabled);
 
+  const restoredTitle = isHybridMode ? '🧠 *Claude Standard Mode: RESTORED*' : '💬 *Standard Chat Mode: RESTORED*';
+  const restoredDesc = isHybridMode
+    ? 'Switched back to Claude (best for coding, reasoning, and document discussion).'
+    : 'Switched back to standard conversational chat.';
+
   await ctx.reply(
     isEnabled
       ? `🤖 *Gemini Agent Mode: ENABLED*\n\n` +
@@ -1365,9 +1507,9 @@ bot.command(['agent_mode', 'agentmode'], async (ctx) => {
         `• **Automatic Tools:** Every message you send can now automatically trigger web searches, file checks, YouTube searches, and calculations.\n\n` +
         `❌ *How to Turn Off / Cancel:*\n` +
         `• Send \`/agent_mode\` again (or \`/agent_mode off\`).\n` +
-        `• Or simply send \`/cancel\` anytime to restore Claude standard chat.`
-      : `🧠 *Claude Standard Mode: RESTORED*\n\n` +
-        `• **Default Assistant:** Switched back to Claude (best for coding, reasoning, and document discussion).\n` +
+        `• Or simply send \`/cancel\` anytime to restore standard chat.`
+      : `${restoredTitle}\n\n` +
+        `• **Default Assistant:** ${restoredDesc}\n` +
         `• **Single Tasks:** You can still run on-demand agent tasks anytime with \`/agent <prompt>\`.`,
     { parse_mode: 'Markdown' }
   );
@@ -1573,7 +1715,7 @@ async function handleClearAll(ctx) {
 
   await ctx.reply(
     '✅ *All chat history & loaded documents cleared!*\n\n' +
-    '• 🧠 Claude has forgotten previous messages.\n' +
+    '• 🧠 The AI assistant has forgotten previous messages.\n' +
     '• 📄 The active document has been unloaded from chat.\n' +
     '• 📁 *Files in your folder & Cloud Vault are safe:* Nothing was deleted from your drive or cloud. You can browse or re-open them anytime with /library.\n\n' +
     '💡 *To clear visible message bubbles in Telegram:*\n' +
@@ -1612,7 +1754,7 @@ async function handleClear(ctx) {
     userLastDocument.delete(userId);
     await ctx.reply(
       '✅ *Conversation history cleared!*\n\n' +
-      'Claude has forgotten previous messages.\n\n' +
+      'The AI assistant has forgotten previous messages.\n\n' +
       '💡 *To clear visible message bubbles in Telegram:*\n' +
       'Tap the 3 dots (⋮) in the top-right corner → "Clear history".',
       { parse_mode: 'Markdown' }
@@ -1817,7 +1959,7 @@ async function handleWebSearch(ctx, query) {
 
   const webResults = await searchWeb(cleanQuery, 5);
 
-  // Use Gemini 3.8 Flash to perform deep research and format a high-quality answer (preserving Claude balance)
+  // Use Gemini to perform deep research and format a high-quality answer
   let geminiResearch = '';
   try {
     const webContext =
@@ -1835,9 +1977,9 @@ async function handleWebSearch(ctx, query) {
       `3. Format neatly with markdown bullet points and clear sections.\n` +
       `4. Keep the explanation concise, high-value, and directly useful.`;
 
-    const response = await callGeminiWithRetry(() =>
+    const response = await callGeminiWithFallback((model) =>
       googleAI.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model,
         contents: prompt,
       })
     );
@@ -2121,16 +2263,18 @@ bot.command('cancel', async (ctx) => {
     cancelled.push('🎙️ Gemini Live Voice Mode');
   }
 
+  const normalChatTarget = isHybridMode ? 'Claude' : 'Gemini';
+
   if (cancelled.length > 0) {
     await ctx.reply(
       `✅ *${cancelled.join(' & ')} cancelled.*\n\n` +
-      `You are now back in standard AI chat mode with Claude. Send any message, photo, or question to chat!`,
+      `You are now back in standard AI chat mode (${normalChatTarget}). Send any message, photo, or question to chat!`,
       { parse_mode: 'Markdown' }
     );
   } else {
     await ctx.reply(
       `ℹ️ *No active command, agent, or live voice mode to cancel.*\n\n` +
-      `You are already in normal AI chat mode with Claude. Send any message, photo, or question to chat!`,
+      `You are already in normal AI chat mode (${normalChatTarget}). Send any message, photo, or question to chat!`,
       { parse_mode: 'Markdown' }
     );
   }
@@ -2200,7 +2344,7 @@ bot.command('status', async (ctx) => {
     ? '🤖 Gemini Autonomous Agent (All chats)'
     : activeModeObj
     ? (activeModeNames[activeModeObj.mode] || `\`${activeModeObj.mode}\` (/cancel to exit)`)
-    : '💬 Normal Chat Mode (Claude)';
+    : (isHybridMode ? '💬 Normal Chat Mode (Claude)' : '💬 Normal Chat Mode (Gemini)');
 
   const userDir = getUserStorageDir(userId);
   const userMode = getUserStorageMode(userId);
@@ -2462,9 +2606,9 @@ async function parseDocumentBuffer(buffer, fileExtension, fileName = '') {
     if (!text && googleAI) {
       try {
         const base64Data = Buffer.from(buffer).toString('base64');
-        const geminiRes = await callGeminiWithRetry(() =>
+        const geminiRes = await callGeminiWithFallback((model) =>
           googleAI.models.generateContent({
-            model: 'gemini-3.8-flash',
+            model,
             contents: [
               {
                 role: 'user',
@@ -3151,12 +3295,12 @@ function sanitizeError(err) {
   return sanitizeAndCheckSecrets(msg, 'error_message').safeText;
 }
 
-async function bundleCodeWithGemini(claudeResponseText, userPrompt) {
+async function bundleCodeWithGemini(responseCodeText, userPrompt) {
   if (!googleAI) return null;
   const prompt =
     `The user asked: "${userPrompt}"\n\n` +
-    `Another AI provided the following game/application code and explanation, but it is split into separate snippets or requires manual assembly:\n\n` +
-    `"""\n${claudeResponseText}\n"""\n\n` +
+    `The following game/application code and explanation was generated, but it is split into separate snippets or requires manual assembly:\n\n` +
+    `"""\n${responseCodeText}\n"""\n\n` +
     `Task: Group, combine, and bundle all the code into ONE single, complete, fully-functional, self-contained, directly runnable file (for browser games, merge into one <!DOCTYPE html> with inline <style> and <script>; for Python, merge into one runnable .py script).\n` +
     `Rules:\n` +
     `1. Do NOT omit any logic, functions, styles, or features.\n` +
@@ -3165,9 +3309,9 @@ async function bundleCodeWithGemini(claudeResponseText, userPrompt) {
     `4. Do not include conversational intro or outro.`;
 
   try {
-    const res = await callGeminiWithRetry(() =>
+    const res = await callGeminiWithFallback((model) =>
       googleAI.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model,
         contents: prompt,
       })
     );
@@ -3207,7 +3351,7 @@ async function handleGameAndCodeDelivery(ctx, assistantMessage, userContent) {
     return false;
   }
 
-  // 1. Check if Claude already provided a complete self-contained file:
+  // 1. Check if the assistant already provided a complete self-contained file:
   let finalCode = null;
   let codeLang = 'html';
 
@@ -3236,10 +3380,10 @@ async function handleGameAndCodeDelivery(ctx, assistantMessage, userContent) {
     codeLang = blocks[0].lang || 'html';
   }
 
-  // 2. If Claude was NOT able to provide a single complete file (fragmented snippets or multi-part code):
-  // Fall back to Gemini 3.8 Flash to bundle and group into a single file
+  // 2. If the assistant was NOT able to provide a single complete file (fragmented snippets or multi-part code):
+  // Fall back to Gemini to bundle and group into a single file
   if (!finalCode && googleAI) {
-    console.log('Claude output requires code bundling; invoking Gemini 3.8 Flash to group into a single file...');
+    console.log('AI output requires code bundling; invoking Gemini to group into a single file...');
     const geminiBundled = await bundleCodeWithGemini(assistantMessage, userPromptText);
     if (geminiBundled) {
       const geminiBlocks = extractCodeBlocks(geminiBundled);
@@ -3331,7 +3475,7 @@ async function handleGameAndCodeDelivery(ctx, assistantMessage, userContent) {
   }
 }
 
-async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
+async function sendToAIWithHistory(ctx, content, systemOverride = null) {
   const userId = ctx.from.id;
   const q = getUserQueue(userId);
   const wasAlreadyProcessing = q.isProcessing;
@@ -3347,7 +3491,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   }
   userLastInteraction.set(userId, now);
 
-  const isMultimodal = Array.isArray(content) && content.some((part) => part.type === 'image');
+  const isMultimodal = Array.isArray(content) && content.some((part) => part.type === 'image' || part.inlineData);
   if (isMultimodal) {
     // Visual media query: immediately unload active document so it never pollutes visual queries
     userLastDocument.delete(userId);
@@ -3360,7 +3504,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
   const activeDoc = await getOrAutoLoadDocument(userId);
   const history = conversationHistory.get(userId);
 
-  // Guarantee history starts with a user message for Anthropic API requirements
+  // Guarantee history starts with a user message
   while (history.length > 0 && history[0].role !== 'user') {
     history.shift();
   }
@@ -3431,35 +3575,64 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       systemInstruction = systemOverride;
     }
 
-    let response;
-    try {
-      response = await anthropic.messages.create({
-        model: anthropicModel,
-        max_tokens: ANTHROPIC_MAX_TOKENS,
-        system: systemInstruction,
-        messages: history,
-      });
-    } catch (tokenErr) {
-      if (ANTHROPIC_MAX_TOKENS > 8192 && /max_tokens/i.test(tokenErr?.message || '')) {
-        console.warn(`Model ${anthropicModel} rejected ${ANTHROPIC_MAX_TOKENS} tokens; retrying with 8192...`);
-        response = await anthropic.messages.create({
-          model: anthropicModel,
-          max_tokens: 8192,
-          system: systemInstruction,
-          messages: history,
-        });
-      } else {
-        throw tokenErr;
+    let assistantMessage = '';
+
+    // If hybrid mode is configured and Anthropic key is present, attempt Claude
+    if (isHybridMode && anthropic) {
+      try {
+        let response;
+        try {
+          response = await anthropic.messages.create({
+            model: anthropicModel,
+            max_tokens: ANTHROPIC_MAX_TOKENS,
+            system: systemInstruction,
+            messages: history,
+          });
+        } catch (tokenErr) {
+          if (ANTHROPIC_MAX_TOKENS > 8192 && /max_tokens/i.test(tokenErr?.message || '')) {
+            console.warn(`Model ${anthropicModel} rejected ${ANTHROPIC_MAX_TOKENS} tokens; retrying with 8192...`);
+            response = await anthropic.messages.create({
+              model: anthropicModel,
+              max_tokens: 8192,
+              system: systemInstruction,
+              messages: history,
+            });
+          } else {
+            throw tokenErr;
+          }
+        }
+        const textBlocks = response.content?.filter((block) => block.type === 'text') || [];
+        assistantMessage = textBlocks.map((block) => block.text).join('\n').trim();
+      } catch (claudeErr) {
+        console.warn('[Claude API Error in Hybrid Mode]:', claudeErr.status || '', sanitizeError(claudeErr));
+        console.log('Hybrid mode: Claude unavailable or quota exceeded; falling back to Gemini for user response...');
       }
+    }
+
+    // Default / Native Gemini conversational execution
+    if (!assistantMessage) {
+      if (!googleAI) {
+        throw new Error('No AI provider available. Please configure GEMINI_API_KEY in your .env file.');
+      }
+      const geminiContents = formatHistoryForGemini(history);
+      const geminiRes = await callGeminiWithFallback((model) =>
+        googleAI.models.generateContent({
+          model,
+          contents: geminiContents,
+          config: {
+            systemInstruction,
+            maxOutputTokens: 20000,
+          },
+        })
+      );
+      assistantMessage = (geminiRes?.text || '').trim();
     }
 
     clearInterval(typingInterval);
 
-    // Safely extract text blocks, ignoring thinking/reasoning blocks
-    const textBlocks = response.content?.filter((block) => block.type === 'text') || [];
-    const assistantMessage =
-      textBlocks.map((block) => block.text).join('\n').trim() ||
-      'Sorry, I could not generate a response.';
+    if (!assistantMessage) {
+      assistantMessage = 'Sorry, I could not generate a response.';
+    }
 
     history.push({
       role: 'assistant',
@@ -3481,7 +3654,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
     const imageMsgIndices = [];
     for (let i = 0; i < history.length; i++) {
       const msg = history[i];
-      if (Array.isArray(msg.content) && msg.content.some((part) => part.type === 'image')) {
+      if (Array.isArray(msg.content) && msg.content.some((part) => part.type === 'image' || part.inlineData)) {
         imageMsgIndices.push(i);
       }
     }
@@ -3492,7 +3665,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
         if (idx !== latestImageIdx && idx < history.length - 6) {
           const msg = history[idx];
           msg.content = msg.content
-            .filter((part) => part.type !== 'image')
+            .filter((part) => part.type !== 'image' && !part.inlineData)
             .concat([{ type: 'text', text: '[Earlier image already analyzed above]' }]);
         }
       }
@@ -3504,52 +3677,7 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
       await sendLongMessage(ctx, safeAssistantMsg);
     }
   } catch (error) {
-    console.error('Error calling Claude API:', error.status, sanitizeError(error));
-
-    // If Claude API fails (e.g. 400 "The requested model is not available", rate limit, or proxy outage),
-    // automatically and gracefully fall back to Gemini 3.8 Flash so the user receives a seamless response
-    if (googleAI) {
-      console.log('Claude API unavailable; falling back to Gemini 3.8 Flash for user response...');
-      try {
-        const userPromptStr = typeof content === 'string'
-          ? content
-          : Array.isArray(content)
-            ? content.map(p => p.text || '').join('\n')
-            : String(content || '');
-
-        const geminiFallbackPrompt =
-          `${systemInstruction}\n\n` +
-          `User prompt: ${userPromptStr}\n\n` +
-          `Respond helpfully and thoroughly as the AI assistant.`;
-
-        const geminiRes = await callGeminiWithRetry(() =>
-          googleAI.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents: geminiFallbackPrompt,
-            config: {
-              maxOutputTokens: 20000,
-            },
-          })
-        );
-
-        const geminiReply = geminiRes?.text?.trim() || 'Sorry, I could not generate a response.';
-        history.push({
-          role: 'assistant',
-          content: geminiReply,
-        });
-        scheduleConversationHistoryPersistence();
-
-        const deliveredAsFile = await handleGameAndCodeDelivery(ctx, geminiReply, content);
-        if (!deliveredAsFile) {
-          const { safeText: safeAssistantMsg } = sanitizeAndCheckSecrets(geminiReply, 'chat_reply');
-          await sendLongMessage(ctx, safeAssistantMsg);
-        }
-        return;
-      } catch (geminiFallbackErr) {
-        console.error('Gemini fallback failed as well:', sanitizeError(geminiFallbackErr));
-      }
-    }
-
+    console.error('Error generating AI response:', error.status || '', sanitizeError(error));
     history.pop();
     scheduleConversationHistoryPersistence();
 
@@ -3569,6 +3697,8 @@ async function sendToClaudeWithHistory(ctx, content, systemOverride = null) {
     }
   }
 }
+
+const sendToClaudeWithHistory = sendToAIWithHistory;
 
 bot.on('message:document', async (ctx) => {
   const document = ctx.message.document;
@@ -3603,7 +3733,7 @@ bot.on('message:document', async (ctx) => {
 
     if (promptCaption) {
       // User sent a specific prompt or question with the file: answer it directly!
-      await sendToClaudeWithHistory(ctx, promptCaption);
+      await sendToAIWithHistory(ctx, promptCaption);
     } else if (docResult.isDuplicate) {
       // Duplicate file detected: inform user that duplicate wasn't saved, but it's ready for chat
       const icon = cat.icon || '📁';
@@ -3647,28 +3777,6 @@ bot.on('message:document', async (ctx) => {
   }
 });
 
-async function callGeminiWithRetry(fn, maxRetries = 3, initialDelay = 1500) {
-  let delay = initialDelay;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const isRetryable =
-        err.status === 503 ||
-        err.status === 429 ||
-        err.message?.includes('503') ||
-        err.message?.includes('high demand');
-      if (isRetryable && attempt < maxRetries) {
-        console.warn(`[Gemini] Temporary error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
-        await new Promise((r) => setTimeout(r, delay));
-        delay *= 2;
-        continue;
-      }
-      throw err;
-    }
-  }
-}
-
 async function transcribeAudioWithGemini(base64Audio, mimeType) {
   const contents = [
     {
@@ -3690,9 +3798,9 @@ async function transcribeAudioWithGemini(base64Audio, mimeType) {
     },
   ];
 
-  const response = await callGeminiWithRetry(() =>
+  const response = await callGeminiWithFallback((model) =>
     googleAI.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model,
       contents: contents,
     })
   );
@@ -3916,10 +4024,10 @@ async function generateQuizQuestions(contextText) {
     `4. "correct_option_id" must be an integer (0, 1, 2, or 3) indicating the correct choice index.\n` +
     `5. "explanation" must be informative and under 180 characters.`;
 
-  // Gemini 3.8 Flash exclusively generates the quiz (preserving 100% of Claude balance)
-  const res = await callGeminiWithRetry(() =>
+  // Generate quiz using Gemini
+  const res = await callGeminiWithFallback((model) =>
     googleAI.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model,
       contents: quizPrompt,
     })
   );
@@ -4200,7 +4308,7 @@ bot.on('callback_query:data', async (ctx) => {
     const name = active?.mode ? (modeNames[active.mode] || active.mode) : 'Command';
     await ctx.answerCallbackQuery({ text: `${name} mode cancelled!` });
     await ctx.reply(
-      `✅ *${name} mode cancelled.*\n\nYou are now back in normal AI chat mode! Send any message or question to chat with Claude.`,
+      `✅ *${name} mode cancelled.*\n\nYou are now back in normal AI chat mode! Send any message or question to chat.`,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -5326,9 +5434,9 @@ bot.on('callback_query:data', async (ctx) => {
             : content;
         const fullPrompt = `${prompt}\n\nFile: "${file.name}" (${file.ext})\nContent:\n\`\`\`\n${docExcerpt}\n\`\`\``;
 
-        const res = await callGeminiWithRetry(() =>
+        const res = await callGeminiWithFallback((model) =>
           googleAI.models.generateContent({
-            model: 'gemini-3.8-flash',
+            model,
             contents: fullPrompt,
           })
         );

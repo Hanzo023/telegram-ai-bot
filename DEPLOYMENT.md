@@ -50,7 +50,7 @@ This guide provides step-by-step instructions for deploying your private Telegra
                       └──────────────────────────────────────────────┘
 ```
 
-* **Cloud Server (`bot.js`)**: Runs 24/7 on Render. It receives messages from Telegram, calls Claude Sonnet 5.5 and Gemini 3.8 Flash, and hosts the WebSocket bridge.
+* **Cloud Server (`bot.js`)**: Runs 24/7 on Render. It receives messages from Telegram, calls Google Gemini (with optional Claude Sonnet hybrid support), and hosts the WebSocket bridge.
 * **Local Laptop Runner (`laptop-runner.js`)**: Runs on your physical computer. It dials out to the cloud server, allowing you to run PowerShell/bash commands and check hardware status from your phone while away.
 
 ---
@@ -85,16 +85,26 @@ In the **Environment Variables** section on your Render dashboard, configure:
 
 | Variable | Description | Example / Value |
 | :--- | :--- | :--- |
-| `TELEGRAM_BOT_TOKEN` | Bot API token from [@BotFather](https://t.me/BotFather) | `123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ` |
-| `ALLOWED_USER_ID` | Your numerical Telegram user ID | `<YOUR_TELEGRAM_USER_ID>` |
-| `ANTHROPIC_API_KEY` | Your Anthropic Claude API key | `sk-ant-api03-...` |
-| `ANTHROPIC_BASE_URL` | Anthropic endpoint or custom proxy | `https://api.anthropic.com` |
-| `ANTHROPIC_MODEL` | Claude model name | `claude-sonnet-5-5` |
-| `GEMINI_API_KEY` | Google Gemini API key from AI Studio | `AIzaSy...` |
+| `TELEGRAM_BOT_TOKEN` | **(Required)** Bot API token from [@BotFather](https://t.me/BotFather) | `123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ` |
+| `ALLOWED_USER_ID` | **(Required)** Your numerical Telegram user ID | `<YOUR_TELEGRAM_USER_ID>` |
+| `GEMINI_API_KEY` | **(Required)** Google Gemini API key from [Google AI Studio](https://aistudio.google.com) | `AIzaSy...` or `AQ....` |
+| `GEMINI_MODEL` | *(Optional)* Default Gemini model name (defaults to `gemini-3.8-flash`) | `gemini-3.8-flash` |
 | `SERVER_URL` | Public Render service URL | `https://<your-app-name>.onrender.com` |
 | `STORAGE_DIR` | *(Optional)* Default working directory on laptop (defaults to `./`) | `./` |
 | `LAPTOP_RUNNER_SECRET` | *(Optional)* Custom secret for laptop runner auth. If omitted, automatically defaults to the first 20 chars of `TELEGRAM_BOT_TOKEN`. Must match runner if set. | `my_secret_token_or_omit` |
 | `YOUTUBE_COOKIES` | *(Optional)* Netscape format cookies text | Exported via *Get cookies.txt LOCALLY* extension |
+
+#### 🔀 Optional: Hybrid Dual-Brain Mode (Anthropic Claude + Gemini)
+
+The bot operates 100% independently on Google Gemini without needing any additional AI keys. However, if you wish to run in **Hybrid Mode** (pairing Anthropic Claude Sonnet 5.5 for text/coding alongside Gemini for multimodal vision, voice notes, live duplex calls, and web search), you can optionally add:
+
+| Variable | Description | Example / Value |
+| :--- | :--- | :--- |
+| `AI_PROVIDER` | Set to `hybrid` to enable dual-brain mode | `hybrid` |
+| `ANTHROPIC_API_KEY` | Your Anthropic Claude API key | `sk-ant-api03-...` |
+| `ANTHROPIC_BASE_URL` | *(Optional)* Anthropic endpoint or custom proxy | `https://api.anthropic.com` |
+| `ANTHROPIC_MODEL` | *(Optional)* Claude model name (defaults to `claude-sonnet-5-5`) | `claude-sonnet-5-5` |
+| `ANTHROPIC_MAX_TOKENS`| *(Optional)* Max output tokens (defaults to `20000`) | `20000` |
 
 Click **Deploy Web Service**.
 
@@ -151,11 +161,11 @@ Railway does not spin down free containers, making it an excellent alternative i
 ### Step 2: Add Variables
 1. Navigate to your project service ➔ **Variables** tab.
 2. Add your environment variables:
-   * `TELEGRAM_BOT_TOKEN`
-   * `ALLOWED_USER_ID`
-   * `ANTHROPIC_API_KEY`
-   * `ANTHROPIC_BASE_URL`
-   * `GEMINI_API_KEY`
+   * `TELEGRAM_BOT_TOKEN` (Required)
+   * `ALLOWED_USER_ID` (Required)
+   * `GEMINI_API_KEY` (Required primary AI key)
+   * `GEMINI_MODEL` (Optional: `gemini-3.8-flash`)
+   * *(Optional for Hybrid Mode)* `AI_PROVIDER=hybrid`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`
 3. Railway will build and launch your bot automatically.
 
 ---

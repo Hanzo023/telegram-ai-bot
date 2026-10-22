@@ -14,7 +14,7 @@
                                            │ Telegram Message
                                            ▼
                     ┌──────────────────────────────────────────────┐
-                    │         CLOUD BRAIN (Claude + Gemini)        │
+                    │       CLOUD BRAIN (Google Gemini Native)     │
                     │   • Deep reasoning & coding assistance       │
                     │   • Live Google search & audio synthesis     │
                     └──────────────────────┬───────────────────────┘
@@ -46,10 +46,10 @@ Don't feel like typing or reading long text blocks while walking or driving?
 * **Voice Replies (`/live`)**: Send a voice note or text. The bot replies with a natural, expressive spoken audio note.
 * **Hands-Free Duplex Calls (`/call`)**: Opens a real-time voice call WebApp inside Telegram. Speak naturally and get instant answers with sub-second latency powered by Gemini Live.
 
-### 4. 🧠 Dual-Brain Intelligence (Claude + Gemini)
-Instead of relying on just one AI, this bot automatically orchestrates the best model for the job:
-* **Anthropic Claude Sonnet 5.5**: Tackles complex coding, architecture, logic, and deep analysis with thoughtful precision.
-* **Google Gemini 3.8 Flash**: Handles instant audio transcription, voice generation, live Google Search grounding, and high-speed autonomous tools.
+### 4. 🧠 All-in-One AI Intelligence (Google Gemini Native + Optional Hybrid)
+Powered 100% natively by Google Gemini:
+* **Google Gemini 3.8 Flash**: Handles conversational chat, code generation, instant audio transcription, voice generation, live Google Search grounding, and high-speed autonomous tools.
+* **Optional Hybrid Mode (Claude Sonnet 5.5)**: Want a dual-brain setup? You can optionally connect Anthropic Claude for coding/text while keeping Gemini for voice and search.
 
 ### 5. ☁️ Permanent Free File Vault (`/storage` & `/library`)
 Send any PDF, code script, spreadsheet, or photo to the bot:
