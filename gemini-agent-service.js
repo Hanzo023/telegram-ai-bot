@@ -14,7 +14,7 @@ import {
   isPathAbsolute,
 } from './laptop-bridge.js';
 
-const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
+const STORAGE_DIR = process.env.STORAGE_DIR || process.cwd();
 const PRIMARY_MODEL = process.env.GEMINI_AGENT_MODEL || 'gemini-3.5-flash-lite';
 const FALLBACK_MODEL = 'gemini-3.8-flash';
 
@@ -755,7 +755,7 @@ export async function runGeminiAgent({
 
             let baseDir = effectiveTargetDir || userDirectory || STORAGE_DIR;
             if (/(?:to|on)\s+(?:my\s+)?desktop/i.test(prompt)) {
-              baseDir = 'C:\\Users\\dsoph\\Desktop';
+              baseDir = path.join(os.homedir(), 'Desktop');
             }
             const destPath = joinLaptopPath(baseDir, detectedFilename);
 

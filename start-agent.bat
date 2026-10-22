@@ -17,11 +17,23 @@ if "%1"=="--disable" goto DISABLE
 if "%1"=="--stop" goto DISABLE
 if "%1"=="-d" goto DISABLE
 
+set "SERVER_URL=https://your-bot-name.onrender.com"
+set "TELEGRAM_USER_ID="
+
+:: Dynamically read from .env if present
+if exist "%~dp0.env" (
+  for /f "usebackq tokens=1,* delims==" %%A in ("%~dp0.env") do (
+    if /i "%%A"=="SERVER_URL" set "SERVER_URL=%%~B"
+    if /i "%%A"=="TELEGRAM_USER_ID" set "TELEGRAM_USER_ID=%%~B"
+    if /i "%%A"=="ALLOWED_USER_ID" if not defined TELEGRAM_USER_ID set "TELEGRAM_USER_ID=%%~B"
+  )
+)
+
 echo ========================================================
 echo   Telegram AI Remote Laptop Agent Runner
 echo ========================================================
-echo [SERVER]  https://telegram-ai-bot-znei.onrender.com
-echo [USER ID] 8199950189
+echo [SERVER]  %SERVER_URL%
+echo [USER ID] %TELEGRAM_USER_ID%
 echo.
 
 if not exist node_modules\ws (
@@ -54,14 +66,14 @@ echo   [OK] HANDSHAKE CONFIRMED WITH TELEGRAM AI BOT!
 echo ========================================================
 echo  Device:   %COMPUTERNAME%
 echo  Status:   CONNECTED AND READY FOR TELEGRAM COMMANDS
-echo  Server:   wss://telegram-ai-bot-znei.onrender.com
+echo  Server:   %SERVER_URL%
 echo  Mode:     PERMANENT BACKGROUND DAEMON [Detached]
 echo.
 echo  Closing this window will NOT disconnect the agent.
 echo  The runner is running completely independently in background.
 echo.
 echo  To stop or disable anytime, double-click:
-echo    Disable-Laptop-Agent.bat on your Desktop.
+echo    Disable-Laptop-Agent.bat
 echo ========================================================
 echo Window closing in 4 seconds or press any key...
 timeout /t 4
@@ -81,7 +93,7 @@ exit /b 0
 
 :FOREGROUND
 echo Starting in foreground mode, press Ctrl+C to stop...
-node laptop-runner.js --user 8199950189 --server https://telegram-ai-bot-znei.onrender.com %*
+node laptop-runner.js %*
 exit /b 0
 
 :DISABLE

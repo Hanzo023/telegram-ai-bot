@@ -1,11 +1,11 @@
-# 🤖 Telegram AI Bot & Autonomous Remote Agent Guide
+# 🤖 Telegram AI Bot & Remote Laptop Agent
 
-> A private, production-ready AI companion on Telegram powered by **Anthropic Claude Sonnet 5.5** and **Google Gemini 3.8 Flash**, featuring full remote PC control via an outbound reverse tunnel.
+An autonomous private Telegram bot that bridges cloud AI with your local PC via an outbound reverse WebSocket tunnel. Run terminal commands, inspect hardware specs, and query Claude & Gemini from anywhere with zero port-forwarding.
 
-### 💡 What It Actually Does
-* 📱 **Control Your PC from Telegram**: Check hardware specs, run terminal commands, and read or write files from your phone via an outbound reverse tunnel (no open ports or static IP required).
-* 🧠 **Dual-Brain Architecture**: Claude Sonnet 5.5 for deep reasoning and code generation; Gemini 3.8 Flash for instant voice note transcription, spoken audio replies, and live Google Search grounding.
-* ☁️ **100% Free 24/7 Cloud Uptime**: Runs on Render's free tier with automated UptimeRobot keepalive probes and a self-healing polling watchdog.
+### ⚡ Highlights
+- **Zero Firewall Hassle**: Outbound WSS tunnel traverses NAT/CGNAT without open router ports.
+- **Dual AI Engine**: Claude Sonnet for reasoning/coding; Gemini Flash for voice notes, search, and TTS.
+- **24/7 Zero-Cost Deployment**: Hosted on Render with self-healing polling watchdogs and keepalive monitoring.
 
 ---
 
@@ -17,7 +17,7 @@ If you just cloned this repository or are setting up your project files for the 
 [1] Clone & Install      --> git clone <repo> && cd <repo> && npm install
 [2] Configure .env       --> Copy .env.example to .env and fill in API keys
 [3] Start Bot Server     --> npm start (runs on http://localhost:10000)
-[4] Connect Laptop Agent --> npm run laptop (or double-click run.bat)
+[4] Connect Laptop Agent --> npm run laptop (or double-click ./run.bat)
 [5] Test in Telegram     --> Send /status or /spec to verify connection!
 ```
 
@@ -25,16 +25,16 @@ If you just cloned this repository or are setting up your project files for the 
 
 | File / Folder | Purpose & Role |
 | :--- | :--- |
-| [`bot.js`](bot.js) | Main entry point: grammY bot dispatcher, command routing, dual-brain orchestration, HTTP server & WebSocket bridge |
-| [`laptop-runner.js`](laptop-runner.js) | Local laptop background runner: gathers CPU/GPU/RAM specs and executes RPC tasks via outbound WebSocket |
-| [`laptop-bridge.js`](laptop-bridge.js) | Server-side WebSocket server: manages laptop connections, authentication, and task dispatching |
-| [`gemini-agent-service.js`](gemini-agent-service.js) | Autonomous Gemini agent loop: handles multi-step tool calls, terminal execution, file editing, and web search |
-| [`gemini-live-service.js`](gemini-live-service.js) | Gemini Live voice synthesis, duplex audio streaming, and voice note transcription |
-| [`live-call-server.js`](live-call-server.js) | Duplex voice calling WebApp server for real-time `/call` sessions |
-| [`search-service.js`](search-service.js) | Google Search grounding and YouTube metadata search utilities |
-| [`.env.example`](.env.example) | Template of all required environment variables |
-| [`run.bat`](run.bat) | One-click Windows batch launcher for the local agent runner |
-| [`start_silent.vbs`](start_silent.vbs) | Completely invisible Windows launcher (0 terminal windows visible) |
+| [`./bot.js`](./bot.js) | Main entry point: grammY bot dispatcher, command routing, dual-brain orchestration, HTTP server & WebSocket bridge |
+| [`./laptop-runner.js`](./laptop-runner.js) | Local laptop background runner: gathers CPU/GPU/RAM specs and executes RPC tasks via outbound WebSocket |
+| [`./laptop-bridge.js`](./laptop-bridge.js) | Server-side WebSocket server: manages laptop connections, authentication, and task dispatching |
+| [`./gemini-agent-service.js`](./gemini-agent-service.js) | Autonomous Gemini agent loop: handles multi-step tool calls, terminal execution, file editing, and web search |
+| [`./gemini-live-service.js`](./gemini-live-service.js) | Gemini Live voice synthesis, duplex audio streaming, and voice note transcription |
+| [`./live-call-server.js`](./live-call-server.js) | Duplex voice calling WebApp server for real-time `/call` sessions |
+| [`./search-service.js`](./search-service.js) | Google Search grounding and YouTube metadata search utilities |
+| [`./.env.example`](./.env.example) | Template of all required environment variables |
+| [`./run.bat`](./run.bat) | One-click Windows batch launcher for the local agent runner |
+| [`./start_silent.vbs`](./start_silent.vbs) | Completely invisible Windows launcher (0 terminal windows visible) |
 
 ---
 
@@ -67,8 +67,8 @@ If you just cloned this repository or are setting up your project files for the 
   - [4.3 Multi-User Fleet Monitoring (`/devices`, `/status`)](#43-multi-user-fleet-monitoring-devices-status)
   - [4.4 Installing and Daemonizing the Local Runner (PM2 vs Silent VBScript)](#44-installing-and-daemonizing-the-local-runner-pm2-vs-silent-vbscript)
   - [4.5 Natural Language Hardware & Sensor Query Routing](#45-natural-language-hardware--sensor-query-routing)
-- [Part 5: Agent Optimization, Interactive Code Review & Fine-Tuning](#-part-5-agent-optimization-interactive-code-review--fine-tuning)
-  - [5.1 Autonomous Tool-Calling Agent (`/agent`)](#51-autonomous-tool-calling-agent-agent)
+- [Part 5: Agent Optimization, Interactive Code Review & Security Boundaries](#-part-5-agent-optimization-interactive-code-review--security-boundaries)
+  - [5.1 Autonomous Tool-Calling Agent (`/agent`) & Safety Boundaries](#51-autonomous-tool-calling-agent-agent--safety-boundaries)
   - [5.2 The "Hold-in-Memory" Safety Pattern for Generated Code](#52-the-hold-in-memory-safety-pattern-for-generated-code)
   - [5.3 Permanent 4-Layer Directory Persistence](#53-permanent-4-layer-directory-persistence)
   - [5.4 One-Click Desktop Controls & Remote Kill Switch](#54-one-click-desktop-controls--remote-kill-switch)
@@ -128,7 +128,7 @@ This section guides new developers through creating their Telegram bot, locking 
    ```text
    123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ
    ```
-5. Create a file named `.env` in the root of your project directory (copy from `.env.example`) and paste your token:
+5. Create a file named `.env` in the root of your project directory (copy from [`.env.example`](./.env.example)) and paste your token:
    ```env
    TELEGRAM_BOT_TOKEN="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
    ```
@@ -155,7 +155,7 @@ TELEGRAM_USER_ID="<YOUR_TELEGRAM_USER_ID>"
 *(For multiple users, separate IDs with commas: `ALLOWED_USER_ID="123456789,987654321"`).*
 
 #### Step 3: Verify the Whitelist Middleware in `bot.js`
-In [`bot.js`](bot.js), every incoming update passes through the security gatekeeper before executing any handler:
+In [`./bot.js`](./bot.js), every incoming update passes through the security gatekeeper before executing any handler:
 ```javascript
 const rawAllowed = process.env.ALLOWED_USER_ID || '';
 const allowedUserIds = new Set(
@@ -191,7 +191,7 @@ npm install grammy @anthropic-ai/sdk @google/genai dotenv ws pdf-parse
 ```
 
 #### Step 2: Configure `package.json`
-Ensure `"type": "module"` is configured in [`package.json`](package.json) so ES Module imports (`import`/`export`) are enabled:
+Ensure `"type": "module"` is configured in [`./package.json`](./package.json) so ES Module imports (`import`/`export`) are enabled:
 ```json
 {
   "name": "telegram-ai-bot",
@@ -257,7 +257,7 @@ The integrated Node.js HTTP server listens on port `10000` (or `process.env.PORT
    - Once running, `/health` continuously verifies `bot.isRunning()`. If Telegram polling ever drops or terminates, `/health` immediately responds with **`HTTP 503 Service Unavailable`** (`{ status: "degraded", bot: "stopped" }`).
    - This ensures monitoring systems (like UptimeRobot) can alert you if the bot stalls.
 2. **Reverse Proxy Tunnel Endpoint (`/ws/laptop-agent`)**:
-   - Upgrades incoming WebSocket connections from `laptop-runner.js`, unifying health probes, setup script downloads, and laptop control tunnels under a single public port.
+   - Upgrades incoming WebSocket connections from [`./laptop-runner.js`](./laptop-runner.js), unifying health probes, setup script downloads, and laptop control tunnels under a single public port.
 3. **On-Demand Remote Container Restart (`/reboot` or `/restart`)**:
    - An authenticated `/restart` endpoint allows triggering a clean container reboot via HTTP or Telegram chat without logging into the cloud dashboard:
    ```javascript
@@ -294,7 +294,7 @@ By default, Render's free tier spins down (puts to sleep) any Web Service after 
 3. Fill in the monitor settings:
    * **Monitor Type**: Select `HTTP(s)`
    * **Friendly Name**: `Telegram AI Bot (Render Keepalive)`
-   * **URL (or IP)**: `https://your-bot-name.onrender.com/health`
+   * **URL (or IP)**: `https://<your-app-name>.onrender.com/health`
    * **Monitoring Interval**: Set to **`5 minutes`** (must be **under 15 minutes** to prevent sleep).
    * **Monitor Timeout**: `30 seconds`
 4. Click **Create Monitor**.
@@ -348,7 +348,7 @@ This section covers setting up command autocomplete menus, processing audio voic
 When users open the bot and type `/`, Telegram displays an interactive command palette with descriptions.
 
 #### How to Register Commands in Telegram:
-In [`bot.js`](bot.js), we define and register the command list on startup:
+In [`./bot.js`](./bot.js), we define and register the command list on startup:
 ```javascript
 const botCommands = [
   { command: 'agent', description: '🤖 Autonomous task with terminal, files, and research' },
@@ -393,7 +393,7 @@ bot.on('message:voice', async (ctx) => {
 
 ### 2.3 Multimodal Voice-to-Text Transcription via Gemini
 
-Instead of maintaining heavy local Python Whisper models or FFmpeg binaries, we use **Google Gemini 3.8 Flash** via [`@google/genai`](gemini-live-service.js) for sub-second, highly accurate audio transcription:
+Instead of maintaining heavy local Python Whisper models or FFmpeg binaries, we use **Google Gemini 3.8 Flash** via [`@google/genai`](./gemini-live-service.js) for sub-second, highly accurate audio transcription:
 
 ```javascript
 import { GoogleGenAI } from '@google/genai';
@@ -475,6 +475,9 @@ ANTHROPIC_MODEL="claude-sonnet-5-5"
 
 # Google Gemini Configuration
 GEMINI_API_KEY="AIzaSy..."
+
+# Storage Directory Configuration (defaults to ./)
+STORAGE_DIR="./"
 ```
 
 ---
@@ -538,7 +541,7 @@ This section walks through connecting your physical laptop to the bot using a se
 Traditional remote access methods require opening inbound ports, configuring dynamic DNS, or paying for third-party VPNs. If your laptop is on a mobile hotspot, corporate network, or public Wi-Fi, inbound connections are blocked by Carrier-Grade NAT (CGNAT).
 
 **Our Outbound Reverse-Tunnel Architecture**:
-1. When your laptop boots, [`laptop-runner.js`](laptop-runner.js) initiates an **outgoing** WebSocket connection (`wss://`) to the Cloud Bot Engine.
+1. When your laptop boots, [`./laptop-runner.js`](./laptop-runner.js) initiates an **outgoing** WebSocket connection (`wss://`) to the Cloud Bot Engine.
 2. Firewalls and routers permit outbound HTTPS/WSS traffic without special configuration.
 3. The Cloud Bot keeps the tunnel open. When you send `/agent` or `/spec` in Telegram, the cloud server dispatches RPC tasks down through the established tunnel.
 4. **Security**: No open ports on your PC, secret handshake token verification, and strict user whitelist checks.
@@ -572,26 +575,26 @@ For shared workspaces or team setups, the bridge supports multiple concurrent de
 
 ### 4.4 Installing and Daemonizing the Local Runner (PM2 vs Silent VBScript)
 
-The local runner should run permanently in the background without cluttering your desktop with open terminal windows. We configured three robust methods:
+The local runner should run permanently in the background without cluttering your desktop with open terminal windows. Scripts resolve paths dynamically relative to their own location using `%~dp0`:
 
 #### Method 1: PM2 Process Manager (Recommended for Developers)
 ```powershell
 # Install PM2 globally
 npm install -g pm2
 
-# Start the agent in the background
+# Start the agent in the background (relative to project folder)
 cd <your-project-folder>
 pm2 start laptop-runner.js --name "telegram-agent"
 pm2 save
 
 # Management Shortcuts:
-# • pm2-status.bat  -> View status & RAM usage
-# • pm2-logs.bat    -> View real-time RPC logs
-# • pm2-stop.bat    -> Stop the agent
+# • ./pm2-status.bat  -> View status & RAM usage
+# • ./pm2-logs.bat    -> View real-time RPC logs
+# • ./pm2-stop.bat    -> Stop the agent
 ```
 
 #### Method 2: Silent VBScript Launcher (Zero Terminal Windows)
-For users who do not want to install PM2, [`start_silent.vbs`](start_silent.vbs) launches `run.bat` in completely hidden window mode (`0`):
+For users who do not want to install PM2, [`./start_silent.vbs`](./start_silent.vbs) dynamically resolves its current directory using `fso.GetParentFolderName(WScript.ScriptFullName)` and launches [`./run.bat`](./run.bat) in completely hidden window mode (`0`):
 ```vbscript
 Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
@@ -600,12 +603,14 @@ WshShell.CurrentDirectory = currentDir
 WshShell.Run Chr(34) & currentDir & "\run.bat" & Chr(34), 0, False
 Set WshShell = Nothing
 ```
-Double-clicking [`start_silent.vbs`](start_silent.vbs) or placing a shortcut in `%USERPROFILE%\Desktop` launches the agent with **zero CMD or terminal windows visible**.
+Double-clicking [`./start_silent.vbs`](./start_silent.vbs) launches the agent with **zero CMD or terminal windows visible**.
 
-#### Method 3: One-Click Batch File (`run.bat`)
-For quick testing and immediate console output, run:
+#### Method 3: One-Click Dynamic Batch File (`./run.bat`)
+For immediate terminal output, [`./run.bat`](./run.bat) navigates dynamically using `%~dp0`:
 ```cmd
-run.bat
+@echo off
+cd /d "%~dp0"
+node laptop-runner.js
 ```
 
 ---
@@ -622,11 +627,11 @@ The bot's text dispatcher intercepts the phrase and automatically invokes [`hand
 
 ---
 
-## 🛠️ Part 5: Agent Optimization, Interactive Code Review & Fine-Tuning
+## 🛠️ Part 5: Agent Optimization, Interactive Code Review & Security Boundaries
 
 This section details the autonomous agent loop, file management safety patterns, directory persistence, and remote kill controls.
 
-### 5.1 Autonomous Tool-Calling Agent (`/agent`)
+### 5.1 Autonomous Tool-Calling Agent (`/agent`) & Safety Boundaries
 
 The `/agent` command transforms the bot into an autonomous problem-solving agent with five live tools:
 1. **`run_laptop_terminal(command, cwd)`**: Executes PowerShell commands on your physical machine (e.g. `npm test`, `git status`, `git commit`, `git push`).
@@ -641,14 +646,14 @@ Allowing an AI model to execute terminal commands requires strict security bound
 1. **User ID Authentication Gatekeeper**:
    Only messages from authorized, whitelisted Telegram User IDs (`ALLOWED_USER_ID`) can invoke `/agent`. Unauthorized requests are dropped silently before reaching any AI model or runner.
 
-2. **Destructive Command Pattern Filtering**:
-   [`laptop-runner.js`](laptop-runner.js) enforces defensive regex checks before executing any command. High-risk destructive commands (such as `format <drive>:`, `diskpart`, `mkfs`, recursive drive wipes like `rmdir /s /q C:\` or `del /f /s /q C:\`, and system shutdowns) are intercepted and rejected immediately with an execution error returned to Telegram.
+2. **Destructive Command Blacklisting & Pattern Matching**:
+   [`./laptop-runner.js`](./laptop-runner.js) enforces defensive regex checks before executing any command. High-risk destructive commands (such as `format <drive>:`, `diskpart`, `mkfs`, recursive drive wipes like `rmdir /s /q C:\` or `del /f /s /q C:\`, and system shutdowns) are intercepted and rejected immediately with an execution error returned to Telegram.
 
-3. **Strict Execution Timeouts & Buffer Limits**:
-   Every command dispatched to PowerShell is wrapped with an **80-second hard timeout** and a **10 MB buffer limit**. If a command hangs, enters an infinite loop, or attempts a fork bomb, it is terminated cleanly.
+3. **Strict Execution Timeouts (30s) & Buffer Caps (10 MB)**:
+   Every command dispatched to PowerShell is wrapped with a strict execution timeout (`child_process.exec(cmd, { timeout: 30000 })`) and a **10 MB buffer limit**. If an interactive CLI prompt, hanging network task, or runaway script blocks, it is automatically killed after 30 seconds rather than tying up the WebSocket tunnel indefinitely.
 
-4. **Working Directory Sandboxing**:
-   Remote tasks execute within the user-approved working directory (`userDirectory` or explicit path). Relative paths resolve within the project scope rather than root operating system directories.
+4. **Directory Sandboxing & Path Traversal Prevention**:
+   Remote file reads, writes, and deletions requested by the agent are restricted using path normalization (`path.resolve()`). The runner explicitly verifies that resolved targets do not point into protected operating system roots (e.g. `C:\Windows`, `System32`), preventing directory traversal attacks (`../../Windows/System32`).
 
 5. **Live Tool Audit Trail in Telegram Chat**:
    The Telegram interface renders verified status badges for every autonomous tool executed (`🛠️ Autonomous tools executed: • run_laptop_terminal • read_laptop_file`). You can always see exactly what commands were run, their parameters, and their exit status in real-time.
@@ -678,7 +683,7 @@ Checked first             Fallback if container restarts      Restores from chat
 ```
 
 * **Setting Directory in Chat**: Type `/directory <path>` (e.g. `/directory D:\projects\my-app`) in Telegram.
-* **Default Config File**: [`default_user_settings.json`](default_user_settings.json) is committed to git so fresh cloud instances boot with correct folder knowledge.
+* **Default Config File**: [`./default_user_settings.json`](./default_user_settings.json) is committed to git as a clean template so fresh cloud instances boot properly.
 * **Handshake Sync**: Whenever `laptop-runner.js` connects, it passes its local working folder in the query parameters (`storageDir`), which the cloud server automatically registers.
 * **Result**: The bot **never forgets your path**, even when the agent is disconnected or offline.
 
@@ -688,8 +693,8 @@ Checked first             Fallback if container restarts      Restores from chat
 
 Total user control over when the laptop agent is running:
 * **Desktop Shortcuts**:
-  * [**`Disable-Laptop-Agent.bat`**](Disable-Laptop-Agent.bat): Kills the running node runner and removes Windows Startup / Registry auto-run entries.
-  * [**`Enable-Laptop-Agent.bat`**](Enable-Laptop-Agent.bat): Restores auto-run and starts the background runner.
+  * [**`./Disable-Laptop-Agent.bat`**](./Disable-Laptop-Agent.bat): Kills the running node runner and removes Windows Startup / Registry auto-run entries.
+  * [**`./Enable-Laptop-Agent.bat`**](./Enable-Laptop-Agent.bat): Restores auto-run and starts the background runner.
 * **Telegram Remote Kill**:
   * In Telegram `/status`, tap **`[ 🛑 Disable Laptop Agent ]`** or type `/disable_laptop` to shut down the runner on your laptop remotely from your phone.
 

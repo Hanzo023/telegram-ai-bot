@@ -88,8 +88,8 @@ In the **Environment Variables** section on your Render dashboard, configure:
 | `ANTHROPIC_BASE_URL` | Anthropic endpoint or custom proxy | `https://api.anthropic.com` |
 | `ANTHROPIC_MODEL` | Claude model name | `claude-sonnet-5-5` |
 | `GEMINI_API_KEY` | Google Gemini API key from AI Studio | `AIzaSy...` |
-| `SERVER_URL` | Public Render service URL | `https://telegram-ai-bot-xxxx.onrender.com` |
-| `STORAGE_DIR` | *(Optional)* Default folder on laptop | `D:\projects` |
+| `SERVER_URL` | Public Render service URL | `https://<your-app-name>.onrender.com` |
+| `STORAGE_DIR` | *(Optional)* Default working directory on laptop (defaults to `./`) | `./` |
 | `YOUTUBE_COOKIES` | *(Optional)* Netscape format cookies text | Exported via *Get cookies.txt LOCALLY* extension |
 
 Click **Deploy Web Service**.
@@ -108,7 +108,7 @@ To prevent sleeping, set up an automated pinger using [UptimeRobot](https://upti
 3. Configure the monitor:
    * **Monitor Type**: `HTTP(s)`
    * **Friendly Name**: `Telegram AI Bot (Render Keepalive)`
-   * **URL (or IP)**: `https://your-bot-name.onrender.com/health`
+   * **URL (or IP)**: `https://<your-app-name>.onrender.com/health`
    * **Monitoring Interval**: **`5 minutes`** (or `10 minutes` — must be **under 15 minutes** to prevent sleep!)
    * **Monitor Timeout**: `30 seconds`
 4. Click **Create Monitor**.

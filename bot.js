@@ -100,7 +100,7 @@ function getPublicBotUrl(req) {
     const proto = req.headers['x-forwarded-proto'] || 'https';
     return `${proto}://${req.headers.host}`;
   }
-  return 'https://telegram-ai-bot-znei.onrender.com';
+  return 'http://localhost:10000';
 }
 
 function generateStartAgentBat({ userId, serverUrl, secret }) {
@@ -980,7 +980,7 @@ async function executeSavePendingFile(ctx, userId, targetDestination, isCallback
   // Determine physical target path on laptop
   let targetPath;
   if (/^desktop$/i.test(dest) || /^[\/\\]?desktop[\/\\]/i.test(dest)) {
-    targetPath = `C:\\Users\\dsoph\\Desktop\\${fileInfo.filename}`;
+    targetPath = path.join(os.homedir(), 'Desktop', fileInfo.filename);
   } else if (isPathAbsolute(dest)) {
     targetPath = dest;
   } else {
@@ -5383,7 +5383,7 @@ bot.callbackQuery('save_pending_custom', async (ctx) => {
     `Please reply with the path or filename where you want to save \`${fileInfo.filename}\` on your laptop:\n\n` +
     `_Examples:_\n` +
     `• \`D:\\projects\\my_game.py\`\n` +
-    `• \`C:\\Users\\dsoph\\Desktop\\game.py\`\n` +
+    `• \`%USERPROFILE%\\Desktop\\${fileInfo.filename}\`\n` +
     `• \`games\\space.py\` (relative to your storage folder)\n\n` +
     `Or reply \`/cancel\` to discard.`,
     { parse_mode: 'Markdown' }

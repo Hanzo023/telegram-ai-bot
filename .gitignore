@@ -13,4 +13,5 @@ temp_downloads/
 cookies.txt
 *cookies*.txt
 user_settings.json.tmp
+user_settings.json
 secrets/

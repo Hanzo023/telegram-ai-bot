@@ -22,7 +22,7 @@ const RAW_SERVER_URL =
   process.env.SERVER_URL ||
   process.env.RENDER_EXTERNAL_URL ||
   process.env.PUBLIC_URL ||
-  'https://telegram-ai-bot-znei.onrender.com';
+  'https://your-bot-name.onrender.com';
 
 let normalizedUrl = RAW_SERVER_URL.trim();
 if (!/^wss?:\/\//i.test(normalizedUrl) && !/^https?:\/\//i.test(normalizedUrl)) {
@@ -55,7 +55,7 @@ const DEVICE_NAME = getCliArg('--name') || process.env.DEVICE_NAME || rawHostnam
 const RUNNER_STORAGE_DIR =
   getCliArg('--dir') ||
   process.env.STORAGE_DIR ||
-  'D:\\drive-download-20260715T073323Z-1-001';
+  process.cwd();
 
 if (!TELEGRAM_USER_ID) {
   console.error('❌ ERROR: TELEGRAM_USER_ID could not be determined!');
@@ -91,7 +91,23 @@ console.log(`• Bound User ID:   ${TELEGRAM_USER_ID}`);
 console.log(`• Outbound Only:   ✅ No open ports, fully secure on Public Wi-Fi`);
 console.log('========================================================\n');
 
-const LOG_FILE = path.resolve('D:\\projects\\telegram-ai-bot\\runner.log');
+const LOG_FILE = path.resolve(process.cwd(), 'runner.log');
+
+/**
+ * Check if path targets sensitive system directories (prevent directory traversal)
+ */
+function isRestrictedSystemPath(targetPath) {
+  if (!targetPath) return false;
+  try {
+    const resolved = path.resolve(targetPath).toLowerCase();
+    const winDir = (process.env.SystemRoot || 'C:\\Windows').toLowerCase();
+    const sysDrive = (process.env.SystemDrive || 'C:').toLowerCase();
+    if (resolved.startsWith(winDir) || resolved.startsWith(`${sysDrive}\\windows`)) {
+      return true;
+    }
+  } catch {}
+  return false;
+}
 
 function log(msg) {
   const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
@@ -307,7 +323,7 @@ async function handleTask(action, payload) {
             cwd: workingDir,
             shell: shell,
             maxBuffer: 10 * 1024 * 1024, // 10 MB buffer
-            timeout: 80000,
+            timeout: parseInt(process.env.COMMAND_TIMEOUT_MS, 10) || 30000, // 30s timeout
           },
           (error, stdout, stderr) => {
             resolve({
@@ -327,6 +343,10 @@ async function handleTask(action, payload) {
 
       try {
         const resolvedPath = path.resolve(filePath);
+        if (isRestrictedSystemPath(resolvedPath)) {
+          return { success: false, error: 'Access denied: Target path resides inside a protected operating system directory.' };
+        }
+
         if (!fs.existsSync(resolvedPath)) {
           return { success: false, error: `File not found: ${resolvedPath}` };
         }
@@ -360,6 +380,10 @@ async function handleTask(action, payload) {
 
       try {
         const resolvedPath = path.resolve(filePath);
+        if (isRestrictedSystemPath(resolvedPath)) {
+          return { success: false, error: 'Access denied: Writing to protected operating system directories is blocked.' };
+        }
+
         const dir = path.dirname(resolvedPath);
         if (!fs.existsSync(dir)) {
           await fsp.mkdir(dir, { recursive: true });
@@ -389,6 +413,12 @@ async function handleTask(action, payload) {
       if (!filePath) return { success: false, error: 'No filePath provided.' };
       try {
         const resolvedPath = path.resolve(filePath);
+        if (isRestrictedSystemPath(resolvedPath)) {
+          return {
+            success: false,
+            error: 'Access denied: Deleting in protected operating system directories is blocked.',
+          };
+        }
         if (!fs.existsSync(resolvedPath)) {
           return { success: false, error: `File not found: ${resolvedPath}` };
         }
