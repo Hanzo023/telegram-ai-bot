@@ -396,12 +396,12 @@ export const SUPPORTED_MODELS = [
     supportedEfforts: ['minimal', 'low', 'medium', 'high'],
   },
   {
-    id: 'gemini-2.5-pro',
-    name: 'Gemini 2.5 Pro',
+    id: 'gemini-3.1-pro',
+    name: 'Gemini 3.1 Pro',
     provider: 'gemini',
     icon: '🧠',
-    badge: 'Deep Logic',
-    description: 'Pro model optimized for complex programming, math, and deep logical analysis.',
+    badge: 'Pro Tier',
+    description: 'Advanced reasoning and complex logic. Requires Google AI Studio Pay-as-you-go / Pro quota.',
     supportedEfforts: ['low', 'medium', 'high'],
   },
 ];
@@ -411,7 +411,6 @@ const candidateGeminiModels = [
   'gemini-3.8-flash',
   'gemini-3.5-flash',
   'gemini-3.5-flash-lite',
-  'gemini-2.5-pro',
 ].filter(Boolean);
 const uniqueGeminiModels = [...new Set(candidateGeminiModels)];
 const geminiModel = DEFAULT_GEMINI_MODEL;
@@ -503,8 +502,8 @@ export function resolveModelAlias(input) {
   if (['lite', 'flash-lite', '3.5-lite', 'gemini-3.5-flash-lite', 'gemini-lite'].includes(clean)) {
     return 'gemini-3.5-flash-lite';
   }
-  if (['pro', '2.5-pro', 'gemini-pro', 'gemini-2.5-pro', '2.5'].includes(clean)) {
-    return 'gemini-2.5-pro';
+  if (['pro', '3.1-pro', 'gemini-pro', 'gemini-3.1-pro', '3.1'].includes(clean)) {
+    return 'gemini-3.1-pro';
   }
   const match = SUPPORTED_MODELS.find((m) => m.id === clean || m.id.includes(clean));
   return match ? match.id : null;
@@ -540,13 +539,13 @@ export function getGeminiModelsForUser(userId = null) {
     return [preferred].filter(Boolean);
   }
 
-  // Fallback pool prioritizing user choice, then 3.8-flash, 3.5-flash, 3.5-flash-lite, 2.5-pro
+  // Fallback pool prioritizing user choice, then 3.8-flash, 3.5-flash, 3.5-flash-lite
+  // (Excludes Pro models so standard Google AI Studio keys never hit quota exhaustion)
   const basePool = [
     preferred,
     'gemini-3.8-flash',
     'gemini-3.5-flash',
     'gemini-3.5-flash-lite',
-    'gemini-2.5-pro',
   ].filter(Boolean);
 
   const unique = [...new Set(basePool)];
