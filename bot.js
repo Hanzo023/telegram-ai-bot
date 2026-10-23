@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
-import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenAI } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
 import fs from 'fs';
@@ -355,30 +354,9 @@ if (!telegramToken) {
 const bot = new Bot(telegramToken);
 setBotApi(bot.api);
 
-// AI Provider Configuration (Default: Pure Gemini; Optional: Hybrid Claude)
-const AI_PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
-const anthropicApiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
-const isHybridMode =
-  (AI_PROVIDER === 'hybrid' || AI_PROVIDER === 'claude' || AI_PROVIDER === 'anthropic') &&
-  !!anthropicApiKey;
-
-const anthropic = anthropicApiKey
-  ? new Anthropic({
-      apiKey: anthropicApiKey,
-      ...(process.env.ANTHROPIC_BASE_URL ? { baseURL: process.env.ANTHROPIC_BASE_URL } : {}),
-    })
-  : null;
-
-const anthropicModel =
-  process.env.ANTHROPIC_MODEL ||
-  (process.env.ANTHROPIC_BASE_URL && !process.env.ANTHROPIC_BASE_URL.includes('anthropic.com')
-    ? 'claude-sonnet-5-5'
-    : 'claude-3-7-sonnet-20250219');
-
-const ANTHROPIC_MAX_TOKENS = parseInt(process.env.ANTHROPIC_MAX_TOKENS, 10) || 20000;
-
+// AI Engine Configuration: 100% Pure Google Gemini
 const geminiApiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-if (!geminiApiKey && !anthropicApiKey) {
+if (!geminiApiKey) {
   console.error('❌ FATAL: GEMINI_API_KEY (or GOOGLE_API_KEY) is missing or empty in environment variables!');
   console.error('Please configure GEMINI_API_KEY in your hosting provider settings (e.g. Render dashboard) or .env file.');
   process.exit(1);
@@ -427,18 +405,6 @@ export const SUPPORTED_MODELS = [
     supportedEfforts: ['low', 'medium', 'high'],
   },
 ];
-
-if (anthropic) {
-  SUPPORTED_MODELS.push({
-    id: 'claude-sonnet-5-5',
-    name: 'Claude Sonnet 5.5',
-    provider: 'anthropic',
-    icon: '🎭',
-    badge: 'Hybrid Claude',
-    description: 'Anthropic Claude Sonnet 5.5 for nuanced and articulate answers.',
-    supportedEfforts: [],
-  });
-}
 
 const candidateGeminiModels = [
   DEFAULT_GEMINI_MODEL,
@@ -517,7 +483,7 @@ export function getModelInfo(modelId) {
     SUPPORTED_MODELS.find((sm) => sm.id === m || sm.name.toLowerCase() === m) || {
       id: modelId,
       name: modelId,
-      provider: modelId.includes('claude') ? 'anthropic' : 'gemini',
+      provider: 'gemini',
       icon: '🤖',
       badge: 'Custom',
       description: 'Configured AI model',
@@ -539,9 +505,6 @@ export function resolveModelAlias(input) {
   }
   if (['pro', '2.5-pro', 'gemini-pro', 'gemini-2.5-pro', '2.5'].includes(clean)) {
     return 'gemini-2.5-pro';
-  }
-  if (['claude', 'sonnet', 'claude-sonnet', 'claude-sonnet-5-5'].includes(clean)) {
-    return 'claude-sonnet-5-5';
   }
   const match = SUPPORTED_MODELS.find((m) => m.id === clean || m.id.includes(clean));
   return match ? match.id : null;
@@ -574,7 +537,7 @@ export function getGeminiModelsForUser(userId = null) {
 
   // If user explicitly disabled auto-fallback, ONLY use the preferred model
   if (!autoFallback) {
-    return [preferred].filter((m) => m && !m.includes('claude'));
+    return [preferred].filter(Boolean);
   }
 
   // Fallback pool prioritizing user choice, then 3.8-flash, 3.5-flash, 3.5-flash-lite, 2.5-pro
@@ -584,7 +547,7 @@ export function getGeminiModelsForUser(userId = null) {
     'gemini-3.5-flash',
     'gemini-3.5-flash-lite',
     'gemini-2.5-pro',
-  ].filter((m) => m && !m.includes('claude'));
+  ].filter(Boolean);
 
   const unique = [...new Set(basePool)];
 
@@ -667,10 +630,7 @@ export async function generateGeminiContentWithSafeThinking({ model, contents, c
   }
 }
 
-console.log(
-  `[AI Engine] Mode: ${isHybridMode ? 'Hybrid (Claude Sonnet + Gemini)' : 'Pure Google Gemini'}` +
-  ` | Default: ${isHybridMode ? anthropicModel : geminiModel}`
-);
+console.log(`[AI Engine] Mode: Pure Google Gemini | Default: ${geminiModel}`);
 
 async function callGeminiWithRetry(fn, maxRetries = 2, initialDelay = 1000, hasFallback = true) {
   let delay = initialDelay;
@@ -1628,9 +1588,7 @@ bot.use(async (ctx, next) => {
 });
 
 bot.command(['start', 'help'], async (ctx) => {
-  const engineDesc = isHybridMode
-    ? 'Powered by *Claude Sonnet 5.5* & *Gemini 3.8 Flash / Live*.'
-    : 'Powered by *Google Gemini 3.8 Flash & Live*.';
+  const engineDesc = 'Powered by *Google Gemini 3.8 Flash & Live*.';
 
   await ctx.reply(
     '✨ *Welcome to Your Personal AI Assistant*\n' +
@@ -1840,10 +1798,7 @@ function buildModelMenuKeyboard(userId) {
 
   const kb = new InlineKeyboard();
 
-  const available = SUPPORTED_MODELS.filter((m) => {
-    if (m.provider === 'anthropic' && !anthropic) return false;
-    return true;
-  });
+  const available = SUPPORTED_MODELS;
 
   available.forEach((m, idx) => {
     const isSelected = m.id === currentModel;
@@ -2169,10 +2124,8 @@ bot.command(['agent_mode', 'agentmode'], async (ctx) => {
 
   userAgentMode.set(userId, isEnabled);
 
-  const restoredTitle = isHybridMode ? '🧠 *Claude Standard Mode: RESTORED*' : '💬 *Standard Chat Mode: RESTORED*';
-  const restoredDesc = isHybridMode
-    ? 'Switched back to Claude (best for coding, reasoning, and document discussion).'
-    : 'Switched back to standard conversational chat.';
+  const restoredTitle = '💬 *Standard Chat Mode: RESTORED*';
+  const restoredDesc = 'Switched back to standard conversational chat.';
 
   await ctx.reply(
     isEnabled
@@ -2937,7 +2890,7 @@ bot.command('cancel', async (ctx) => {
     cancelled.push('🎙️ Gemini Live Voice Mode');
   }
 
-  const normalChatTarget = isHybridMode ? 'Claude' : 'Gemini';
+  const normalChatTarget = 'Gemini';
 
   if (cancelled.length > 0) {
     await ctx.reply(
@@ -3018,7 +2971,7 @@ bot.command('status', async (ctx) => {
     ? '🤖 Gemini Autonomous Agent (All chats)'
     : activeModeObj
     ? (activeModeNames[activeModeObj.mode] || `\`${activeModeObj.mode}\` (/cancel to exit)`)
-    : (isHybridMode ? '💬 Normal Chat Mode (Claude)' : '💬 Normal Chat Mode (Gemini)');
+    : '💬 Normal Chat Mode (Gemini)';
 
   const userDir = getUserStorageDir(userId);
   const userMode = getUserStorageMode(userId);
@@ -4366,73 +4319,29 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
       systemInstruction = systemOverride;
     }
 
-    let assistantMessage = '';
-
-    const userChosenModel = getUserModel(userId);
-    const isClaudeChosen = userChosenModel && userChosenModel.toLowerCase().includes('claude');
-
-    // Only attempt Claude if the user explicitly chose a Claude model, or if AI_PROVIDER is explicitly set to 'claude'
-    const shouldAttemptClaude =
-      anthropic &&
-      (isClaudeChosen || (process.env.AI_PROVIDER === 'claude' && !userModelPreference.has(Number(userId))));
-
-    if (shouldAttemptClaude) {
-      try {
-        let response;
-        try {
-          response = await anthropic.messages.create({
-            model: anthropicModel,
-            max_tokens: ANTHROPIC_MAX_TOKENS,
-            system: systemInstruction,
-            messages: history,
-          });
-        } catch (tokenErr) {
-          if (ANTHROPIC_MAX_TOKENS > 8192 && /max_tokens/i.test(tokenErr?.message || '')) {
-            console.warn(`Model ${anthropicModel} rejected ${ANTHROPIC_MAX_TOKENS} tokens; retrying with 8192...`);
-            response = await anthropic.messages.create({
-              model: anthropicModel,
-              max_tokens: 8192,
-              system: systemInstruction,
-              messages: history,
-            });
-          } else {
-            throw tokenErr;
-          }
-        }
-        const textBlocks = response.content?.filter((block) => block.type === 'text') || [];
-        assistantMessage = textBlocks.map((block) => block.text).join('\n').trim();
-      } catch (claudeErr) {
-        console.warn('[Claude API Error in Hybrid Mode]:', claudeErr.status || '', sanitizeError(claudeErr));
-        console.log('Hybrid mode: Claude unavailable or quota exceeded; falling back to Gemini for user response...');
-      }
+    if (!googleAI) {
+      throw new Error('No AI provider available. Please configure GEMINI_API_KEY in your .env file.');
     }
+    const geminiContents = formatHistoryForGemini(history);
+    const userEffort = getUserEffort(userId);
+    const candidateModels = getGeminiModelsForUser(userId);
 
-    // Default / Native Gemini conversational execution
-    if (!assistantMessage) {
-      if (!googleAI) {
-        throw new Error('No AI provider available. Please configure GEMINI_API_KEY in your .env file.');
+    const geminiRes = await callGeminiWithFallback(async (model) => {
+      const conf = {
+        systemInstruction,
+        maxOutputTokens: 20000,
+      };
+      const tConfig = getThinkingConfigForModel(model, userEffort);
+      if (tConfig) {
+        conf.thinkingConfig = tConfig;
       }
-      const geminiContents = formatHistoryForGemini(history);
-      const userEffort = getUserEffort(userId);
-      const candidateModels = getGeminiModelsForUser(userId);
-
-      const geminiRes = await callGeminiWithFallback(async (model) => {
-        const conf = {
-          systemInstruction,
-          maxOutputTokens: 20000,
-        };
-        const tConfig = getThinkingConfigForModel(model, userEffort);
-        if (tConfig) {
-          conf.thinkingConfig = tConfig;
-        }
-        return await generateGeminiContentWithSafeThinking({
-          model,
-          contents: geminiContents,
-          config: conf,
-        });
-      }, candidateModels);
-      assistantMessage = (geminiRes?.text || '').trim();
-    }
+      return await generateGeminiContentWithSafeThinking({
+        model,
+        contents: geminiContents,
+        config: conf,
+      });
+    }, candidateModels);
+    let assistantMessage = (geminiRes?.text || '').trim();
 
     clearInterval(typingInterval);
 
@@ -4503,8 +4412,6 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
     }
   }
 }
-
-const sendToClaudeWithHistory = sendToAIWithHistory;
 
 bot.on('message:document', async (ctx) => {
   const document = ctx.message.document;
