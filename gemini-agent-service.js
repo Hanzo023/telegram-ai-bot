@@ -640,6 +640,7 @@ export async function runGeminiAgent({
   userId,
   userDirectory,
   recentHistory = [],
+  model = null,
 }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -675,11 +676,17 @@ export async function runGeminiAgent({
 
   const effectiveTargetDir = detectedWorkingDir || userDirectory || 'default working directory';
 
-  // Models to attempt: primary (gemini-3.5-flash-lite) -> fallback (gemini-3.8-flash)
-  const candidateModels = [PRIMARY_MODEL, FALLBACK_MODEL];
+  // Models to attempt: user requested (if any) -> primary (gemini-3.5-flash-lite) -> gemini-3.5-flash -> fallback (gemini-3.8-flash)
+  const candidateModels = [
+    model,
+    PRIMARY_MODEL,
+    'gemini-3.5-flash',
+    FALLBACK_MODEL,
+  ].filter(Boolean);
+  const uniqueCandidateModels = [...new Set(candidateModels)];
   let lastError = null;
 
-  for (const model of candidateModels) {
+  for (const model of uniqueCandidateModels) {
     try {
       if (onStatusUpdate) {
         onStatusUpdate(`🤖 *Agent reasoning with ${model}...*`);
@@ -708,7 +715,9 @@ export async function runGeminiAgent({
           '   d. Report the outcome with commit details in your final answer.\n' +
           '4. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
           '5. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
-          '6. DISCONNECTED STATE: If a tool reports the laptop is disconnected, explain clearly and provide the complete code so the user can save it manually.',
+          '6. DISCONNECTED STATE: If a tool reports the laptop is disconnected, explain clearly and provide the complete code so the user can save it manually.\n' +
+          '7. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
+          '8. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.',
       });
 
       let stepCount = 0;

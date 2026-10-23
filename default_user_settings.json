@@ -1,5 +1,9 @@
 {
-  "version": 1,
+  "version": 2,
   "storageDirs": {},
-  "storageModes": {}
+  "storageModes": {},
+  "userModels": {},
+  "userEfforts": {},
+  "userAutoFallbacks": {},
+  "userTextModes": {}
 }

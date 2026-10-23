@@ -386,34 +386,319 @@ if (!geminiApiKey && !anthropicApiKey) {
 
 const googleAI = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
 
-const geminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const DEFAULT_EFFORT = process.env.GEMINI_THINKING_EFFORT || 'low';
+
+export const SUPPORTED_MODELS = [
+  {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    provider: 'gemini',
+    icon: '⚡',
+    badge: 'Recommended',
+    description: 'Latest flagship Gemini 3.8 Flash. Fast, high intelligence, dynamic reasoning.',
+    supportedEfforts: ['low', 'medium', 'high'],
+  },
+  {
+    id: 'gemini-3.5-flash',
+    name: 'Gemini 3.5 Flash',
+    provider: 'gemini',
+    icon: '🔄',
+    badge: 'High Availability',
+    description: 'Stable workhorse model with high server availability during peak hours.',
+    supportedEfforts: ['minimal', 'low', 'medium', 'high'],
+  },
+  {
+    id: 'gemini-3.5-flash-lite',
+    name: 'Gemini 3.5 Flash-Lite',
+    provider: 'gemini',
+    icon: '🚀',
+    badge: 'Ultra Fast',
+    description: 'Lightweight, ultra-low latency responses with minimal token overhead.',
+    supportedEfforts: ['minimal', 'low', 'medium', 'high'],
+  },
+  {
+    id: 'gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro',
+    provider: 'gemini',
+    icon: '🧠',
+    badge: 'Deep Logic',
+    description: 'Pro model optimized for complex programming, math, and deep logical analysis.',
+    supportedEfforts: ['low', 'medium', 'high'],
+  },
+];
+
+if (anthropic) {
+  SUPPORTED_MODELS.push({
+    id: 'claude-sonnet-5-5',
+    name: 'Claude Sonnet 5.5',
+    provider: 'anthropic',
+    icon: '🎭',
+    badge: 'Hybrid Claude',
+    description: 'Anthropic Claude Sonnet 5.5 for nuanced and articulate answers.',
+    supportedEfforts: [],
+  });
+}
+
 const candidateGeminiModels = [
-  geminiModel,
+  DEFAULT_GEMINI_MODEL,
   'gemini-3.8-flash',
   'gemini-3.5-flash',
   'gemini-3.5-flash-lite',
+  'gemini-2.5-pro',
 ].filter(Boolean);
 const uniqueGeminiModels = [...new Set(candidateGeminiModels)];
+const geminiModel = DEFAULT_GEMINI_MODEL;
+
+// User model preferences
+const userModelPreference = new Map(); // userId -> modelId
+const userEffortPreference = new Map(); // userId -> 'low' | 'medium' | 'high' | 'minimal'
+const userAutoFallbackPreference = new Map(); // userId -> boolean (default true)
+const userTextModePreference = new Map(); // userId -> 'clean' | 'plain' (default 'clean')
+
+export function getUserTextMode(userId) {
+  if (!userId) return 'clean';
+  return userTextModePreference.get(Number(userId)) || 'clean';
+}
+
+export function setUserTextMode(userId, mode) {
+  if (!userId) return;
+  const clean = mode === 'plain' ? 'plain' : 'clean';
+  userTextModePreference.set(Number(userId), clean);
+  scheduleUserSettingsPersistence();
+}
+
+export function getUserModel(userId) {
+  if (!userId) return DEFAULT_GEMINI_MODEL;
+  return userModelPreference.get(Number(userId)) || DEFAULT_GEMINI_MODEL;
+}
+
+export function setUserModel(userId, modelId) {
+  if (!userId) return;
+  userModelPreference.set(Number(userId), modelId);
+  scheduleUserSettingsPersistence();
+}
+
+export function getUserEffort(userId) {
+  if (!userId) return DEFAULT_EFFORT;
+  return userEffortPreference.get(Number(userId)) || DEFAULT_EFFORT;
+}
+
+export function setUserEffort(userId, effort) {
+  if (!userId) return false;
+  const eff = String(effort || '').toLowerCase().trim();
+  const valid = ['low', 'medium', 'high', 'minimal'];
+  if (valid.includes(eff)) {
+    userEffortPreference.set(Number(userId), eff);
+    scheduleUserSettingsPersistence();
+    return true;
+  }
+  return false;
+}
+
+export function getUserAutoFallback(userId) {
+  if (!userId) return true;
+  if (userAutoFallbackPreference.has(Number(userId))) {
+    return userAutoFallbackPreference.get(Number(userId));
+  }
+  return true;
+}
+
+export function setUserAutoFallback(userId, enabled) {
+  if (!userId) return;
+  userAutoFallbackPreference.set(Number(userId), !!enabled);
+  scheduleUserSettingsPersistence();
+}
+
+export function getModelInfo(modelId) {
+  if (!modelId) return null;
+  const m = String(modelId).toLowerCase();
+  return (
+    SUPPORTED_MODELS.find((sm) => sm.id === m || sm.name.toLowerCase() === m) || {
+      id: modelId,
+      name: modelId,
+      provider: modelId.includes('claude') ? 'anthropic' : 'gemini',
+      icon: '🤖',
+      badge: 'Custom',
+      description: 'Configured AI model',
+    }
+  );
+}
+
+export function resolveModelAlias(input) {
+  if (!input) return null;
+  const clean = input.trim().toLowerCase().replace(/^@/, '');
+  if (['3.8', '3.8-flash', 'gemini-3.8', 'flash-3.8', 'gemini-3.8-flash'].includes(clean)) {
+    return 'gemini-3.8-flash';
+  }
+  if (['3.5', '3.5-flash', 'gemini-3.5', 'flash-3.5', 'gemini-3.5-flash'].includes(clean)) {
+    return 'gemini-3.5-flash';
+  }
+  if (['lite', 'flash-lite', '3.5-lite', 'gemini-3.5-flash-lite', 'gemini-lite'].includes(clean)) {
+    return 'gemini-3.5-flash-lite';
+  }
+  if (['pro', '2.5-pro', 'gemini-pro', 'gemini-2.5-pro', '2.5'].includes(clean)) {
+    return 'gemini-2.5-pro';
+  }
+  if (['claude', 'sonnet', 'claude-sonnet', 'claude-sonnet-5-5'].includes(clean)) {
+    return 'claude-sonnet-5-5';
+  }
+  const match = SUPPORTED_MODELS.find((m) => m.id === clean || m.id.includes(clean));
+  return match ? match.id : null;
+}
+
+// Circuit breaker / cooldown for models experiencing high demand (503) or rate limits (429)
+const modelCooldowns = new Map(); // modelName -> timestamp
+const MODEL_COOLDOWN_MS = 60 * 1000; // 60 seconds
+
+export function markModelCooldown(model, durationMs = MODEL_COOLDOWN_MS) {
+  modelCooldowns.set(model, Date.now() + durationMs);
+  console.warn(
+    `[Gemini CircuitBreaker] Model "${model}" temporarily marked in high demand / cooldown for ${durationMs / 1000}s.`
+  );
+}
+
+export function isModelInCooldown(model) {
+  const expiry = modelCooldowns.get(model);
+  if (!expiry) return false;
+  if (Date.now() > expiry) {
+    modelCooldowns.delete(model);
+    return false;
+  }
+  return true;
+}
+
+export function getGeminiModelsForUser(userId = null) {
+  const preferred = getUserModel(userId);
+  const autoFallback = getUserAutoFallback(userId);
+
+  // If user explicitly disabled auto-fallback, ONLY use the preferred model
+  if (!autoFallback) {
+    return [preferred].filter((m) => m && !m.includes('claude'));
+  }
+
+  // Fallback pool prioritizing user choice, then 3.8-flash, 3.5-flash, 3.5-flash-lite, 2.5-pro
+  const basePool = [
+    preferred,
+    'gemini-3.8-flash',
+    'gemini-3.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-2.5-pro',
+  ].filter((m) => m && !m.includes('claude'));
+
+  const unique = [...new Set(basePool)];
+
+  // Partition into healthy models and currently degraded/cooldown models
+  const healthy = [];
+  const inCooldown = [];
+  for (const m of unique) {
+    if (isModelInCooldown(m)) {
+      inCooldown.push(m);
+    } else {
+      healthy.push(m);
+    }
+  }
+
+  // If all models are in cooldown, return unique list so something is attempted
+  if (healthy.length === 0) return unique;
+  return [...healthy, ...inCooldown];
+}
+
+export function getThinkingConfigForModel(model, effort = 'medium') {
+  if (!model) return undefined;
+  const m = String(model).toLowerCase();
+  const eff = String(effort || 'medium').toLowerCase();
+
+  // Gemini 3.8 Flash: supports 'low', 'medium', 'high'. Does not support 'minimal' (returns 400 Bad Request)
+  if (m.includes('3.8-flash') || m.includes('3.8')) {
+    if (eff === 'minimal' || eff === 'off' || eff === 'low') {
+      return { thinkingLevel: 'low' };
+    }
+    if (eff === 'high') {
+      return { thinkingLevel: 'high' };
+    }
+    return { thinkingLevel: 'medium' };
+  }
+
+  // Gemini 3.5 & Gemini 3 Preview: supports minimal, low, medium, high
+  if (m.includes('gemini-3.5') || m.includes('gemini-3')) {
+    if (eff === 'minimal' || eff === 'off') {
+      return { thinkingLevel: 'minimal' };
+    }
+    if (eff === 'low') {
+      return { thinkingLevel: 'low' };
+    }
+    if (eff === 'high') {
+      return { thinkingLevel: 'high' };
+    }
+    return { thinkingLevel: 'medium' };
+  }
+
+  // Gemini 2.5 series: uses thinkingBudget
+  if (m.includes('gemini-2.5') || m.includes('2.5')) {
+    if (eff === 'minimal' || eff === 'off') {
+      return m.includes('pro') ? { thinkingBudget: 128 } : { thinkingBudget: 0 };
+    }
+    if (eff === 'low') {
+      return { thinkingBudget: 1024 };
+    }
+    if (eff === 'high') {
+      return { thinkingBudget: 8192 };
+    }
+    return { thinkingBudget: -1 }; // dynamic default
+  }
+
+  return undefined;
+}
+
+export async function generateGeminiContentWithSafeThinking({ model, contents, config }) {
+  try {
+    return await googleAI.models.generateContent({ model, contents, config });
+  } catch (err) {
+    if (config?.thinkingConfig && (err.status === 400 || err.message?.includes('thinking'))) {
+      console.warn(
+        `[Gemini] Model ${model} rejected thinkingConfig (${err.message?.slice(0, 80)}). Retrying without thinkingConfig...`
+      );
+      const safeConfig = { ...config };
+      delete safeConfig.thinkingConfig;
+      return await googleAI.models.generateContent({ model, contents, config: safeConfig });
+    }
+    throw err;
+  }
+}
 
 console.log(
   `[AI Engine] Mode: ${isHybridMode ? 'Hybrid (Claude Sonnet + Gemini)' : 'Pure Google Gemini'}` +
-  ` | Model: ${isHybridMode ? anthropicModel : geminiModel}`
+  ` | Default: ${isHybridMode ? anthropicModel : geminiModel}`
 );
 
-async function callGeminiWithRetry(fn, maxRetries = 3, initialDelay = 1500) {
+async function callGeminiWithRetry(fn, maxRetries = 2, initialDelay = 1000, hasFallback = true) {
   let delay = initialDelay;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      const isRetryable =
+      const isHighDemand =
         err.status === 503 ||
-        err.status === 429 ||
         err.message?.includes('503') ||
-        err.message?.includes('high demand') ||
-        err.message?.includes('RESOURCE_EXHAUSTED');
+        err.message?.includes('high demand');
+
+      const isRateLimit =
+        err.status === 429 ||
+        err.message?.includes('429') ||
+        err.message?.includes('RESOURCE_EXHAUSTED') ||
+        err.message?.includes('rate limit');
+
+      const isRetryable = isHighDemand || isRateLimit;
+
+      // If high demand 503 and we have another model ready in the fallback chain,
+      // fail fast on attempt 1 so user gets instant response without waiting 5+ seconds!
+      if (isHighDemand && hasFallback) {
+        throw err;
+      }
+
       if (isRetryable && attempt < maxRetries) {
-        console.warn(`[Gemini] Temporary error (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
+        console.warn(`[Gemini] Temporary error on attempt ${attempt}/${maxRetries} (${err.message?.slice(0, 60)}), retrying in ${delay}ms...`);
         await new Promise((r) => setTimeout(r, delay));
         delay *= 2;
         continue;
@@ -423,27 +708,50 @@ async function callGeminiWithRetry(fn, maxRetries = 3, initialDelay = 1500) {
   }
 }
 
-async function callGeminiWithFallback(modelFn, models = uniqueGeminiModels) {
+async function callGeminiWithFallback(modelFn, models = null) {
   if (!googleAI) throw new Error('Gemini API is not initialized. Please configure GEMINI_API_KEY.');
+  const modelList = Array.isArray(models) && models.length > 0 ? models : getGeminiModelsForUser();
+
   let lastErr = null;
-  for (let i = 0; i < models.length; i++) {
-    const model = models[i];
+  for (let i = 0; i < modelList.length; i++) {
+    const model = modelList[i];
+    const hasNextFallback = i < modelList.length - 1;
     try {
-      return await callGeminiWithRetry(() => modelFn(model));
+      return await callGeminiWithRetry(
+        () => modelFn(model),
+        hasNextFallback ? 1 : 3,
+        1000,
+        hasNextFallback
+      );
     } catch (err) {
       lastErr = err;
-      const isUnavailable =
+      const isHighDemand =
         err.status === 503 ||
-        err.status === 429 ||
-        err.status === 404 ||
         err.message?.includes('503') ||
-        err.message?.includes('high demand') ||
-        err.message?.includes('no longer available') ||
-        err.message?.includes('NOT_FOUND') ||
+        err.message?.includes('high demand');
+
+      const isQuotaOrLimit =
+        err.status === 429 ||
+        err.message?.includes('429') ||
         err.message?.includes('RESOURCE_EXHAUSTED');
-      if (isUnavailable && i < models.length - 1) {
-        console.warn(`[Gemini] Model ${model} unavailable (${err.message?.slice(0, 80)}). Trying fallback model ${models[i + 1]}...`);
-        continue;
+
+      const isNotFound =
+        err.status === 404 ||
+        err.message?.includes('404') ||
+        err.message?.includes('NOT_FOUND') ||
+        err.message?.includes('no longer available');
+
+      const isUnavailable = isHighDemand || isQuotaOrLimit || isNotFound;
+
+      if (isUnavailable) {
+        if (isHighDemand || isQuotaOrLimit) {
+          markModelCooldown(model, isHighDemand ? 60000 : 120000);
+        }
+        if (hasNextFallback) {
+          const nextModel = modelList[i + 1];
+          console.warn(`[Gemini] Model ${model} unavailable (${err.message?.slice(0, 80)}). Auto-falling back to model ${nextModel}...`);
+          continue;
+        }
       }
       throw err;
     }
@@ -537,8 +845,40 @@ async function persistUserSettings() {
     for (const [uid, mode] of userStorageMode.entries()) {
       storageModes[uid] = mode;
     }
+    const userModels = {};
+    for (const [uid, model] of userModelPreference.entries()) {
+      userModels[uid] = model;
+    }
+    const userEfforts = {};
+    for (const [uid, effort] of userEffortPreference.entries()) {
+      userEfforts[uid] = effort;
+    }
+    const userAutoFallbacks = {};
+    for (const [uid, autoFb] of userAutoFallbackPreference.entries()) {
+      userAutoFallbacks[uid] = autoFb;
+    }
+    const userTextModes = {};
+    for (const [uid, mode] of userTextModePreference.entries()) {
+      userTextModes[uid] = mode;
+    }
     const tempFile = `${USER_SETTINGS_FILE}.tmp`;
-    await fsp.writeFile(tempFile, JSON.stringify({ version: 1, storageDirs, storageModes }, null, 2), 'utf-8');
+    await fsp.writeFile(
+      tempFile,
+      JSON.stringify(
+        {
+          version: 2,
+          storageDirs,
+          storageModes,
+          userModels,
+          userEfforts,
+          userAutoFallbacks,
+          userTextModes,
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
     await fsp.rename(tempFile, USER_SETTINGS_FILE);
   } catch (err) {
     console.warn('[User Settings] Failed to persist user_settings.json:', sanitizeError(err));
@@ -571,7 +911,29 @@ async function initUserSettings() {
           if (mode) userStorageMode.set(Number(uid), mode);
         }
       }
-      console.log(`[User Settings] Initialized settings for ${userLocalStorageDir.size} user directories, ${userStorageMode.size} storage modes.`);
+      if (data.userModels && typeof data.userModels === 'object') {
+        for (const [uid, model] of Object.entries(data.userModels)) {
+          if (model) userModelPreference.set(Number(uid), model);
+        }
+      }
+      if (data.userEfforts && typeof data.userEfforts === 'object') {
+        for (const [uid, effort] of Object.entries(data.userEfforts)) {
+          if (effort) userEffortPreference.set(Number(uid), effort);
+        }
+      }
+      if (data.userAutoFallbacks && typeof data.userAutoFallbacks === 'object') {
+        for (const [uid, autoFb] of Object.entries(data.userAutoFallbacks)) {
+          if (typeof autoFb === 'boolean') userAutoFallbackPreference.set(Number(uid), autoFb);
+        }
+      }
+      if (data.userTextModes && typeof data.userTextModes === 'object') {
+        for (const [uid, mode] of Object.entries(data.userTextModes)) {
+          if (mode) userTextModePreference.set(Number(uid), mode);
+        }
+      }
+      console.log(
+        `[User Settings] Initialized settings for ${userLocalStorageDir.size} user directories, ${userStorageMode.size} storage modes, ${userModelPreference.size} model overrides, ${userEffortPreference.size} effort overrides, ${userTextModePreference.size} text mode overrides.`
+      );
     }
   } catch (err) {
     console.warn('[User Settings] Failed to load user_settings.json:', sanitizeError(err));
@@ -1191,12 +1553,14 @@ async function handleAgentCommand(ctx, prompt) {
   const recentHistory = userHistory.slice(-6);
 
   try {
+    const userModel = getUserModel(userId);
     const result = await runGeminiAgent({
       prompt,
       userId,
       userDirectory,
       recentHistory,
       maxSteps: 25,
+      model: userModel,
       onStatusUpdate: (text) => updateStatus(text),
     });
 
@@ -1292,6 +1656,9 @@ bot.command(['start', 'help'], async (ctx) => {
     '• `/directory [path]` — 📁 View or set your personal laptop folder path\n' +
     '• `/status` — 📊 View your connected laptop specs, bot resources & mode\n\n' +
     '🧹 *Workspace & Settings*\n' +
+    '• `/model [name]` — 🤖 Switch AI model & toggle auto-fallback\n' +
+    '• `/effort [level]` — 🧠 Set thinking effort (low, medium, high, minimal)\n' +
+    '• `/plain` — 📄 Toggle plain text mode (no ***, no ###, no ---)\n' +
     '• `/cancel` — ❌ Exit Live Voice, Agent, search, or quiz mode\n' +
     '• `/clear` — 🧹 Clear conversation history (keeps loaded file)\n' +
     '• `/clearall` — 🗑️ Clear all conversation history & unload file\n' +
@@ -1460,6 +1827,313 @@ bot.callbackQuery(/^set_voice:(.+)$/, async (ctx) => {
     `• **Kore**: Crisp, professional female`,
     { parse_mode: 'Markdown', reply_markup: kb }
   );
+});
+
+// ============================================================
+// AI MODEL & EFFORT SETTINGS (Manual toggle & auto-fallback)
+// ============================================================
+
+function buildModelMenuKeyboard(userId) {
+  const currentModel = getUserModel(userId);
+  const autoFallback = getUserAutoFallback(userId);
+  const currentEffort = getUserEffort(userId);
+
+  const kb = new InlineKeyboard();
+
+  const available = SUPPORTED_MODELS.filter((m) => {
+    if (m.provider === 'anthropic' && !anthropic) return false;
+    return true;
+  });
+
+  available.forEach((m, idx) => {
+    const isSelected = m.id === currentModel;
+    const inDemand = isModelInCooldown(m.id) ? ' (Busy ⚠️)' : '';
+    kb.text(`${isSelected ? '✅ ' : ''}${m.icon} ${m.name}${inDemand}`, `set_model:${m.id}`);
+    if (idx % 2 === 1) kb.row();
+  });
+
+  if (available.length % 2 === 1) kb.row();
+
+  // Controls row
+  const isPlain = getUserTextMode(userId) === 'plain';
+  kb.text(autoFallback ? '🔀 Auto-Fallback: ON 🟢' : '🔀 Auto-Fallback: OFF 🔴', 'toggle_autofallback')
+    .text(`🧠 Effort: ${currentEffort.toUpperCase()}`, 'open_effort_menu')
+    .row()
+    .text(isPlain ? '📄 Format: Plain Text' : '🎨 Format: Clean Rich', 'toggle_textmode')
+    .text('🔄 Refresh Status', 'refresh_model_menu');
+
+  return kb;
+}
+
+function buildModelMenuText(userId) {
+  const currentModel = getUserModel(userId);
+  const modelInfo = getModelInfo(currentModel);
+  const autoFallback = getUserAutoFallback(userId);
+  const currentEffort = getUserEffort(userId);
+  const isPlain = getUserTextMode(userId) === 'plain';
+  const fallbackList = getGeminiModelsForUser(userId);
+
+  let cooldownWarning = '';
+  for (const m of fallbackList) {
+    if (isModelInCooldown(m)) {
+      const exp = Math.max(0, Math.ceil((modelCooldowns.get(m) - Date.now()) / 1000));
+      cooldownWarning += `⚠️ *${m}* is currently in high demand on Google servers (${exp}s cooldown remaining). Healthy fallback models are prioritized automatically.\n`;
+    }
+  }
+
+  const fallbackChainDisplay = autoFallback
+    ? fallbackList
+        .map(
+          (m, idx) =>
+            `   ${idx + 1}. \`${m}\` ${idx === 0 ? '*(Primary)*' : '*(Fallback)*'}${isModelInCooldown(m) ? ' ⚠️' : ' 🟢'}`
+        )
+        .join('\n')
+    : `   1. \`${currentModel}\` *(Single model, fallback disabled)*`;
+
+  return (
+    `🤖 *AI Model & Intelligent Fallback Settings*\n\n` +
+    `├─ **Active Model:** *${modelInfo?.name || currentModel}* ${modelInfo?.icon || '🤖'}\n` +
+    `├─ **Thinking Effort:** *${currentEffort.toUpperCase()}* (/effort to change)\n` +
+    `├─ **Text Output:** *${isPlain ? 'Plain Text 📄 (No markdown signs)' : 'Clean Formatted 🎨'}* (/plain to toggle)\n` +
+    `├─ **Auto-Fallback:** *${autoFallback ? 'Enabled 🟢 (Zero-downtime failover)' : 'Disabled 🔴'}*\n` +
+    `└─ **Role:** _${modelInfo?.description || 'General generation'}_\n\n` +
+    `🔄 *Active Model Order:*\n` +
+    `${fallbackChainDisplay}\n\n` +
+    (cooldownWarning ? `${cooldownWarning}\n` : '') +
+    `💡 _Tap any model below to switch manually, toggle Auto-Fallback, or switch text mode (plain text vs clean rich text)._`
+  );
+}
+
+function buildEffortMenuKeyboard(userId) {
+  const currentEffort = getUserEffort(userId);
+  const kb = new InlineKeyboard();
+
+  const options = [
+    { id: 'low', label: '⚡ Low (Fastest)' },
+    { id: 'medium', label: '⚖️ Medium (Balanced)' },
+    { id: 'high', label: '🧠 High (Deep)' },
+    { id: 'minimal', label: '🚀 Minimal / Off' },
+  ];
+
+  options.forEach((opt, idx) => {
+    const isSelected = opt.id === currentEffort;
+    kb.text(`${isSelected ? '✅ ' : ''}${opt.label}`, `set_effort:${opt.id}`);
+    if (idx % 2 === 1) kb.row();
+  });
+
+  kb.row().text('🤖 Back to Model Settings', 'back_to_model_menu');
+  return kb;
+}
+
+function buildEffortMenuText(userId) {
+  const currentEffort = getUserEffort(userId);
+  const currentModel = getUserModel(userId);
+  const modelInfo = getModelInfo(currentModel);
+
+  return (
+    `🧠 *Gemini Thinking & Reasoning Effort*\n\n` +
+    `Active Model: *${modelInfo?.name || currentModel}*\n` +
+    `Current Effort: *${currentEffort.toUpperCase()}*\n\n` +
+    `Control how deeply Gemini reasons before responding:\n` +
+    `• ⚡ **Low**: Fast responses, minimal reasoning delay.\n` +
+    `• ⚖️ **Medium** (Default): Balanced reasoning for general tasks.\n` +
+    `• 🧠 **High**: Maximum reasoning depth for coding, math & complex logic.\n` +
+    `• 🚀 **Minimal**: Minimal or no reasoning tokens (supported on Flash-Lite & 3.5).\n\n` +
+    `_Tap an option below to set your thinking effort, or type \`/effort <level>\`:_`
+  );
+}
+
+bot.command(['model', 'models'], async (ctx) => {
+  const userId = ctx.from.id;
+  const rawArg = ctx.message.text.replace(/^\/(?:model|models)\s*/i, '').trim();
+
+  if (!rawArg) {
+    await ctx.reply(buildModelMenuText(userId), {
+      parse_mode: 'Markdown',
+      reply_markup: buildModelMenuKeyboard(userId),
+    });
+    return;
+  }
+
+  const lowerArg = rawArg.toLowerCase();
+  if (['fallback on', 'autofallback on', 'fallback enable', 'on'].includes(lowerArg)) {
+    setUserAutoFallback(userId, true);
+    await ctx.reply('🟢 *Auto-fallback enabled!* The bot will automatically switch to backup models if your active model experiences high demand (503).', { parse_mode: 'Markdown' });
+    return;
+  }
+  if (['fallback off', 'autofallback off', 'fallback disable', 'off'].includes(lowerArg)) {
+    setUserAutoFallback(userId, false);
+    await ctx.reply('🔴 *Auto-fallback disabled!* The bot will only use your selected model.', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const resolved = resolveModelAlias(rawArg);
+  if (!resolved) {
+    const listStr = SUPPORTED_MODELS.map((m) => `• \`/model ${m.id}\` — ${m.name}`).join('\n');
+    await ctx.reply(
+      `❌ Unknown model: *${rawArg}*\n\nAvailable models:\n${listStr}\n\nOr simply type \`/model\` to open the interactive menu.`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  setUserModel(userId, resolved);
+  const info = getModelInfo(resolved);
+  await ctx.reply(
+    `✅ *AI Model updated!*\n\n` +
+    `Now using: *${info?.name || resolved}* ${info?.icon || '🤖'}\n` +
+    `Auto-fallback: *${getUserAutoFallback(userId) ? 'ON 🟢' : 'OFF 🔴'}*\n` +
+    `Thinking Effort: *${getUserEffort(userId).toUpperCase()}*`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command(['effort', 'thinking', 'reasoning'], async (ctx) => {
+  const userId = ctx.from.id;
+  const rawArg = ctx.message.text.replace(/^\/(?:effort|thinking|reasoning)\s*/i, '').trim();
+
+  if (!rawArg) {
+    await ctx.reply(buildEffortMenuText(userId), {
+      parse_mode: 'Markdown',
+      reply_markup: buildEffortMenuKeyboard(userId),
+    });
+    return;
+  }
+
+  const lower = rawArg.toLowerCase();
+  let target = null;
+  if (['low', 'fast'].includes(lower)) target = 'low';
+  else if (['medium', 'med', 'balanced', 'default'].includes(lower)) target = 'medium';
+  else if (['high', 'deep', 'max'].includes(lower)) target = 'high';
+  else if (['minimal', 'min', 'off', 'none'].includes(lower)) target = 'minimal';
+
+  if (!target) {
+    await ctx.reply(
+      `❌ Invalid effort level: *${rawArg}*.\n\nValid levels:\n• \`/effort low\` (Fastest)\n• \`/effort medium\` (Balanced)\n• \`/effort high\` (Deep reasoning)\n• \`/effort minimal\` (Minimal / Off)`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  setUserEffort(userId, target);
+  await ctx.reply(`✅ *Thinking effort updated!* Set to *${target.toUpperCase()}*.`, { parse_mode: 'Markdown' });
+});
+
+bot.command(['plain', 'format'], async (ctx) => {
+  const userId = ctx.from.id;
+  const rawArg = ctx.message.text.replace(/^\/(?:plain|format)\s*/i, '').trim().toLowerCase();
+
+  let targetMode;
+  if (['on', 'plain', 'text', 'raw'].includes(rawArg)) {
+    targetMode = 'plain';
+  } else if (['off', 'clean', 'rich', 'formatted', 'md'].includes(rawArg)) {
+    targetMode = 'clean';
+  } else {
+    // Toggle
+    const current = getUserTextMode(userId);
+    targetMode = current === 'plain' ? 'clean' : 'plain';
+  }
+
+  setUserTextMode(userId, targetMode);
+
+  if (targetMode === 'plain') {
+    await ctx.reply(
+      '📄 *Plain Text Mode: ENABLED*\n\n' +
+      'All AI responses will now be sent as clean, readable plain text without markdown signs (no ***, no ###, no ---).\n\n' +
+      'Type `/plain` anytime to switch back to Clean Formatted mode.',
+      { parse_mode: 'Markdown' }
+    );
+  } else {
+    await ctx.reply(
+      '🎨 *Clean Formatted Mode: ENABLED*\n\n' +
+      'AI responses will be formatted with Telegram-safe bold headers and clean bullet points (never raw ### or ---).\n\n' +
+      'Type `/plain` anytime to switch to 100% plain text.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
+
+bot.callbackQuery(/^set_model:(.+)$/, async (ctx) => {
+  const userId = ctx.from.id;
+  const modelId = ctx.match[1];
+  setUserModel(userId, modelId);
+  const info = getModelInfo(modelId);
+  await ctx.answerCallbackQuery({ text: `Switched to ${info?.name || modelId}!` });
+  await ctx.editMessageText(buildModelMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildModelMenuKeyboard(userId),
+  }).catch(() => {});
+});
+
+bot.callbackQuery('toggle_autofallback', async (ctx) => {
+  const userId = ctx.from.id;
+  const current = getUserAutoFallback(userId);
+  const next = !current;
+  setUserAutoFallback(userId, next);
+  await ctx.answerCallbackQuery({ text: `Auto-fallback is now ${next ? 'ON' : 'OFF'}!` });
+  await ctx.editMessageText(buildModelMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildModelMenuKeyboard(userId),
+  }).catch(() => {});
+});
+
+bot.callbackQuery('refresh_model_menu', async (ctx) => {
+  const userId = ctx.from.id;
+  await ctx.answerCallbackQuery({ text: 'Refreshed!' });
+  await ctx.editMessageText(buildModelMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildModelMenuKeyboard(userId),
+  }).catch(() => {});
+});
+
+bot.callbackQuery('open_effort_menu', async (ctx) => {
+  const userId = ctx.from.id;
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(buildEffortMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildEffortMenuKeyboard(userId),
+  }).catch(() => {});
+});
+
+bot.callbackQuery(/^set_effort:(.+)$/, async (ctx) => {
+  const userId = ctx.from.id;
+  const effort = ctx.match[1];
+  setUserEffort(userId, effort);
+  await ctx.answerCallbackQuery({ text: `Effort set to ${effort.toUpperCase()}!` });
+  await ctx.editMessageText(buildEffortMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildEffortMenuKeyboard(userId),
+  }).catch(() => {});
+});
+
+bot.callbackQuery('back_to_model_menu', async (ctx) => {
+  const userId = ctx.from.id;
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(buildModelMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildModelMenuKeyboard(userId),
+  }).catch(() => {});
+});
+
+bot.callbackQuery('toggle_textmode', async (ctx) => {
+  const userId = ctx.from.id;
+  const current = getUserTextMode(userId);
+  const next = current === 'plain' ? 'clean' : 'plain';
+  setUserTextMode(userId, next);
+  await ctx.answerCallbackQuery({ text: `Text mode: ${next === 'plain' ? 'Plain Text 📄' : 'Clean Formatted 🎨'}` });
+  await ctx.editMessageText(buildModelMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildModelMenuKeyboard(userId),
+  }).catch(() => {});
+});
+
+bot.callbackQuery('open_model_settings', async (ctx) => {
+  const userId = ctx.from.id;
+  await ctx.answerCallbackQuery();
+  await ctx.reply(buildModelMenuText(userId), {
+    parse_mode: 'Markdown',
+    reply_markup: buildModelMenuKeyboard(userId),
+  });
 });
 
 bot.command('agent', async (ctx) => {
@@ -2433,11 +3107,21 @@ bot.command('status', async (ctx) => {
   const processMemory = process.memoryUsage();
   const botMemoryUsage = (processMemory.heapUsed / 1024 / 1024).toFixed(2);
 
+  const userChosenModel = getUserModel(userId);
+  const modelInfo = getModelInfo(userChosenModel);
+  const userAutoFb = getUserAutoFallback(userId);
+  const userEffort = getUserEffort(userId);
+  const userTextMode = getUserTextMode(userId);
+  const inCooldown = isModelInCooldown(userChosenModel);
+
   const statusMessage =
     `📊 *System & Hardware Status*\n\n` +
     laptopSpecsText +
     fleetText +
     `👤 *Your Personal Settings*\n` +
+    `├─ AI Model: *${modelInfo?.name || userChosenModel}* ${modelInfo?.icon || '🤖'} (Fallback: ${userAutoFb ? 'ON 🟢' : 'OFF 🔴'})${inCooldown ? ' ⚠️ *(In Demand)*' : ''}\n` +
+    `├─ Thinking Effort: *${userEffort.toUpperCase()}*\n` +
+    `├─ Text Mode: *${userTextMode === 'plain' ? 'Plain Text 📄 (No markdown signs)' : 'Clean Formatted 🎨'}* (/plain to toggle)\n` +
     `├─ Laptop Folder: ${userDir ? `\`${userDir}\`` : '_Not set yet (use /directory)_'}\n` +
     `├─ Upload Storage: ${modeLabels[userMode] || userMode}\n` +
     `├─ Loaded Document: ${activeDoc?.fileName ? `\`${activeDoc.fileName}\`` : '_None (unloaded)_'}\n` +
@@ -2451,10 +3135,14 @@ bot.command('status', async (ctx) => {
   const statusOptions = { parse_mode: 'Markdown' };
   if (!hasLaptop) {
     statusOptions.reply_markup = new InlineKeyboard()
+      .text('🤖 Model Settings', 'open_model_settings')
+      .row()
       .text('💻 Laptop Specs', `view_spec_${userId}`)
       .text('🔄 Refresh Status', `refresh_status_${userId}`);
   } else {
     statusOptions.reply_markup = new InlineKeyboard()
+      .text('🤖 Model Settings', 'open_model_settings')
+      .row()
       .text('💻 Laptop Specs', `view_spec_${userId}`)
       .text('🔄 Refresh', `refresh_status_${userId}`)
       .row()
@@ -3127,44 +3815,137 @@ async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 
   }
 }
 
+export function cleanTelegramFormatting(text, { plainTextOnly = false } = {}) {
+  if (!text || typeof text !== 'string') return '';
+
+  // Extract code blocks first so their contents are never mangled
+  const codeBlocks = [];
+  let placeholderIndex = 0;
+  let str = text.replace(/```[\s\S]*?```/g, (match) => {
+    const key = `\uE000CB${placeholderIndex++}\uE001`;
+    codeBlocks.push({ key, content: match });
+    return key;
+  });
+
+  // Extract inline code `...`
+  const inlineCodes = [];
+  str = str.replace(/`([^`\n]+)`/g, (match) => {
+    const key = `\uE000IC${inlineCodes.length}\uE001`;
+    inlineCodes.push({ key, content: match });
+    return key;
+  });
+
+  // 1. Remove markdown horizontal rules (---, ***, ___, ===)
+  str = str.replace(/^[ \t]*[-*_~=]{3,}[ \t]*$/gm, '');
+
+  // 2. Clean spaced asterisks "* * text * *" -> "**text**" before bullet conversion
+  str = str.replace(/\*\s+\*([^*\n]+)\*\s+\*/g, '**$1**');
+
+  // 3. Convert markdown headers (### Title, #### Title, etc.)
+  if (plainTextOnly) {
+    str = str.replace(/^[ \t]*#{1,6}[ \t]+(.*)$/gm, '$1');
+  } else {
+    str = str.replace(/^[ \t]*#{1,6}[ \t]+(.*)$/gm, '*$1*');
+  }
+
+  // 4. Clean up bullet lists:
+  // e.g. "* **Title:** text" -> "• *Title:* text"
+  str = str.replace(/^[ \t]*[-*+][ \t]+\*\*(.*?)\*\*[ \t]*/gm, (m, p1) => {
+    return plainTextOnly ? `• ${p1} ` : `• *${p1}* `;
+  });
+
+  // e.g. "* Item" or "- Item" at line start -> "• Item"
+  str = str.replace(/^[ \t]*[-*+][ \t]+/gm, '• ');
+
+  // 5. Clean bold/italic
+  if (plainTextOnly) {
+    str = str.replace(/\*{1,3}(.*?)\*{1,3}/g, '$1');
+    str = str.replace(/_(.*?)_/g, '$1');
+    str = str.replace(/~~(.*?)~~/g, '$1');
+    str = str.replace(/\\\*/g, '');
+    str = str.replace(/(^|\s)\*+(\s|$)/g, '$1$2');
+  } else {
+    // Convert triple asterisks ***word*** -> *word*
+    str = str.replace(/\*\*\*(.*?)\*\*\*/g, '*$1*');
+    // Convert double asterisks **word** -> *word*
+    str = str.replace(/\*\*(.*?)\*\*/g, '*$1*');
+  }
+
+  // Clean any remaining lone asterisks that would break Telegram parser
+  if (!plainTextOnly) {
+    const asteriskCount = (str.match(/\*/g) || []).length;
+    if (asteriskCount % 2 !== 0) {
+      str = str.replace(/\*/g, '');
+    }
+    const underscoreCount = (str.match(/_/g) || []).length;
+    if (underscoreCount % 2 !== 0) {
+      str = str.replace(/_/g, '');
+    }
+  }
+
+  // 6. Clean multiple blank lines (max 2)
+  str = str.replace(/\n{3,}/g, '\n\n').trim();
+
+  // Restore inline code
+  for (const item of inlineCodes) {
+    str = str.replace(item.key, plainTextOnly ? item.content.replace(/`/g, '') : item.content);
+  }
+
+  // Restore code blocks
+  for (const item of codeBlocks) {
+    str = str.replace(item.key, item.content);
+  }
+
+  return str;
+}
+
 async function sendLongMessage(ctx, text, options = 'Markdown') {
   const { safeText } = sanitizeAndCheckSecrets(text, 'outgoing_message');
-  const parseMode = typeof options === 'string' ? options : (options?.parse_mode || 'Markdown');
+  const userId = ctx?.from?.id;
+  const isPlainMode = getUserTextMode(userId) === 'plain';
+
+  const defaultParseMode = isPlainMode ? null : (typeof options === 'string' ? options : (options?.parse_mode || 'Markdown'));
   const replyMarkup = typeof options === 'object' ? options?.reply_markup : undefined;
   const disablePreview = typeof options === 'object' ? options?.disable_web_page_preview : undefined;
   const MAX_LEN = 4000;
 
-  if (safeText.length <= MAX_LEN) {
+  // Transform raw markdown into clean Telegram-compatible text (or 100% plain text if plain mode is active)
+  const formattedText = cleanTelegramFormatting(safeText, { plainTextOnly: isPlainMode });
+
+  if (formattedText.length <= MAX_LEN) {
     const replyOpts = {
-      ...(parseMode ? { parse_mode: parseMode } : {}),
+      ...(defaultParseMode ? { parse_mode: defaultParseMode } : {}),
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       ...(disablePreview !== undefined ? { disable_web_page_preview: disablePreview } : {}),
     };
     try {
-      await ctx.reply(safeText, replyOpts);
+      await ctx.reply(formattedText, replyOpts);
     } catch {
-      await ctx.reply(safeText, replyMarkup ? { reply_markup: replyMarkup } : undefined);
+      // If Telegram Markdown parser failed, fall back to pure plain text without any markdown signs
+      const fallbackPlain = cleanTelegramFormatting(safeText, { plainTextOnly: true });
+      await ctx.reply(fallbackPlain, replyMarkup ? { reply_markup: replyMarkup } : undefined);
     }
     return;
   }
 
   const chunks = [];
-  for (let i = 0; i < safeText.length; i += MAX_LEN) {
-    chunks.push(safeText.slice(i, i + MAX_LEN));
+  for (let i = 0; i < formattedText.length; i += MAX_LEN) {
+    chunks.push(formattedText.slice(i, i + MAX_LEN));
   }
 
   for (let idx = 0; idx < chunks.length; idx++) {
     const chunk = chunks[idx];
     const isLast = idx === chunks.length - 1;
     const replyOpts = {
-      ...(parseMode ? { parse_mode: parseMode } : {}),
+      ...(defaultParseMode ? { parse_mode: defaultParseMode } : {}),
       ...(isLast && replyMarkup ? { reply_markup: replyMarkup } : {}),
       ...(disablePreview !== undefined ? { disable_web_page_preview: disablePreview } : {}),
     };
     try {
       await ctx.reply(chunk, replyOpts);
     } catch {
-      await ctx.reply(chunk, isLast && replyMarkup ? { reply_markup: replyMarkup } : undefined);
+      const fallbackPlain = cleanTelegramFormatting(chunk, { plainTextOnly: true });
+      await ctx.reply(fallbackPlain, isLast && replyMarkup ? { reply_markup: replyMarkup } : undefined);
     }
   }
 }
@@ -3524,6 +4305,16 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
   try {
     let systemInstruction =
       'You are a helpful, expert AI assistant. Keep responses direct, clear, and thoughtful.\n\n' +
+      'TEMPORAL CONTEXT & OFFICIAL AI MODELS (2026):\n' +
+      '• The current year is 2026.\n' +
+      '• You are powered by Google Gemini 3 series (Gemini 3.8 Flash, Gemini 3.5 Flash, Gemini 3.5 Flash-Lite), official Google DeepMind flagship models (released 2025–2026).\n' +
+      '• NEVER claim or suggest that "Gemini 3.8" is a "community label", unofficial proxy, or nonexistent. Treat it as the genuine, official Google flagship model that it is.\n\n' +
+      'TELEGRAM OUTPUT & PLAIN READABILITY GUIDANCE:\n' +
+      '• You are chatting directly inside Telegram messenger on mobile and desktop.\n' +
+      '• Telegram does NOT support raw markdown headers (#, ##, ###, ####) or horizontal divider lines (---, ***, ___). NEVER use them in your text.\n' +
+      '• NEVER use raw nested asterisks (* **, ** *). Use clean bullet points (•) for lists.\n' +
+      '• If you need section headings, simply put *Bold Title* on its own line.\n' +
+      '• BE CONCISE & FAST: Answer conversational questions in 1–3 clear, easy-to-read paragraphs. Avoid unrequested essays, bloated outlines, or multi-page breakdowns unless the user explicitly asks for an exhaustive analysis.\n\n' +
       'CONVERSATION CONTINUITY & MEMORY:\n' +
       '• You maintain an ongoing, full-context conversation with this user.\n' +
       '• Read and consider the ENTIRE previous dialogue in `messages` to understand the full context.\n' +
@@ -3577,8 +4368,15 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
 
     let assistantMessage = '';
 
-    // If hybrid mode is configured and Anthropic key is present, attempt Claude
-    if (isHybridMode && anthropic) {
+    const userChosenModel = getUserModel(userId);
+    const isClaudeChosen = userChosenModel && userChosenModel.toLowerCase().includes('claude');
+
+    // Only attempt Claude if the user explicitly chose a Claude model, or if AI_PROVIDER is explicitly set to 'claude'
+    const shouldAttemptClaude =
+      anthropic &&
+      (isClaudeChosen || (process.env.AI_PROVIDER === 'claude' && !userModelPreference.has(Number(userId))));
+
+    if (shouldAttemptClaude) {
       try {
         let response;
         try {
@@ -3615,16 +4413,24 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
         throw new Error('No AI provider available. Please configure GEMINI_API_KEY in your .env file.');
       }
       const geminiContents = formatHistoryForGemini(history);
-      const geminiRes = await callGeminiWithFallback((model) =>
-        googleAI.models.generateContent({
+      const userEffort = getUserEffort(userId);
+      const candidateModels = getGeminiModelsForUser(userId);
+
+      const geminiRes = await callGeminiWithFallback(async (model) => {
+        const conf = {
+          systemInstruction,
+          maxOutputTokens: 20000,
+        };
+        const tConfig = getThinkingConfigForModel(model, userEffort);
+        if (tConfig) {
+          conf.thinkingConfig = tConfig;
+        }
+        return await generateGeminiContentWithSafeThinking({
           model,
           contents: geminiContents,
-          config: {
-            systemInstruction,
-            maxOutputTokens: 20000,
-          },
-        })
-      );
+          config: conf,
+        });
+      }, candidateModels);
       assistantMessage = (geminiRes?.text || '').trim();
     }
 
@@ -5824,6 +6630,9 @@ const botCommands = [
   { command: 'status', description: '📊 Laptop hardware specs, bot resources & mode' },
 
   // 🧹 Workspace & Session Controls
+  { command: 'model', description: '🤖 Switch AI model & toggle auto-fallback' },
+  { command: 'effort', description: '🧠 Set thinking effort (low, medium, high)' },
+  { command: 'plain', description: '📄 Toggle plain text mode (no ***, no ###, no ---)' },
   { command: 'cancel', description: '❌ Exit Live Voice, Agent, search, or quiz mode' },
   { command: 'clear', description: '🧹 Clear conversation history (keeps file)' },
   { command: 'clearall', description: '🗑️ Clear all conversation history & unload file' },
