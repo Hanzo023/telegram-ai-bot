@@ -1371,9 +1371,9 @@ async function promptPendingFileSave(ctx, userId, fileInfo) {
     `• **Default target:** \`${suggestedPath}\`\n` +
     `• **Size:** ${fileInfo.code.length} characters\n\n` +
     `*Tap an option below, or reply with:*\n` +
-    `• \`/save\` to accept the default\n` +
-    `• \`/save <path_or_filename>\` to set a custom destination\n` +
-    `• \`/cancel\` to discard`;
+    `• /save to accept the default\n` +
+    `• /save <path_or_filename> to set a custom destination\n` +
+    `• /cancel to discard`;
 
   await ctx.reply(text, {
     parse_mode: 'Markdown',
@@ -1389,7 +1389,7 @@ async function executeSavePendingFile(ctx, userId, targetDestination, isCallback
     if (isCallback) {
       await ctx.answerCallbackQuery({ text: 'No pending file to save!' }).catch(() => {});
     }
-    await ctx.reply('❌ **No pending file to save.** (Generate code with `/agent` first!)', { parse_mode: 'Markdown' });
+    await ctx.reply('❌ **No pending file to save.** (Generate code with /agent first!)', { parse_mode: 'Markdown' });
     return;
   }
 
@@ -1582,34 +1582,34 @@ bot.command(['start', 'help'], async (ctx) => {
     `${engineDesc}\n\n` +
     'Send me any message, voice note, photo, or document and I\'ll assist you right away!\n\n' +
     '🤖 *Autonomous AI Agent*\n' +
-    '• `/agent <prompt>` — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +
-    '• `/agent_mode` — 🎚️ *Toggle All Chats*: Set Agent as default for all messages (send again or `/cancel` to exit)\n' +
-    '• `/devices` — 💻 *Laptop Agent*: View connected laptops for remote terminal & file tasks\n' +
-    '• `/deep_research <topic>` — 🔬 *Deep Research*: Exhaustive multi-source background report\n\n' +
+    '• /agent <prompt> — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +
+    '• /agent_mode — 🎚️ *Toggle All Chats*: Set Agent as default for all messages (send again or /cancel to exit)\n' +
+    '• /devices — 💻 *Laptop Agent*: View connected laptops for remote terminal & file tasks\n' +
+    '• /deep_research <topic> — 🔬 *Deep Research*: Exhaustive multi-source background report\n\n' +
     '🎙️ *Real-Time Live Voice*\n' +
-    '• `/live [query]` — 🎙️ Toggle Live Voice mode (spoken voice replies until /cancel)\n' +
-    '• `/call` — 📞 Open live duplex voice call WebApp (real-time bidirectional audio)\n' +
-    '• `/voice` — 🗣️ Select Gemini Live voice (Puck, Aoede, Charon, Fenrir, Kore)\n\n' +
+    '• /live [query] — 🎙️ Toggle Live Voice mode (spoken voice replies until /cancel)\n' +
+    '• /call — 📞 Open live duplex voice call WebApp (real-time bidirectional audio)\n' +
+    '• /voice — 🗣️ Select Gemini Live voice (Puck, Aoede, Charon, Fenrir, Kore)\n\n' +
     '🎨 *Search & Creation*\n' +
-    '• `/image <prompt>` — 🎨 Generate pictures with Gemini Nano Banana\n' +
-    '• `/search <query>` — 🌐 Live web search & deep factual research\n' +
-    '• `/youtube <query>` — 🎥 Search YouTube videos & channels\n' +
-    '• `/quiz` — 📝 Interactive quiz on a loaded document or topic\n\n' +
+    '• /image <prompt> — 🎨 Generate pictures with Gemini Nano Banana\n' +
+    '• /search <query> — 🌐 Live web search & deep factual research\n' +
+    '• /youtube <query> — 🎥 Search YouTube videos & channels\n' +
+    '• /quiz — 📝 Interactive quiz on a loaded document or topic\n\n' +
     '☁️ *Files & Cloud Vault*\n' +
-    '• `/storage` — ☁️ Cloud Vault hub (Saved files & search history)\n' +
-    '• `/library` — 📁 Browse saved files by category (A-Z)\n' +
-    '• `/directory [path]` — 📁 View or set your personal laptop folder path\n' +
-    '• `/status` — 📊 View your connected laptop specs, bot resources & mode\n\n' +
+    '• /storage — ☁️ Cloud Vault hub (Saved files & search history)\n' +
+    '• /library — 📁 Browse saved files by category (A-Z)\n' +
+    '• /directory [path] — 📁 View or set your personal laptop folder path\n' +
+    '• /status — 📊 View your connected laptop specs, bot resources & mode\n\n' +
     '🧹 *Workspace & Settings*\n' +
-    '• `/model [name]` — 🤖 Switch AI model & toggle auto-fallback\n' +
-    '• `/effort [level]` — 🧠 Set thinking effort (low, medium, high, minimal)\n' +
-    '• `/plain` — 📄 Toggle plain text mode (no ***, no ###, no ---)\n' +
-    '• `/cancel` — ❌ Exit Live Voice, Agent, search, or quiz mode\n' +
-    '• `/clear` — 🧹 Clear conversation history (keeps loaded file)\n' +
-    '• `/clearall` — 🗑️ Clear all conversation history & unload file\n' +
-    '• `/local` — 💾 Save files to your laptop folder & Cloud Vault\n' +
-    '• `/cloud` — ☁️ Save files to Cloud Vault only\n' +
-    '• `/nosave` — 💻 Save files to your laptop folder only',
+    '• /model [name] — 🤖 Switch AI model & toggle auto-fallback\n' +
+    '• /effort [level] — 🧠 Set thinking effort (low, medium, high, minimal)\n' +
+    '• /plain — 📄 Toggle plain text mode (no ***, no ###, no ---)\n' +
+    '• /cancel — ❌ Exit Live Voice, Agent, search, or quiz mode\n' +
+    '• /clear — 🧹 Clear conversation history (keeps loaded file)\n' +
+    '• /clearall — 🗑️ Clear all conversation history & unload file\n' +
+    '• /local — 💾 Save files to your laptop folder & Cloud Vault\n' +
+    '• /cloud — ☁️ Save files to Cloud Vault only\n' +
+    '• /nosave — 💻 Save files to your laptop folder only',
     { parse_mode: 'Markdown' }
   );
 });
@@ -1638,7 +1638,7 @@ bot.command(['live', 'live_mode', 'livemode'], async (ctx) => {
     await ctx.reply(
       `📝 *Gemini Live Voice Mode: DISABLED*\n\n` +
       `• Returned to standard text chat.\n` +
-      `• Send \`/live\` anytime to turn Live Voice back on.`,
+      `• Send /live anytime to turn Live Voice back on.`,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -1656,14 +1656,17 @@ bot.command(['live', 'live_mode', 'livemode'], async (ctx) => {
         `• **Voice Persona:** *${userVoice}* (Change with /voice)\n` +
         `• **Status:** Stays active until you manually cancel it!\n\n` +
         `🗣️ *Go ahead, send any message or voice note to begin.*\n\n` +
-        `❌ Send \`/cancel\` or \`/live\` anytime to return to standard chat.`,
-        { parse_mode: 'Markdown' }
+        `❌ Send /cancel or /live anytime to return to standard chat.`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard().text('❌ Exit Live Voice', 'exit_live_mode'),
+        }
       );
     } else {
       await ctx.reply(
         `📝 *Gemini Live Voice Mode: DISABLED*\n\n` +
         `• Returned to standard text chat.\n` +
-        `• Send \`/live\` anytime to turn Live Voice back on.`,
+        `• Send /live anytime to turn Live Voice back on.`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -1726,7 +1729,7 @@ bot.command('voice', async (ctx) => {
     await ctx.reply(
       `🗣️ *Gemini 3.8 Live Voice Settings*\n\n` +
       `Current active voice: *${currentVoice}*\n\n` +
-      `Choose a voice below or type \`/voice <name>\`:\n` +
+      `Choose a voice below or type /voice <name>:\n` +
       `• **Puck**: Warm, natural neutral/male\n` +
       `• **Aoede**: Breezy, expressive female\n` +
       `• **Charon**: Deep, calm, steady male\n` +
@@ -1881,7 +1884,7 @@ function buildEffortMenuText(userId) {
     `• ⚖️ **Medium** (Default): Balanced reasoning for general tasks.\n` +
     `• 🧠 **High**: Maximum reasoning depth for coding, math & complex logic.\n` +
     `• 🚀 **Minimal**: Minimal or no reasoning tokens (supported on Flash-Lite & 3.5).\n\n` +
-    `_Tap an option below to set your thinking effort, or type \`/effort <level>\`:_`
+    `_Tap an option below to set your thinking effort, or type /effort <level>:_`
   );
 }
 
@@ -1911,9 +1914,9 @@ bot.command(['model', 'models'], async (ctx) => {
 
   const resolved = resolveModelAlias(rawArg);
   if (!resolved) {
-    const listStr = SUPPORTED_MODELS.map((m) => `• \`/model ${m.id}\` — ${m.name}`).join('\n');
+    const listStr = SUPPORTED_MODELS.map((m) => `• /model ${m.id} — ${m.name}`).join('\n');
     await ctx.reply(
-      `❌ Unknown model: *${rawArg}*\n\nAvailable models:\n${listStr}\n\nOr simply type \`/model\` to open the interactive menu.`,
+      `❌ Unknown model: *${rawArg}*\n\nAvailable models:\n${listStr}\n\nOr simply type /model to open the interactive menu.`,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -1951,7 +1954,7 @@ bot.command(['effort', 'thinking', 'reasoning'], async (ctx) => {
 
   if (!target) {
     await ctx.reply(
-      `❌ Invalid effort level: *${rawArg}*.\n\nValid levels:\n• \`/effort low\` (Fastest)\n• \`/effort medium\` (Balanced)\n• \`/effort high\` (Deep reasoning)\n• \`/effort minimal\` (Minimal / Off)`,
+      `❌ Invalid effort level: *${rawArg}*.\n\nValid levels:\n• /effort low (Fastest)\n• /effort medium (Balanced)\n• /effort high (Deep reasoning)\n• /effort minimal (Minimal / Off)`,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -1982,14 +1985,14 @@ bot.command(['plain', 'format'], async (ctx) => {
     await ctx.reply(
       '📄 *Plain Text Mode: ENABLED*\n\n' +
       'All AI responses will now be sent as clean, readable plain text without markdown signs (no ***, no ###, no ---).\n\n' +
-      'Type `/plain` anytime to switch back to Clean Formatted mode.',
+      'Type /plain anytime to switch back to Clean Formatted mode.',
       { parse_mode: 'Markdown' }
     );
   } else {
     await ctx.reply(
       '🎨 *Clean Formatted Mode: ENABLED*\n\n' +
       'AI responses will be formatted with Telegram-safe bold headers and clean bullet points (never raw ### or ---).\n\n' +
-      'Type `/plain` anytime to switch to 100% plain text.',
+      'Type /plain anytime to switch to 100% plain text.',
       { parse_mode: 'Markdown' }
     );
   }
@@ -2085,10 +2088,10 @@ bot.command('agent', async (ctx) => {
       '🤖 *Gemini Autonomous Agent (One-Time Task)*\n\n' +
       'Run a single objective using autonomous tools without changing your default chat mode.\n\n' +
       '• **How it works:** Executes web search, YouTube, file inspection, and math calculations in a ReAct loop to solve your specific task.\n' +
-      '• **When to use `/agent`:** When you want a quick tool or research task done for this message only. Your regular chat stays active.\n' +
-      '• **When to use `/agent_mode`:** When you want the agent to answer *all* future messages automatically without typing `/agent` each time.\n\n' +
+      '• **When to use /agent:** When you want a quick tool or research task done for this message only. Your regular chat stays active.\n' +
+      '• **When to use /agent_mode:** When you want the agent to answer *all* future messages automatically without typing /agent each time.\n\n' +
       '*Usage Example:*\n' +
-      '`/agent Search the web for latest releases in Node.js, and check my cloud vault for any notes`',
+      '/agent Search the web for latest releases in Node.js, and check my cloud vault for any notes',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -2120,12 +2123,15 @@ bot.command(['agent_mode', 'agentmode'], async (ctx) => {
         `• **Default Assistant:** Switched to Gemini Autonomous Agent for all your messages.\n` +
         `• **Automatic Tools:** Every message you send can now automatically trigger web searches, file checks, YouTube searches, and calculations.\n\n` +
         `❌ *How to Turn Off / Cancel:*\n` +
-        `• Send \`/agent_mode\` again (or \`/agent_mode off\`).\n` +
-        `• Or simply send \`/cancel\` anytime to restore standard chat.`
+        `• Send /agent_mode again (or /agent_mode off).\n` +
+        `• Or simply send /cancel anytime to restore standard chat.`
       : `${restoredTitle}\n\n` +
         `• **Default Assistant:** ${restoredDesc}\n` +
-        `• **Single Tasks:** You can still run on-demand agent tasks anytime with \`/agent <prompt>\`.`,
-    { parse_mode: 'Markdown' }
+        `• **Single Tasks:** You can still run on-demand agent tasks anytime with /agent <prompt>.`,
+    {
+      parse_mode: 'Markdown',
+      ...(isEnabled ? { reply_markup: new InlineKeyboard().text('❌ Exit Agent Mode', 'exit_agent_mode') } : {}),
+    }
   );
 });
 
@@ -2172,7 +2178,7 @@ bot.command(['devices', 'laptops', 'device'], async (ctx) => {
 
   text += `• **Safe on Public Wi-Fi:** Uses an outbound encrypted TLS tunnel (\`wss://\`) with 0 open incoming ports.\n` +
     `• **Multi-User Isolation:** Each user's agent commands only execute on their own machine.\n\n` +
-    `_Try: \`/status\` to view live CPU/RAM specs, or \`/agent run tests on my laptop\`._`;
+    `_Try: /status to view live CPU/RAM specs, or /agent run tests on my laptop._`;
 
   const keyboard = new InlineKeyboard();
   if (!list || list.length === 0) {
@@ -2275,7 +2281,7 @@ bot.command(['deep_research', 'research'], async (ctx) => {
       '🔬 *Gemini Deep Research Agent*\n\n' +
       'Conduct exhaustive, multi-step web research on any complex topic powered by `deep-research-preview-04-2026`!\n\n' +
       '*Usage:*\n' +
-      '`/deep_research The current state and future architecture of quantum computing chips`',
+      '/deep_research The current state and future architecture of quantum computing chips',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -2361,7 +2367,7 @@ async function handleClear(ctx) {
       '✅ *Conversation messages cleared!*\n\n' +
       `📄 *Active Document Kept:* \`${activeDoc.fileName}\`\n` +
       `You can continue asking questions or chatting about this file without re-uploading!\n\n` +
-      `💡 _To unload this document from chat memory too, type \`/clear all\` or tap below:_`,
+      `💡 _To unload this document from chat memory too, type /clearall or tap below:_`,
       { parse_mode: 'Markdown', reply_markup: keyboard }
     );
   } else {
@@ -2832,8 +2838,8 @@ bot.command(['download', 'dl', 'tiktok'], async (ctx) => {
   await ctx.reply(
     'ℹ️ *Video Downloading Disabled*\n\n' +
     'Video downloading has been disabled to keep the bot fast and lightweight.\n\n' +
-    '🎥 *YouTube Search:* Use `/youtube <query>` to search videos with direct watch links!\n' +
-    '🌐 *Web Research:* Use `/search <query>` for AI web research.',
+    '🎥 *YouTube Search:* Use /youtube <query> to search videos with direct watch links!\n' +
+    '🌐 *Web Research:* Use /search <query> for AI web research.',
     { parse_mode: 'Markdown' }
   );
 });
@@ -2854,6 +2860,8 @@ bot.command('cancel', async (ctx) => {
     setUserLiveMode(userId, false);
   }
 
+  const cancelled = [];
+
   if (pendingFiles.has(userId)) {
     const p = pendingFiles.get(userId);
     pendingFiles.delete(userId);
@@ -2861,7 +2869,6 @@ bot.command('cancel', async (ctx) => {
     cancelled.push(`📁 Pending code save (${p.filename})`);
   }
 
-  const cancelled = [];
   if (active) {
     const modeNames = {
       search: '🌐 AI Web Search',
@@ -2901,7 +2908,7 @@ bot.command('save', async (ctx) => {
   const rawArg = ctx.message.text.replace(/^\/save\s*/i, '').trim();
 
   if (!pendingFiles.has(userId)) {
-    await ctx.reply('❌ **No pending file to save.** (Generate code with `/agent` first!)', { parse_mode: 'Markdown' });
+    await ctx.reply('❌ **No pending file to save.** (Generate code with /agent first!)', { parse_mode: 'Markdown' });
     return;
   }
 
@@ -3120,7 +3127,7 @@ async function handleSpecCommand(ctx, userId, isCallback = false) {
       `• **Storage Directory:** \`${userDir || 'Not set'}\`\n\n` +
       `💡 _To view your live hardware specs (CPU, GPU, RAM, Battery, Disks):_\n` +
       `1. Double-click \`Start-Silent-Agent.vbs\` (or \`start-agent.bat\`) on your laptop.\n` +
-      `2. Send `/spec` again!`;
+      `2. Send /spec again!`;
 
     const kb = new InlineKeyboard()
       .text('🔄 Check Connection', `refresh_spec_${userId}`)
@@ -3755,6 +3762,40 @@ async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 
   }
 }
 
+const LINUX_ROOT_DIRS = new Set([
+  'bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media',
+  'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'srv', 'sys', 'tmp', 'usr', 'var'
+]);
+
+/**
+ * Checks whether an inline text snippet is a Telegram bot command rather than a file/directory path or code.
+ * - Bot command: /cancel, /live, /agent, /status, /model, /save, /directory <path>, etc.
+ * - Directory/File path: C:\Users\..., /home/user, /etc/nginx, /var/log, /tmp, /app.js, ./run.sh
+ * - Code snippet: npm run build, const x = 1
+ */
+export function isTelegramBotCommand(text) {
+  if (!text || typeof text !== 'string') return false;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('/')) return false;
+
+  // If it has multiple slashes or backslashes, it is a directory / file path: e.g. /home/user or /etc/nginx
+  if (trimmed.slice(1).includes('/') || trimmed.includes('\\')) return false;
+
+  // Extract the command token (e.g. "cancel" from "/cancel" or "/cancel now")
+  const cmdMatch = trimmed.match(/^\/([a-zA-Z0-9_]+)(?:\s+.*)?$/);
+  if (!cmdMatch) return false;
+
+  const cmdName = cmdMatch[1].toLowerCase();
+
+  // If the command token matches a common Linux root directory, it's a directory path: e.g. `/tmp`, `/etc`, `/var`
+  if (LINUX_ROOT_DIRS.has(cmdName)) return false;
+
+  // If it looks like a file name with extension: e.g. `/file.txt`, `/script.py`
+  if (/\.[a-zA-Z0-9]+(?:\s|$)/.test(trimmed)) return false;
+
+  return true;
+}
+
 export function cleanTelegramFormatting(text, { plainTextOnly = false } = {}) {
   if (!text || typeof text !== 'string') return '';
 
@@ -3769,7 +3810,13 @@ export function cleanTelegramFormatting(text, { plainTextOnly = false } = {}) {
 
   // Extract inline code `...`
   const inlineCodes = [];
-  str = str.replace(/`([^`\n]+)`/g, (match) => {
+  str = str.replace(/`([^`\n]+)`/g, (match, inner) => {
+    // If it's a Telegram bot command, unwrap it so Telegram treats it as an interactive bot_command link (auto-sends on click)
+    // rather than a monospace code snippet (which Telegram copies to clipboard on click).
+    // File/directory paths and other code snippets stay wrapped in backticks so the user can easily copy them.
+    if (isTelegramBotCommand(inner)) {
+      return inner.trim();
+    }
     const key = `\uE000IC${inlineCodes.length}\uE001`;
     inlineCodes.push({ key, content: match });
     return key;
@@ -4247,7 +4294,8 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
       'You are a helpful, expert AI assistant. Keep responses direct, clear, and thoughtful.\n\n' +
       'TEMPORAL CONTEXT & OFFICIAL AI MODELS (2026):\n' +
       '• The current year is 2026.\n' +
-      '• You are powered by Google Gemini 3 series (Gemini 3.8 Flash, Gemini 3.5 Flash, Gemini 3.5 Flash-Lite), official Google DeepMind flagship models (released 2025–2026).\n' +
+      '• You are powered 100% exclusively by Google Gemini 3 series (Gemini 3.8 Flash, Gemini 3.5 Flash, Gemini 3.5 Flash-Lite), official Google DeepMind flagship models (released 2025–2026).\n' +
+      '• This assistant uses ONLY Google Gemini for all models, reasoning, vision, code generation, search, and voice. There is NO Claude or Anthropic model.\n' +
       '• NEVER claim or suggest that "Gemini 3.8" is a "community label", unofficial proxy, or nonexistent. Treat it as the genuine, official Google flagship model that it is.\n\n' +
       'TELEGRAM OUTPUT & PLAIN READABILITY GUIDANCE:\n' +
       '• You are chatting directly inside Telegram messenger on mobile and desktop.\n' +
@@ -4283,13 +4331,16 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
       'AI IMAGE GENERATION GUIDANCE:\n' +
       '• You do NOT generate pictures or images directly in chat.\n' +
       '• Image generation is handled exclusively by the dedicated bot command:\n' +
-      '  - If the user asks you to generate, create, make, or draw pictures or images, instruct them to use `/image <prompt>` (powered by Gemini Nano Banana).\n' +
-      '  - If the user asks about generating videos, let them know AI video generation is not supported and they can generate pictures using `/image <prompt>`.\n\n' +
+      '  - If the user asks you to generate, create, make, or draw pictures or images, instruct them to use /image <prompt> (powered by Gemini Nano Banana).\n' +
+      '  - If the user asks about generating videos, let them know AI video generation is not supported and they can generate pictures using /image <prompt>.\n\n' +
       'REMOTE LAPTOP CONTROL & AUTOMATIC SCRIPT INSTALLATION:\n' +
       '• Each user can link their own laptop to this bot using `start-agent.bat`.\n' +
       '• If the user asks to create a file or python script, install packages (via pip or npm), or run a script on their laptop:\n' +
       '  - Always provide the clean, complete code.\n' +
-      '  - Mention that they can send `/agent <request>` (or enable `/agent_mode`), and the bot will autonomously create the file on their laptop, install packages with pip/npm, and execute the script for them!';
+      '  - Mention that they can send /agent <request> (or enable /agent_mode), and the bot will autonomously create the file on their laptop, install packages with pip/npm, and execute the script for them!\n\n' +
+      'TELEGRAM BOT COMMAND FORMATTING:\n' +
+      '• Do NOT wrap bot slash commands (e.g. /agent, /image, /cancel, /status, /help, /live) in backticks or code blocks. Write them as plain /command so Telegram renders them as clickable links that auto-send on tap.\n' +
+      '• DO wrap file paths, directory paths, and code snippets in backticks (`D:\\projects` or `npm run`) so the user can easily copy them.';
 
     if (activeDoc && !isMultimodal) {
       const docExcerpt =
@@ -4452,7 +4503,7 @@ bot.on('message:document', async (ctx) => {
       if (docResult.targetMode === 'cloud') {
         destText = '• ☁️ **Telegram Cloud Vault only**: Saved to cloud (laptop storage untouched).\n';
       } else if (docResult.targetMode === 'nosave') {
-        destText = '• 💻 **Drive D only**: Saved to laptop storage (cloud save skipped via `/nosave`).\n';
+        destText = '• 💻 **Drive D only**: Saved to laptop storage (cloud save skipped via /nosave).\n';
       } else {
         destText =
           '• ☁️ **Telegram Cloud Vault**: Ready on your phone & any device 24/7.\n' +
@@ -4781,7 +4832,7 @@ bot.command('quiz', async (ctx) => {
       'To take a quiz, you can:\n' +
       '• Type /library to select a file from Telegram Cloud Vault or Drive D\n' +
       '• Upload a new PDF or code file directly to chat\n' +
-      '• Or run `/quiz <topic>` right now (e.g. `/quiz Python basics` or `/quiz C++ pointers`)',
+      '• Or run /quiz <topic> right now (e.g. /quiz Python basics or /quiz C++ pointers)',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -4803,7 +4854,7 @@ bot.command('quiz', async (ctx) => {
   } catch (err) {
     console.error('Error generating quiz polls:', sanitizeError(err));
     await ctx.reply(
-      '❌ Sorry, I had trouble creating the quiz questions. Please try again or specify a topic like `/quiz python basics`.',
+      '❌ Sorry, I had trouble creating the quiz questions. Please try again or specify a topic like /quiz python basics.',
       { parse_mode: 'Markdown' }
     );
   }
@@ -4996,6 +5047,32 @@ bot.command(['library', 'files'], async (ctx) => {
 bot.on('callback_query:data', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
+  // Exit Live Voice Mode
+  if (data === 'exit_live_mode') {
+    setUserLiveMode(ctx.from.id, false);
+    await ctx.answerCallbackQuery({ text: 'Live Voice Mode cancelled!' });
+    await ctx.reply(
+      '📝 *Gemini Live Voice Mode: DISABLED*\n\n' +
+      '• Returned to standard text chat.\n' +
+      '• Send /live anytime to turn Live Voice back on.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  // Exit Agent Mode
+  if (data === 'exit_agent_mode') {
+    userAgentMode.set(ctx.from.id, false);
+    await ctx.answerCallbackQuery({ text: 'Agent Mode cancelled!' });
+    await ctx.reply(
+      '💬 *Standard Chat Mode: RESTORED*\n\n' +
+      '• Switched back to standard conversational chat.\n' +
+      '• Single Tasks: You can still run on-demand agent tasks anytime with /agent <prompt>.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
   // Exit Active Command Mode
   if (data === 'exit_active_mode') {
     const active = userActiveMode.get(ctx.from.id);
@@ -5129,7 +5206,7 @@ bot.on('callback_query:data', async (ctx) => {
         `You have not set your personal laptop folder yet.\n\n` +
         `Please **reply with your laptop's folder path** now:\n` +
         `_Example: \`C:\\Users\\yourname\\Documents\\TelegramStorage\` or \`D:\\Projects\`_\n\n` +
-        `Or use \`/directory <path>\` anytime!`,
+        `Or use /directory <path> anytime!`,
         {
           parse_mode: 'Markdown',
           reply_markup: new InlineKeyboard()
@@ -5369,8 +5446,8 @@ bot.on('callback_query:data', async (ctx) => {
         `🔍 *Search & Research History is Empty*\n\n` +
         `You haven't looked up anything yet.\n\n` +
         `💡 *Try these commands:*\n` +
-        `• \`/youtube <query>\` - Search YouTube videos & channels\n` +
-        `• \`/search <query>\` - AI research & web search\n\n` +
+        `• /youtube <query> — Search YouTube videos & channels\n` +
+        `• /search <query> — AI research & web search\n\n` +
         `All your searches and lookups will be saved here automatically!`,
         {
           parse_mode: 'Markdown',
@@ -6193,7 +6270,7 @@ bot.callbackQuery('save_pending_custom', async (ctx) => {
     `• \`D:\\projects\\my_game.py\`\n` +
     `• \`%USERPROFILE%\\Desktop\\${fileInfo.filename}\`\n` +
     `• \`games\\space.py\` (relative to your storage folder)\n\n` +
-    `Or reply \`/cancel\` to discard.`,
+    `Or reply /cancel to discard.`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -6312,7 +6389,7 @@ bot.on('message:text', async (ctx) => {
       return;
     }
     if (rawPath.length < 2) {
-      await ctx.reply('❌ Invalid directory path. You can set it anytime with `/directory <path>`', { parse_mode: 'Markdown' });
+      await ctx.reply('❌ Invalid directory path. You can set it anytime with /directory <path>', { parse_mode: 'Markdown' });
       return;
     }
     setUserStorageDir(userId, rawPath);
@@ -6320,7 +6397,7 @@ bot.on('message:text', async (ctx) => {
       `✅ *Local Storage Directory Configured!*\n\n` +
       `📁 *Folder:* \`${rawPath}\`\n\n` +
       `• Local file uploads and agent scripts will use this directory on your laptop.\n` +
-      `• You can change this anytime with \`/directory <path>\` or in \`/storage\`.\n` +
+      `• You can change this anytime with /directory <path> or in /storage.\n` +
       `• With \`start-agent.bat\` active on your laptop, the bot can directly create files and run scripts in this folder!`,
       { parse_mode: 'Markdown' }
     );
@@ -6362,9 +6439,9 @@ bot.on('message:text', async (ctx) => {
     const promptArg = (imageRequestMatch[1] || '').trim();
     const example = promptArg ? `/image ${promptArg}` : '/image a cute fluffy cat in neon city, 4k digital art';
     await ctx.reply(
-      '🎨 *To generate pictures, please use the `/image` command!*\n\n' +
-      `👉 Type:\n\`${example}\`\n\n` +
-      `💡 _You can also type \`/image\` and I will ask you for a prompt._`,
+      '🎨 *To generate pictures, please use the /image command!*\n\n' +
+      `👉 Type:\n${example}\n\n` +
+      `💡 _You can also type /image and I will ask you for a prompt._`,
       { parse_mode: 'Markdown' }
     );
     return;
@@ -6376,8 +6453,8 @@ bot.on('message:text', async (ctx) => {
   if (videoRequestMatch) {
     await ctx.reply(
       '🎬 *AI Video Generation is currently disabled.*\n\n' +
-      '💡 You can generate pictures with Gemini Nano Banana using `/image <prompt>`!\n\n' +
-      'Example:\n`/image a cozy cabin in snowy mountains, 4k digital art`',
+      '💡 You can generate pictures with Gemini Nano Banana using /image <prompt>!\n\n' +
+      'Example:\n/image a cozy cabin in snowy mountains, 4k digital art',
       { parse_mode: 'Markdown' }
     );
     return;
@@ -6389,8 +6466,8 @@ bot.on('message:text', async (ctx) => {
   if (generalGenMatch) {
     await ctx.reply(
       '🎨 *Looking to generate pictures?*\n\n' +
-      'Use the `/image <prompt>` command (powered by Gemini Nano Banana)!\n\n' +
-      'Example:\n`/image a cozy cabin in snowy mountains, 4k digital art`',
+      'Use the /image <prompt> command (powered by Gemini Nano Banana)!\n\n' +
+      'Example:\n/image a cozy cabin in snowy mountains, 4k digital art',
       { parse_mode: 'Markdown' }
     );
     return;

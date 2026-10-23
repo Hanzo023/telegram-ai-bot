@@ -3,7 +3,7 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { DEFAULT_LIVE_MODEL, AVAILABLE_VOICES } from './gemini-live-service.js';
+import { DEFAULT_LIVE_MODEL, AVAILABLE_VOICES, LIVE_VOICE_SYSTEM_INSTRUCTION } from './gemini-live-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -80,9 +80,7 @@ export function setupLiveCallServer(server) {
           systemInstruction: {
             parts: [
               {
-                text:
-                  'You are a real-time conversational AI agent on Telegram voice call. ' +
-                  'Respond directly, warmly, and concisely in human conversational spoken language.',
+                text: LIVE_VOICE_SYSTEM_INSTRUCTION,
               },
             ],
           },
