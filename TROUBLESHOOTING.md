@@ -18,6 +18,7 @@
 10. [ReferenceError: State Map Is Not Defined on Message Receive](#10-referenceerror-state-map-is-not-defined-on-message-receive)
 11. [PDF or File Extraction Memory Spike / OOM Crash](#11-pdf-or-file-extraction-memory-spike--oom-crash)
 12. [YouTube Extraction Blocked by Bot Detection](#12-youtube-extraction-blocked-by-bot-detection)
+13. [Gemini API 404 / 429: Model Not Found or Quota Exhausted on Pro / Argon Models](#13-gemini-api-404--429-model-not-found-or-quota-exhausted-on-pro--argon-models)
 
 ---
 
@@ -289,6 +290,34 @@ YouTube regularly flags data center IP addresses (like Render, AWS, and DigitalO
 1. Export your browser cookies using the *Get cookies.txt LOCALLY* Chrome/Firefox extension.
 2. Store the Netscape cookie text in the `YOUTUBE_COOKIES` environment variable on Render.
 3. [`search-service.js`](./search-service.js) will automatically write `cookies.txt` to disk and pass `--cookies cookies.txt` to `yt-dlp`.
+
+---
+
+### 13. Gemini API 404 / 429: Model Not Found or Quota Exhausted on Pro / Argon Models
+
+#### 🔴 Symptom
+```text
+GoogleGenAIError: [404 Not Found] models/gemini-3.1-pro is not found for API version v1beta
+```
+Or:
+```text
+GoogleGenAIError: [429 ResourceExhausted] Quota exceeded for metric 'GenerateContent Requests per minute' (limit: 0 or 2 RPM)
+```
+
+#### 🔍 Root Cause
+1. **Tier Incompatibility**: Standard / Free-tier API keys from [Google AI Studio](https://aistudio.google.com) do **not** have quota for Gemini Pro models or specialized preview models (e.g. Argon). They have either 0 RPM or strict 2 RPM limits intended only for web console experimentation.
+2. **Missing Billing Account**: Pro and preview models require the Google Cloud Project hosting your API key to have **Pay-As-You-Go billing enabled**.
+
+#### 🛠️ Fix
+* **If you are using a Standard / Free Key**: Stick with the high-quota **Flash Family**:
+  * `gemini-3.8-flash` (Default Flagship)
+  * `gemini-3.5-flash` (High Availability Fallback)
+  * `gemini-3.5-flash-lite` (Ultra-Fast)
+  These models are 100% free with generous RPM on standard keys. Run `/model 3.8` in chat or make sure `GEMINI_MODEL=gemini-3.8-flash`.
+* **If you have a Pay-As-You-Go / Upgraded Key**:
+  1. Open [Google AI Studio](https://aistudio.google.com) and link your project to a billing account (Pay-As-You-Go).
+  2. Set `GEMINI_MODEL=gemini-3.1-pro` (or your authorized Argon model string) in your environment variables.
+  3. Or run `/model <model-name>` dynamically inside your Telegram chat.
 
 ---
 

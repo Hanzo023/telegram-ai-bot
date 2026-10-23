@@ -94,6 +94,51 @@ In the **Environment Variables** section on your Render dashboard, configure:
 | `LAPTOP_RUNNER_SECRET` | *(Optional)* Custom secret for laptop runner auth. If omitted, automatically defaults to the first 20 chars of `TELEGRAM_BOT_TOKEN`. Must match runner if set. | `my_secret_token_or_omit` |
 | `YOUTUBE_COOKIES` | *(Optional)* Netscape format cookies text | Exported via *Get cookies.txt LOCALLY* extension |
 
+#### 🧠 Pro & Argon Models Integration (Pay-As-You-Go / Upgraded Quotas)
+
+> [!NOTE]
+> **Standard Key Compatibility**: Standard/Free-tier Google AI Studio API keys do **not** support Gemini Pro models or specialized preview models (e.g., Argon / Pro preview). They have a strict 0–2 RPM limit that will trigger `429 Quota Exhausted` or `404 Model Not Found`. By default, this bot runs on the 100% free, high-quota **Flash Family** (`gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`).
+
+If your API key is linked to a Google Cloud project with **Pay-As-You-Go billing enabled**, or you have enterprise/whitelist access to Pro and specialized preview tiers (such as **Gemini 3.1 Pro** or internal/experimental models like **Argon**), here is how to set them up:
+
+1. **Option 1: Environment Variable (Zero Code Changes)**
+   In your Render Environment Variables (or `.env`), set `GEMINI_MODEL` to your authorized model ID:
+   ```env
+   GEMINI_MODEL="gemini-3.1-pro"        # or your authorized Argon / Pro model name
+   ```
+   The bot will immediately use it as the default conversation and coding engine.
+
+2. **Option 2: In-Chat Switching (`/model`)**
+   You can switch models on the fly directly in Telegram at any time:
+   ```text
+   /model gemini-3.1-pro
+   ```
+   *(Or `/model <your-argon-model-id>`)*
+
+3. **Option 3: Add to Telegram One-Tap Keyboard Menu**
+   If you want the model to appear as an interactive button inside the `/model` inline menu, open [`bot.js`](file:///d:/projects/telegram-ai-bot/bot.js) and add the model object to `SUPPORTED_MODELS`:
+   ```javascript
+   {
+     id: 'gemini-3.1-pro', // or your authorized Argon model string
+     name: 'Gemini 3.1 Pro',
+     provider: 'gemini',
+     icon: '🧠',
+     badge: 'Pro Tier',
+     description: 'Complex reasoning and heavy logic (Requires Pay-As-You-Go key).',
+     supportedEfforts: ['low', 'medium', 'high'],
+   },
+   ```
+   And add it to `candidateGeminiModels` on line 400:
+   ```javascript
+   const candidateGeminiModels = [
+     DEFAULT_GEMINI_MODEL,
+     'gemini-3.1-pro',
+     'gemini-3.8-flash',
+     'gemini-3.5-flash',
+     'gemini-3.5-flash-lite',
+   ].filter(Boolean);
+   ```
+
 #### 🔀 Optional: Hybrid Dual-Brain Mode (Anthropic Claude + Gemini)
 
 The bot operates 100% independently on Google Gemini without needing any additional AI keys. However, if you wish to run in **Hybrid Mode** (pairing Anthropic Claude Sonnet 5.5 for text/coding alongside Gemini for multimodal vision, voice notes, live duplex calls, and web search), you can optionally add:

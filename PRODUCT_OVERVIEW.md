@@ -46,9 +46,10 @@ Don't feel like typing or reading long text blocks while walking or driving?
 * **Voice Replies (`/live`)**: Send a voice note or text. The bot replies with a natural, expressive spoken audio note.
 * **Hands-Free Duplex Calls (`/call`)**: Opens a real-time voice call WebApp inside Telegram. Speak naturally and get instant answers with sub-second latency powered by Gemini Live.
 
-### 4. 🧠 All-in-One AI Intelligence (Google Gemini Native + Optional Hybrid)
+### 4. 🧠 All-in-One AI Intelligence (Google Gemini Native + Optional Upgrades)
 Powered 100% natively by Google Gemini:
-* **Google Gemini 3.8 Flash**: Handles conversational chat, code generation, instant audio transcription, voice generation, live Google Search grounding, and high-speed autonomous tools.
+* **High-Throughput Flash Family**: Standard deployments use **Gemini 3.8 Flash**, **3.5 Flash**, and **3.5 Flash-Lite** — guaranteeing ultra-fast reasoning, zero-cost operation on standard Google AI Studio keys, and resilient 503 auto-fallback.
+* **Pro & Argon Upgrades**: Users with Pay-As-You-Go billing or specialized preview access can connect **Gemini 3.1 Pro** or experimental models like **Argon** by setting `GEMINI_MODEL` or running `/model <name>`.
 * **Optional Hybrid Mode (Claude Sonnet 5.5)**: Want a dual-brain setup? You can optionally connect Anthropic Claude for coding/text while keeping Gemini for voice and search.
 
 ### 5. ☁️ Permanent Free File Vault (`/storage` & `/library`)

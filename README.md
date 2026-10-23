@@ -518,6 +518,53 @@ GEMINI_API_KEY="AIzaSy..."
 
 ---
 
+#### 🧠 Integrating Gemini Pro & Argon Models (Pay-As-You-Go / Upgraded Quotas)
+
+> [!NOTE]
+> **Standard Free-Tier Key Note**: Standard / Free-tier API keys generated from [Google AI Studio](https://aistudio.google.com) do **not** support Gemini Pro models or specialized preview models (e.g. Argon) — they have a strict 0–2 RPM limit that triggers `429 Quota Exhausted` or `404 Model Not Found`. By default, this bot is configured out-of-the-box for the 100% free, high-throughput **Flash family** (`gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`).
+
+If your API key is linked to a Google Cloud project with **Pay-As-You-Go billing enabled**, or you have enterprise/whitelist access to Pro and specialized preview tiers (such as **Gemini 3.1 Pro** or experimental models like **Argon**), here is how to set them up:
+
+1. **Option 1: Set `GEMINI_MODEL` via Environment Variable (Zero Code Changes)**:
+   In your `.env` file or hosting environment variables (e.g. Render dashboard), specify your model ID:
+   ```env
+   GEMINI_MODEL="gemini-3.1-pro"        # or your authorized Argon / Pro model name
+   ```
+   The bot will immediately use it as your default conversation and coding engine.
+
+2. **Option 2: Switch Models Dynamically in Telegram**:
+   You can switch models on the fly directly in chat without restarting the bot:
+   ```text
+   /model gemini-3.1-pro
+   ```
+   *(Or `/model <your-argon-model-id>`)*
+
+3. **Option 3: Add to the Interactive Telegram Keyboard (`bot.js`)**:
+   If you want your model to appear as a one-tap button inside the `/model` menu, open [`bot.js`](./bot.js) and add the model object to `SUPPORTED_MODELS`:
+   ```javascript
+   {
+     id: 'gemini-3.1-pro', // or your authorized Argon model string
+     name: 'Gemini 3.1 Pro',
+     provider: 'gemini',
+     icon: '🧠',
+     badge: 'Pro Tier',
+     description: 'Complex reasoning and heavy logic (Requires Pay-As-You-Go key).',
+     supportedEfforts: ['low', 'medium', 'high'],
+   },
+   ```
+   And add it to `candidateGeminiModels`:
+   ```javascript
+   const candidateGeminiModels = [
+     DEFAULT_GEMINI_MODEL,
+     'gemini-3.1-pro',
+     'gemini-3.8-flash',
+     'gemini-3.5-flash',
+     'gemini-3.5-flash-lite',
+   ].filter(Boolean);
+   ```
+
+---
+
 ### 3.2 Token Budgeting & Sliding Context Window
 
 Without active context management, conversation history rapidly balloons, causing high API costs and latency. We implemented a multi-stage budgeting system:
