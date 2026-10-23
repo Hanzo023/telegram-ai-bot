@@ -767,7 +767,7 @@ Users can manage and organize assets stored in either Telegram Cloud Vault or th
 
 | Command | Category | Functionality |
 | :--- | :--- | :--- |
-| `/model [name]` | 🤖 Engine | Switch AI model (Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite, 3.1 Pro) & toggle auto-fallback |
+| `/model [name]` | 🤖 Engine | Switch AI model (Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite) & toggle auto-fallback |
 | `/effort [lvl]` | 🧠 Engine | Set Gemini thinking/reasoning effort level (`low`, `medium`, `high`, `minimal`) |
 | `/plain [on/off]`| 💬 Chat | Toggle 100% plain text mode (strips markdown asterisks, hashes, and headers) |
 | `/spec` | 💻 System | View complete laptop hardware specifications (CPU, dual GPUs, RAM, battery, drives) |

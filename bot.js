@@ -395,15 +395,6 @@ export const SUPPORTED_MODELS = [
     description: 'Lightweight, ultra-low latency responses with minimal token overhead.',
     supportedEfforts: ['minimal', 'low', 'medium', 'high'],
   },
-  {
-    id: 'gemini-3.1-pro',
-    name: 'Gemini 3.1 Pro',
-    provider: 'gemini',
-    icon: '🧠',
-    badge: 'Pro Tier',
-    description: 'Advanced reasoning and complex logic. Requires Google AI Studio Pay-as-you-go / Pro quota.',
-    supportedEfforts: ['low', 'medium', 'high'],
-  },
 ];
 
 const candidateGeminiModels = [
@@ -501,9 +492,6 @@ export function resolveModelAlias(input) {
   }
   if (['lite', 'flash-lite', '3.5-lite', 'gemini-3.5-flash-lite', 'gemini-lite'].includes(clean)) {
     return 'gemini-3.5-flash-lite';
-  }
-  if (['pro', '3.1-pro', 'gemini-pro', 'gemini-3.1-pro', '3.1'].includes(clean)) {
-    return 'gemini-3.1-pro';
   }
   const match = SUPPORTED_MODELS.find((m) => m.id === clean || m.id.includes(clean));
   return match ? match.id : null;
