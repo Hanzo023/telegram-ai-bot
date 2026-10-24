@@ -113,9 +113,8 @@ def force_bring_to_front(hwnd):
 
         attach_default_desktop()
 
-        # 1. Unlock SetForegroundWindow using keyboard Alt-key event
-        user32.keybd_event(0x12, 0, 0, 0) # Alt down
-        user32.keybd_event(0x12, 0, 2, 0) # Alt up
+        # 1. Disable OS foreground lock timeout (prevents Alt-key side effects that close floating apps)
+        user32.SystemParametersInfoA(0x2001, 0, 0, 0x0002 | 0x0001)
 
         # 2. Restore window if minimized
         if user32.IsIconic(hwnd):
