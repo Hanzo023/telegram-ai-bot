@@ -824,7 +824,12 @@ export async function runGeminiAgent({
           '6. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
           '7. DISCONNECTED STATE: If a tool reports the laptop is disconnected, explain clearly and provide the complete code so the user can save it manually.\n' +
           '8. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
-          '9. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.',
+          '9. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.\n\n' +
+          '10. APP INSTALLATION & SCREENSHOT WORKFLOWS:\n' +
+          '    When the user asks to install, launch, or screenshot an application (e.g. "install yazi, open it and take a screenshot", or "open roblox and screenshot it"):\n' +
+          '    a. Install: Use `run_laptop_terminal` with winget or package manager (e.g. `winget install --id sxyazi.yazi -e --accept-package-agreements --accept-source-agreements --silent`).\n' +
+          '    b. Launch: Launch the app via `run_laptop_terminal` using `start` (e.g. `start wt yazi` or `start cmd /k yazi` or `start roblox:` or `start brave`).\n' +
+          '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. This brings the app to the front and delivers the screenshot directly to Telegram.',
       });
 
       let stepCount = 0;
