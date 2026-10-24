@@ -8,6 +8,8 @@ import sys
 import os
 import time
 import datetime
+import ctypes
+from ctypes import wintypes
 from PIL import Image
 
 # Ensure standard UTF-8 output on Windows consoles
@@ -20,15 +22,64 @@ def ensure_desktop_access():
     """Ensure the calling thread is attached to the active input desktop on Windows."""
     if sys.platform == "win32":
         try:
-            import ctypes
             user32 = ctypes.windll.user32
             h_desk = user32.OpenInputDesktop(0, False, 0x01FF)
+            if not h_desk:
+                h_desk = user32.OpenDesktopW('Default', 0, False, 0x01FF)
             if h_desk:
                 user32.SetThreadDesktop(h_desk)
-        except Exception as e:
+        except Exception:
             pass
 
 ensure_desktop_access()
+
+def force_bring_to_front(hwnd):
+    """
+    Forcefully bring any window to the foreground on Windows.
+    Bypasses LockSetForegroundWindow restrictions using the Alt-key event,
+    AttachThreadInput, ShowWindow(SW_RESTORE), and SwitchToThisWindow.
+    """
+    if not hwnd or sys.platform != 'win32':
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        ensure_desktop_access()
+
+        # 1. Unlock SetForegroundWindow using keyboard Alt-key event
+        user32.keybd_event(0x12, 0, 0, 0) # Alt down
+        user32.keybd_event(0x12, 0, 2, 0) # Alt up
+
+        # 2. Restore window if minimized
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9) # SW_RESTORE
+        else:
+            user32.ShowWindow(hwnd, 5) # SW_SHOW
+
+        # 3. AttachThreadInput to steal foreground from current active window
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None)
+        cur_tid = kernel32.GetCurrentThreadId()
+
+        if fg_tid and fg_tid != cur_tid:
+            user32.AttachThreadInput(cur_tid, fg_tid, True)
+
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetActiveWindow(hwnd)
+
+        if fg_tid and fg_tid != cur_tid:
+            user32.AttachThreadInput(cur_tid, fg_tid, False)
+
+        # 4. SwitchToThisWindow as guaranteed backup
+        user32.SwitchToThisWindow(hwnd, True)
+
+        # Allow Windows DWM compositor time to swap and paint window to screen buffer
+        time.sleep(0.4)
+        return True
+    except Exception:
+        return False
 
 import pygetwindow as gw
 import pyautogui
@@ -47,6 +98,10 @@ def capture_window(target_query=None):
     matched_window = None
     target_str = target_query.strip() if target_query else ""
     
+    # Check if user requested entire desktop
+    if target_str.lower() in ["full", "desktop", "screen", "primary"]:
+        target_str = ""
+
     if target_str:
         all_windows = gw.getAllWindows()
         # Find windows matching case-insensitive substring
@@ -70,24 +125,35 @@ def capture_window(target_query=None):
 
     if matched_window:
         try:
-            # Restore window if minimized
-            if matched_window.isMinimized:
-                matched_window.restore()
-                time.sleep(0.3)
+            hwnd = getattr(matched_window, '_hWnd', None)
+            if hwnd:
+                force_bring_to_front(hwnd)
+            else:
+                if matched_window.isMinimized:
+                    matched_window.restore()
+                    time.sleep(0.3)
+                try:
+                    matched_window.activate()
+                    time.sleep(0.3)
+                except Exception:
+                    pass
             
-            # Bring window to front
-            try:
-                matched_window.activate()
-                time.sleep(0.3)
-            except Exception:
-                # Windows focus lock protection
-                pass
-            
-            # Re-read dimensions after activate/restore
+            # Re-read dimensions from Windows API
             raw_left = matched_window.left
             raw_top = matched_window.top
             raw_width = matched_window.width
             raw_height = matched_window.height
+
+            if hwnd and sys.platform == 'win32':
+                try:
+                    rect = wintypes.RECT()
+                    if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                        raw_left = rect.left
+                        raw_top = rect.top
+                        raw_width = rect.right - rect.left
+                        raw_height = rect.bottom - rect.top
+                except Exception:
+                    pass
             
             # Clamp coordinates to primary display to eliminate OS negative margin borders
             left = max(0, raw_left)

@@ -15,6 +15,7 @@ import time
 import json
 import base64
 import argparse
+import subprocess
 import urllib.request
 import urllib.error
 
@@ -67,6 +68,84 @@ INSTALLER_KEYWORDS = [
     "user account control", "security warning", "license agreement",
     "uninstaller", "update", "install", "confirm", "warning"
 ]
+
+APP_LAUNCH_MAP = {
+    'roblox': ['cmd.exe', '/c', 'start', 'roblox:'],
+    'steam': ['cmd.exe', '/c', 'start', 'steam:'],
+    'brave': ['cmd.exe', '/c', 'start', 'brave'],
+    'chrome': ['cmd.exe', '/c', 'start', 'chrome'],
+    'edge': ['cmd.exe', '/c', 'start', 'msedge'],
+    'telegram': ['cmd.exe', '/c', 'start', 'telegram:'],
+    'discord': ['cmd.exe', '/c', 'start', 'discord:'],
+    'spotify': ['cmd.exe', '/c', 'start', 'spotify:'],
+    'notepad': ['cmd.exe', '/c', 'start', 'notepad'],
+    'calc': ['cmd.exe', '/c', 'start', 'calc:'],
+    'calculator': ['cmd.exe', '/c', 'start', 'calc:'],
+}
+
+def try_launch_target_app(title_pattern):
+    """If an application isn't running, attempt to launch it via system URI or start command."""
+    if not title_pattern or sys.platform != 'win32':
+        return False
+    pat = title_pattern.lower().strip()
+    for app_key, launch_cmd in APP_LAUNCH_MAP.items():
+        if app_key in pat:
+            try:
+                subprocess.Popen(launch_cmd, shell=False)
+                time.sleep(2.5) # Allow application window time to initialize
+                return True
+            except Exception:
+                pass
+    return False
+
+def force_bring_to_front(hwnd):
+    """
+    Forcefully bring any window to the foreground on Windows.
+    Bypasses LockSetForegroundWindow restrictions using the Alt-key event,
+    AttachThreadInput, ShowWindow(SW_RESTORE), and SwitchToThisWindow.
+    """
+    if not hwnd or sys.platform != 'win32':
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        attach_default_desktop()
+
+        # 1. Unlock SetForegroundWindow using keyboard Alt-key event
+        user32.keybd_event(0x12, 0, 0, 0) # Alt down
+        user32.keybd_event(0x12, 0, 2, 0) # Alt up
+
+        # 2. Restore window if minimized
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9) # SW_RESTORE
+        else:
+            user32.ShowWindow(hwnd, 5) # SW_SHOW
+
+        # 3. AttachThreadInput to steal foreground from current active window
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None)
+        cur_tid = kernel32.GetCurrentThreadId()
+
+        if fg_tid and fg_tid != cur_tid:
+            user32.AttachThreadInput(cur_tid, fg_tid, True)
+
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetActiveWindow(hwnd)
+
+        if fg_tid and fg_tid != cur_tid:
+            user32.AttachThreadInput(cur_tid, fg_tid, False)
+
+        # 4. SwitchToThisWindow as guaranteed backup
+        user32.SwitchToThisWindow(hwnd, True)
+
+        # Allow Windows DWM compositor time to swap and paint window to screen buffer
+        time.sleep(0.4)
+        return True
+    except Exception:
+        return False
 
 def find_target_window(title_pattern=None):
     """
@@ -142,31 +221,51 @@ def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, q
                 target_win = None
         elif target_title:
             target_win = find_target_window(target_title)
+            # If target app is not running, attempt to launch it and search again
+            if not target_win:
+                if try_launch_target_app(target_title):
+                    target_win = find_target_window(target_title)
 
     img = None
     if target_win:
         try:
             window_title = target_win.title.strip().strip('\u200e\u200f\ufeff')
+            hwnd = getattr(target_win, '_hWnd', None)
 
-            # Restore if minimized
-            if target_win.isMinimized:
+            # Forcefully bring the window to the top and activate it
+            if hwnd:
+                force_bring_to_front(hwnd)
+            else:
+                if target_win.isMinimized:
+                    try:
+                        target_win.restore()
+                        time.sleep(0.3)
+                    except Exception:
+                        pass
                 try:
-                    target_win.restore()
+                    target_win.activate()
                     time.sleep(0.3)
                 except Exception:
                     pass
-
-            # Bring window to foreground
-            try:
-                target_win.activate()
-                time.sleep(0.3)
-            except Exception:
-                pass
 
             raw_left = target_win.left
             raw_top = target_win.top
             raw_width = target_win.width
             raw_height = target_win.height
+
+            # Re-read precise coordinates using GetWindowRect
+            if hwnd and sys.platform == 'win32':
+                try:
+                    import ctypes
+                    from ctypes import wintypes
+                    rect = wintypes.RECT()
+                    if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                        raw_left = rect.left
+                        raw_top = rect.top
+                        raw_width = rect.right - rect.left
+                        raw_height = rect.bottom - rect.top
+                except Exception:
+                    pass
 
             # Clamp coordinates to primary display
             left = max(0, raw_left)
@@ -227,11 +326,15 @@ def execute_remote_action(action, target_title=None, x=None, y=None, key=None):
     attach_default_desktop()
     target_win = find_target_window(target_title)
     if target_win:
-        try:
-            target_win.activate()
-            time.sleep(0.15)
-        except Exception:
-            pass
+        hwnd = getattr(target_win, '_hWnd', None)
+        if hwnd:
+            force_bring_to_front(hwnd)
+        else:
+            try:
+                target_win.activate()
+                time.sleep(0.15)
+            except Exception:
+                pass
 
     act = (action or '').lower().strip()
     result = {"success": True, "action": act, "windowTitle": target_win.title if target_win else "Desktop"}
