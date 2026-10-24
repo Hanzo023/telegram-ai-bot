@@ -26,11 +26,8 @@ if (-not $nodeExe) {
     $nodeExe = "C:\Program Files\nodejs\node.exe"
 }
 
-# 4. Launch completely hidden with output redirected to runner.log
-$outLog = "$projectDir\runner.log"
-$errLog = "$projectDir\runner_err.log"
-
-$proc = Start-Process -FilePath $nodeExe -ArgumentList "laptop-runner.js" -WorkingDirectory $projectDir -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+# 4. Launch completely hidden (laptop-runner.js manages runner.log internally)
+$proc = Start-Process -FilePath $nodeExe -ArgumentList "laptop-runner.js" -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru
 
 if ($proc) {
     Write-Host "[OK] Telegram AI Laptop Runner started in background (PID: $($proc.Id)). Zero terminal windows."
