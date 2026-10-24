@@ -7,7 +7,11 @@
   "scripts": {
     "start": "node bot.js",
     "laptop": "node laptop-runner.js",
-    "sync": "node sync-drive-d.js"
+    "sync": "node sync-drive-d.js",
+    "test:bot": "node tools/simulate_bot.js",
+    "vision": "python tools/capture_app.py",
+    "vision:browser": "python tools/capture_app.py Brave",
+    "vision:tg": "python tools/capture_app.py Telegram"
   },
   "engines": {
     "node": ">=20.16.0"

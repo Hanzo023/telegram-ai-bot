@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { fileURLToPath } from 'url';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { GoogleGenAI } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
@@ -8,6 +9,7 @@ import path from 'path';
 import http from 'http';
 import os from 'os';
 import crypto from 'crypto';
+import logger from './logger.js';
 
 import {
   getFileCategory,
@@ -277,7 +279,11 @@ node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $ser
   }));
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+export const isMainModule = Boolean(process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]));
+export const isSimulation = process.env.BOT_SIMULATION_MODE === 'true';
+
+if (isMainModule && !isSimulation) {
+  server.listen(PORT, '0.0.0.0', () => {
   console.log(`[HTTP Server] Health check server immediately listening on 0.0.0.0:${PORT}`);
   let liveCallWss = null;
   let laptopWss = null;
@@ -325,6 +331,7 @@ server.listen(PORT, '0.0.0.0', () => {
     }
   });
 });
+}
 
 try {
   if (!fs.existsSync(STORAGE_DIR)) {
@@ -344,8 +351,8 @@ try {
   console.warn('Storage directory initialization note:', sanitizeError(dirErr));
 }
 
-const telegramToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-if (!telegramToken) {
+const telegramToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim() || (isSimulation ? '123456:simulation-token-dummy' : '');
+if (!telegramToken && !isSimulation) {
   console.error('❌ FATAL: TELEGRAM_BOT_TOKEN is missing or empty in environment variables!');
   console.error('Please configure TELEGRAM_BOT_TOKEN in your hosting provider settings (e.g. Render dashboard).');
   process.exit(1);
@@ -394,6 +401,15 @@ export const SUPPORTED_MODELS = [
     badge: 'Ultra Fast',
     description: 'Lightweight, ultra-low latency responses with minimal token overhead.',
     supportedEfforts: ['minimal', 'low', 'medium', 'high'],
+  },
+  {
+    id: 'gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash',
+    provider: 'gemini',
+    icon: '⚡',
+    badge: 'Fast',
+    description: 'Gemini 2.5 Flash model for lightweight queries and compatibility.',
+    supportedEfforts: ['low', 'medium', 'high'],
   },
 ];
 
@@ -492,6 +508,9 @@ export function resolveModelAlias(input) {
   }
   if (['lite', 'flash-lite', '3.5-lite', 'gemini-3.5-flash-lite', 'gemini-lite'].includes(clean)) {
     return 'gemini-3.5-flash-lite';
+  }
+  if (['2.5', '2.5-flash', 'gemini-2.5', 'flash-2.5', 'gemini-2.5-flash'].includes(clean)) {
+    return 'gemini-2.5-flash';
   }
   const match = SUPPORTED_MODELS.find((m) => m.id === clean || m.id.includes(clean));
   return match ? match.id : null;
@@ -601,17 +620,86 @@ export function getThinkingConfigForModel(model, effort = 'medium') {
   return undefined;
 }
 
+let lastGeminiMetrics = null;
+
+export function getLastGeminiMetrics() {
+  return lastGeminiMetrics;
+}
+
+export function resetLastGeminiMetrics() {
+  lastGeminiMetrics = null;
+}
+
+function callWithTimeout(promise, ms, errMessage) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(errMessage)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
 export async function generateGeminiContentWithSafeThinking({ model, contents, config }) {
+  const startMs = Date.now();
+  const timeoutMs = process.env.BOT_SIMULATION_MODE === 'true' ? 8000 : 25000;
   try {
-    return await googleAI.models.generateContent({ model, contents, config });
+    const res = await callWithTimeout(
+      googleAI.models.generateContent({ model, contents, config }),
+      timeoutMs,
+      `Gemini model ${model} timed out after ${timeoutMs}ms`
+    );
+    const latencyMs = Date.now() - startMs;
+    const usage = res?.usageMetadata;
+    lastGeminiMetrics = {
+      model,
+      latencyMs,
+      promptTokens: usage?.promptTokenCount || 0,
+      candidateTokens: usage?.candidatesTokenCount || 0,
+      totalTokens: usage?.totalTokenCount || 0,
+    };
+    logger.geminiLatency({ model, latencyMs, success: true });
+    if (usage) {
+      logger.tokenUsage({
+        model,
+        promptTokens: usage.promptTokenCount,
+        candidateTokens: usage.candidatesTokenCount,
+        totalTokens: usage.totalTokenCount,
+      });
+    }
+    return res;
   } catch (err) {
+    const latencyMs = Date.now() - startMs;
+    logger.geminiLatency({ model, latencyMs, success: false, error: err.message });
     if (config?.thinkingConfig && (err.status === 400 || err.message?.includes('thinking'))) {
       console.warn(
         `[Gemini] Model ${model} rejected thinkingConfig (${err.message?.slice(0, 80)}). Retrying without thinkingConfig...`
       );
       const safeConfig = { ...config };
       delete safeConfig.thinkingConfig;
-      return await googleAI.models.generateContent({ model, contents, config: safeConfig });
+      const retryStartMs = Date.now();
+      const retryRes = await callWithTimeout(
+        googleAI.models.generateContent({ model, contents, config: safeConfig }),
+        timeoutMs,
+        `Gemini model ${model} retry timed out after ${timeoutMs}ms`
+      );
+      const retryLatencyMs = Date.now() - retryStartMs;
+      const usage = retryRes?.usageMetadata;
+      lastGeminiMetrics = {
+        model,
+        latencyMs: retryLatencyMs,
+        promptTokens: usage?.promptTokenCount || 0,
+        candidateTokens: usage?.candidatesTokenCount || 0,
+        totalTokens: usage?.totalTokenCount || 0,
+      };
+      logger.geminiLatency({ model, latencyMs: retryLatencyMs, success: true });
+      if (usage) {
+        logger.tokenUsage({
+          model,
+          promptTokens: usage.promptTokenCount,
+          candidateTokens: usage.candidatesTokenCount,
+          totalTokens: usage.totalTokenCount,
+        });
+      }
+      return retryRes;
     }
     throw err;
   }
@@ -628,7 +716,8 @@ async function callGeminiWithRetry(fn, maxRetries = 2, initialDelay = 1000, hasF
       const isHighDemand =
         err.status === 503 ||
         err.message?.includes('503') ||
-        err.message?.includes('high demand');
+        err.message?.includes('high demand') ||
+        err.message?.includes('timed out');
 
       const isRateLimit =
         err.status === 429 ||
@@ -638,7 +727,7 @@ async function callGeminiWithRetry(fn, maxRetries = 2, initialDelay = 1000, hasF
 
       const isRetryable = isHighDemand || isRateLimit;
 
-      // If high demand 503 and we have another model ready in the fallback chain,
+      // If high demand 503 or timed out and we have another model ready in the fallback chain,
       // fail fast on attempt 1 so user gets instant response without waiting 5+ seconds!
       if (isHighDemand && hasFallback) {
         throw err;
@@ -663,6 +752,7 @@ async function callGeminiWithFallback(modelFn, models = null) {
   for (let i = 0; i < modelList.length; i++) {
     const model = modelList[i];
     const hasNextFallback = i < modelList.length - 1;
+    logger.modelRouting({ userId: null, selectedModel: model, candidateModels: modelList, fallback: i > 0 });
     try {
       return await callGeminiWithRetry(
         () => modelFn(model),
@@ -675,7 +765,8 @@ async function callGeminiWithFallback(modelFn, models = null) {
       const isHighDemand =
         err.status === 503 ||
         err.message?.includes('503') ||
-        err.message?.includes('high demand');
+        err.message?.includes('high demand') ||
+        err.message?.includes('timed out');
 
       const isQuotaOrLimit =
         err.status === 429 ||
@@ -1888,9 +1979,26 @@ function buildEffortMenuText(userId) {
   );
 }
 
+bot.command('ask', async (ctx) => {
+  const userId = ctx.from?.id;
+  const rawArg = (ctx.match || '').trim() || (ctx.message?.text || '').replace(/^\/ask(?:@\w+)?\s*/i, '').trim();
+  logger.query({ userId, text: rawArg, command: 'ask', mode: 'command' });
+
+  if (!rawArg) {
+    await ctx.reply(
+      '💬 *Ask Gemini:*\nPlease provide a prompt or question after `/ask`.\n\n*Example:*\n`/ask explain quantum computing`',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  await sendToAIWithHistory(ctx, rawArg);
+});
+
 bot.command(['model', 'models'], async (ctx) => {
   const userId = ctx.from.id;
   const rawArg = ctx.message.text.replace(/^\/(?:model|models)\s*/i, '').trim();
+  logger.query({ userId, text: rawArg, command: 'model', mode: 'command' });
 
   if (!rawArg) {
     await ctx.reply(buildModelMenuText(userId), {
@@ -6589,6 +6697,7 @@ const botCommands = [
   { command: 'voice', description: '🗣️ Switch Gemini Live voice persona' },
 
   // 🎨 Creation & Search
+  { command: 'ask', description: '💬 Ask Gemini AI a question directly' },
   { command: 'image', description: '🎨 Generate pictures with Gemini Nano Banana' },
   { command: 'search', description: '🌐 Live web search & deep factual research' },
   { command: 'youtube', description: '🎥 Search YouTube videos & channels' },
@@ -6625,85 +6734,96 @@ async function registerTelegramCommands() {
   }
 }
 
-await registerTelegramCommands();
+if (isMainModule && !isSimulation) {
+  await registerTelegramCommands();
 
-// Active Polling Watchdog: monitors bot polling status and recovers automatically
-const WATCHDOG_INTERVAL_MS = 15000;
-let consecutiveDeadChecks = 0;
+  // Active Polling Watchdog: monitors bot polling status and recovers automatically
+  const WATCHDOG_INTERVAL_MS = 15000;
+  let consecutiveDeadChecks = 0;
 
-setInterval(() => {
-  if (isShuttingDown) return;
-  // Allow 60s grace period during boot
-  if (process.uptime() < 60) return;
+  setInterval(() => {
+    if (isShuttingDown) return;
+    // Allow 60s grace period during boot
+    if (process.uptime() < 60) return;
 
-  if (!bot.isRunning()) {
-    consecutiveDeadChecks++;
-    console.warn(`⚠️ [Watchdog] Bot polling is stopped! (Check ${consecutiveDeadChecks}/3, uptime: ${Math.floor(process.uptime())}s)`);
-    if (consecutiveDeadChecks >= 3) {
-      console.error('❌ [Watchdog] Bot polling has been stopped for >45s. Triggering process restart to auto-heal container...');
-      process.exit(1);
-    }
-  } else {
-    consecutiveDeadChecks = 0;
-  }
-}, WATCHDOG_INTERVAL_MS).unref();
-
-async function startBotWithRetry() {
-  let attempt = 0;
-  while (!isShuttingDown) {
-    try {
-      attempt++;
-      console.log(`[Bot Runner] Starting Telegram bot polling (attempt ${attempt})...`);
-
-      // Reset internal Grammy abort controller and flags if previously stopped
-      bot.pollingAbortController = undefined;
-      bot.pollingRunning = false;
-
-      await bot.start({
-        drop_pending_updates: false,
-        onStart: async (botInfo) => {
-          attempt = 0; // Reset counter on successful startup
-          console.log(`✅ Telegram bot @${botInfo.username} is running and polling for updates!`);
-          await registerTelegramCommands().catch(() => {});
-        },
-      });
-
-      // If bot.start() resolved without throwing an error while NOT shutting down:
-      if (!isShuttingDown) {
-        console.warn('⚠️ [Bot Runner] Telegram bot polling resolved unexpectedly. Waiting 3s before resuming polling...');
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-      }
-    } catch (err) {
-      if (isShuttingDown) break;
-      const errMsg = err?.message || String(err);
-      const isConflict =
-        err?.error_code === 409 ||
-        errMsg.includes('409') ||
-        errMsg.includes('Conflict') ||
-        errMsg.includes('terminated by other getUpdates request');
-
-      if (isConflict) {
-        console.warn(
-          `⚠️ [Polling Conflict] Telegram 409 Conflict (attempt ${attempt}): Another bot instance is currently active. Waiting 5s before retrying...`
-        );
-      } else {
-        console.error(`❌ [Polling Error] (attempt ${attempt}):`, sanitizeError(err));
-        console.warn('Retrying polling in 5s...');
-      }
-
-      // If too many consecutive fatal polling errors occur, exit process to trigger container restart
-      if (attempt >= 5) {
-        console.error(`❌ [Bot Runner] Polling failed ${attempt} consecutive times. Exiting process with code 1 to allow container restart...`);
+    if (!bot.isRunning()) {
+      consecutiveDeadChecks++;
+      console.warn(`⚠️ [Watchdog] Bot polling is stopped! (Check ${consecutiveDeadChecks}/3, uptime: ${Math.floor(process.uptime())}s)`);
+      if (consecutiveDeadChecks >= 3) {
+        console.error('❌ [Watchdog] Bot polling has been stopped for >45s. Triggering process restart to auto-heal container...');
         process.exit(1);
       }
+    } else {
+      consecutiveDeadChecks = 0;
+    }
+  }, WATCHDOG_INTERVAL_MS).unref();
 
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+  async function startBotWithRetry() {
+    let attempt = 0;
+    while (!isShuttingDown) {
+      try {
+        attempt++;
+        console.log(`[Bot Runner] Starting Telegram bot polling (attempt ${attempt})...`);
+
+        // Reset internal Grammy abort controller and flags if previously stopped
+        bot.pollingAbortController = undefined;
+        bot.pollingRunning = false;
+
+        await bot.start({
+          drop_pending_updates: false,
+          onStart: async (botInfo) => {
+            attempt = 0; // Reset counter on successful startup
+            console.log(`✅ Telegram bot @${botInfo.username} is running and polling for updates!`);
+            await registerTelegramCommands().catch(() => {});
+          },
+        });
+
+        // If bot.start() resolved without throwing an error while NOT shutting down:
+        if (!isShuttingDown) {
+          console.warn('⚠️ [Bot Runner] Telegram bot polling resolved unexpectedly. Waiting 3s before resuming polling...');
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
+      } catch (err) {
+        if (isShuttingDown) break;
+        const errMsg = err?.message || String(err);
+        const isConflict =
+          err?.error_code === 409 ||
+          errMsg.includes('409') ||
+          errMsg.includes('Conflict') ||
+          errMsg.includes('terminated by other getUpdates request');
+
+        if (isConflict) {
+          console.warn(
+            `⚠️ [Polling Conflict] Telegram 409 Conflict (attempt ${attempt}): Another bot instance is currently active. Waiting 5s before retrying...`
+          );
+        } else {
+          console.error(`❌ [Polling Error] (attempt ${attempt}):`, sanitizeError(err));
+          console.warn('Retrying polling in 5s...');
+        }
+
+        // If too many consecutive fatal polling errors occur, exit process to trigger container restart
+        if (attempt >= 5) {
+          console.error(`❌ [Bot Runner] Polling failed ${attempt} consecutive times. Exiting process with code 1 to allow container restart...`);
+          process.exit(1);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      }
     }
   }
+
+  // Start polling asynchronously with automatic retry so health check stays alive and rolling deploys succeed
+  startBotWithRetry().catch((err) => {
+    console.error('Fatal polling loop error:', sanitizeError(err));
+    process.exit(1);
+  });
 }
 
-// Start polling asynchronously with automatic retry so health check stays alive and rolling deploys succeed
-startBotWithRetry().catch((err) => {
-  console.error('Fatal polling loop error:', sanitizeError(err));
-  process.exit(1);
-});
+export {
+  bot,
+  server,
+  sendToAIWithHistory,
+  handleAgentCommand,
+  allowedUserIds,
+};
+
