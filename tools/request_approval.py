@@ -28,7 +28,9 @@ def attach_default_desktop():
         try:
             import ctypes
             u32 = ctypes.windll.user32
-            hdesk = u32.OpenDesktopW('Default', 0, False, 0x01FF) # GENERIC_ALL
+            hdesk = u32.OpenInputDesktop(0, False, 0x01FF)
+            if not hdesk:
+                hdesk = u32.OpenDesktopW('Default', 0, False, 0x01FF) # GENERIC_ALL
             if hdesk:
                 u32.SetThreadDesktop(hdesk)
         except Exception:
@@ -77,7 +79,7 @@ def find_target_window(title_pattern=None):
 
     all_windows = []
     try:
-        all_windows = [w for w in gw.getAllWindows() if w.title and w.title.strip() and not w.isMinimized]
+        all_windows = [w for w in gw.getAllWindows() if w.title and w.title.strip()]
     except Exception:
         all_windows = []
 
@@ -87,12 +89,16 @@ def find_target_window(title_pattern=None):
         for w in all_windows:
             if pat in w.title.lower() and w.width >= 50 and w.height >= 50:
                 return w
+        # Also try matching without dimensions constraint (if minimized)
+        for w in all_windows:
+            if pat in w.title.lower():
+                return w
 
     # 2. Match common installer / modal dialogue keywords
     for w in all_windows:
         w_title_lower = w.title.lower()
         for kw in INSTALLER_KEYWORDS:
-            if kw in w_title_lower and w.width >= 50 and w.height >= 50:
+            if kw in w_title_lower and w.width >= 50 and w.height >= 50 and not w.isMinimized:
                 return w
 
     # 3. Fall back to the active foreground window
@@ -103,32 +109,11 @@ def find_target_window(title_pattern=None):
     except Exception:
         pass
 
-    # 4. If any non-minimized titled window exists with reasonable size, pick the first
-    for w in all_windows:
-        if w.width >= 100 and w.height >= 100:
-            return w
-
     return None
 
-def get_clamped_bbox(win, screen_w, screen_h):
+def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, quality=85):
     """
-    Clamp window bounding coordinates to the primary display area.
-    """
-    left = max(0, win.left)
-    top = max(0, win.top)
-    right = min(screen_w, win.left + win.width)
-    bottom = min(screen_h, win.top + win.height)
-
-    # Minimum bounding box safeguard
-    if right - left < 50 or bottom - top < 50:
-        return (0, 0, screen_w, screen_h)
-
-    return (left, top, right, bottom)
-
-def capture_snapshot(target_title=None, quality=85):
-    """
-    Capture a screenshot of the target installer window (or desktop fallback)
-    and return base64 encoded JPEG data.
+    Capture a screenshot of the target window (or desktop) and return base64 encoded JPEG data.
     """
     attach_default_desktop()
     try:
@@ -136,38 +121,80 @@ def capture_snapshot(target_title=None, quality=85):
     except Exception:
         screen_w, screen_h = 1920, 1080
 
-    target_win = find_target_window(target_title)
+    target_win = None
     is_fallback = False
-    window_title = "Desktop"
+    window_title = "Desktop (Entire Screen)"
     bounds = {"left": 0, "top": 0, "width": screen_w, "height": screen_h}
+
+    # Determine if full desktop was requested
+    is_desktop_req = force_desktop or (
+        target_title and target_title.lower().strip() in ["full", "desktop", "screen", "primary"]
+    )
+
+    if not is_desktop_req:
+        if target_hwnd and gw:
+            try:
+                for w in gw.getAllWindows():
+                    if getattr(w, '_hWnd', None) == target_hwnd:
+                        target_win = w
+                        break
+            except Exception:
+                target_win = None
+        elif target_title:
+            target_win = find_target_window(target_title)
 
     img = None
     if target_win:
         try:
-            window_title = target_win.title.strip()
-            # Bring window to foreground if not already
+            window_title = target_win.title.strip().strip('\u200e\u200f\ufeff')
+
+            # Restore if minimized
+            if target_win.isMinimized:
+                try:
+                    target_win.restore()
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+
+            # Bring window to foreground
             try:
                 target_win.activate()
-                time.sleep(0.1)
+                time.sleep(0.3)
             except Exception:
                 pass
 
-            bbox = get_clamped_bbox(target_win, screen_w, screen_h)
+            raw_left = target_win.left
+            raw_top = target_win.top
+            raw_width = target_win.width
+            raw_height = target_win.height
+
+            # Clamp coordinates to primary display
+            left = max(0, raw_left)
+            top = max(0, raw_top)
+            right = min(screen_w, raw_left + raw_width)
+            bottom = min(screen_h, raw_top + raw_height)
+            width = max(1, right - left)
+            height = max(1, bottom - top)
+
             bounds = {
-                "left": bbox[0],
-                "top": bbox[1],
-                "width": bbox[2] - bbox[0],
-                "height": bbox[3] - bbox[1]
+                "left": left,
+                "top": top,
+                "width": width,
+                "height": height
             }
-            img = ImageGrab.grab(bbox=bbox)
+            img = ImageGrab.grab(bbox=(left, top, right, bottom))
         except Exception:
             img = None
 
     if img is None:
         try:
             img = ImageGrab.grab()
-            is_fallback = True
-            window_title = f"{window_title} (Desktop Fallback)"
+            if not is_desktop_req and (target_title or target_hwnd):
+                is_fallback = True
+                window_title = f"{window_title} (Desktop Fallback)"
+            else:
+                window_title = "Desktop (Entire Screen)"
+                is_fallback = False
         except Exception as e:
             return {
                 "success": False,
@@ -265,6 +292,8 @@ def emit_to_daemon(payload, ipc_port=52199):
 def main():
     parser = argparse.ArgumentParser(description="Remote Approval Snapshot & Input Automation Tool")
     parser.add_argument("--title", type=str, default=None, help="Target window title pattern")
+    parser.add_argument("--hwnd", type=int, default=None, help="Target window HWND")
+    parser.add_argument("--desktop", action="store_true", help="Capture full desktop display")
     parser.add_argument("--action", type=str, default=None, help="Action to execute: enter, space, cancel, click, key")
     parser.add_argument("--x", type=int, default=None, help="X coordinate for click action")
     parser.add_argument("--y", type=int, default=None, help="Y coordinate for click action")
@@ -291,14 +320,24 @@ def main():
         # If refresh is requested, wait briefly for UI transition then capture new state
         if args.refresh:
             time.sleep(0.7)
-            snap_res = capture_snapshot(target_title=args.title, quality=args.quality)
+            snap_res = capture_snapshot(
+                target_title=args.title,
+                target_hwnd=args.hwnd,
+                force_desktop=args.desktop,
+                quality=args.quality
+            )
             act_res["refreshedSnapshot"] = snap_res
 
         print(json.dumps(act_res))
         sys.exit(0)
 
     # 2. Default mode: Capture snapshot
-    snap_res = capture_snapshot(target_title=args.title, quality=args.quality)
+    snap_res = capture_snapshot(
+        target_title=args.title,
+        target_hwnd=args.hwnd,
+        force_desktop=args.desktop,
+        quality=args.quality
+    )
 
     # Emit to daemon if requested
     if args.emit and snap_res.get("success"):

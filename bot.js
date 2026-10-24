@@ -50,6 +50,7 @@ import {
   sendLaptopApproveStep,
   requestLaptopApproval,
   captureLaptopScreenshot,
+  listLaptopWindows,
   isLaptopConnected,
   getConnectedLaptopsList,
   getAllConnectedLaptops,
@@ -3398,6 +3399,9 @@ bot.command(['spec', 'specs'], async (ctx) => {
   await handleSpecCommand(ctx, ctx.from.id);
 });
 
+// Temporary store for interactive screenshot window selections (userId -> Array of window targets)
+const pendingScreenshotChoices = new Map();
+
 bot.command(['screenshot', 'screen', 'snap'], async (ctx) => {
   const userId = ctx.from.id;
   const rawArg = (ctx.message.text || '')
@@ -3414,17 +3418,180 @@ bot.command(['screenshot', 'screen', 'snap'], async (ctx) => {
     return;
   }
 
-  const statusMsg = await ctx.reply('📸 *Capturing live screenshot from your laptop...*', {
+  // 1. FAST PATH: If target window was explicitly provided in command (e.g. /screenshot Brave, /screenshot Roblox)
+  if (rawArg) {
+    const statusMsg = await ctx.reply(`📸 *Capturing "${rawArg}" from your laptop...*`, {
+      parse_mode: 'Markdown',
+    });
+
+    try {
+      const isDesktopReq = ['full', 'desktop', 'screen'].includes(rawArg.toLowerCase());
+      const res = await captureLaptopScreenshot(userId, {
+        windowTitle: isDesktopReq ? 'desktop' : rawArg,
+        sendDirect: true,
+      });
+
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+      if (!res || !res.success) {
+        const errText = res?.error || 'Unknown error capturing screenshot.';
+        await ctx.reply(`❌ *Failed to capture screenshot:*\n\`${errText.replace(/`/g, "'")}\``, {
+          parse_mode: 'Markdown',
+        });
+      }
+    } catch (err) {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+      await ctx.reply(`❌ Screenshot error: ${err.message}`);
+    }
+    return;
+  }
+
+  // 2. INTERACTIVE MENU PATH: Enumerate open windows and ask user what to capture
+  const statusMsg = await ctx.reply('🔍 *Scanning open windows on your laptop...*', {
     parse_mode: 'Markdown',
   });
 
   try {
+    const winData = await listLaptopWindows(userId, 12000);
+
+    const keyboard = new InlineKeyboard();
+    // Choice 0 is always Entire Desktop Screen
+    const choices = [
+      { id: 'full', type: 'desktop', title: 'Desktop (Entire Screen)', appName: 'Desktop' }
+    ];
+    keyboard.text('🖥️ Entire Desktop Screen', 'snap_w:0').row();
+
+    let browsers = (winData && winData.browsers) ? winData.browsers : [];
+    let apps = (winData && winData.apps) ? winData.apps : [];
+
+    let buttonCount = 0;
+
+    // Open Browsers section
+    if (browsers.length > 0) {
+      for (const b of browsers) {
+        const choiceIdx = choices.length;
+        choices.push(b);
+        const bLabel = b.cleanTitle && b.cleanTitle !== b.appName
+          ? `🌐 ${b.appName}: ${b.cleanTitle}`
+          : `🌐 ${b.appName}`;
+        const shortLabel = bLabel.length > 38 ? bLabel.slice(0, 36) + '…' : bLabel;
+        keyboard.text(shortLabel, `snap_w:${choiceIdx}`).row();
+        buttonCount++;
+        if (buttonCount >= 12) break; // Telegram inline keyboard height safety
+      }
+    }
+
+    // Open Applications section
+    if (apps.length > 0 && buttonCount < 12) {
+      for (const a of apps) {
+        const choiceIdx = choices.length;
+        choices.push(a);
+        const icon = ['Roblox', 'Steam', 'Epic Games'].includes(a.appName) ? '🎮' :
+                     ['Telegram', 'Discord', 'Slack'].includes(a.appName) ? '💬' :
+                     ['VS Code', 'Cursor', 'Terminal', 'PowerShell'].includes(a.appName) ? '💻' : '📱';
+        const aLabel = a.cleanTitle && a.cleanTitle !== a.appName
+          ? `${icon} ${a.appName}: ${a.cleanTitle}`
+          : `${icon} ${a.appName}`;
+        const shortLabel = aLabel.length > 38 ? aLabel.slice(0, 36) + '…' : aLabel;
+        keyboard.text(shortLabel, `snap_w:${choiceIdx}`).row();
+        buttonCount++;
+        if (buttonCount >= 12) break;
+      }
+    }
+
+    keyboard.text('❌ Cancel', 'snap_w:cancel');
+
+    // Store choices session for this user (expires after 3 minutes)
+    pendingScreenshotChoices.set(userId, {
+      timestamp: Date.now(),
+      choices,
+    });
+
+    const menuText =
+      '📸 *What would you like to capture?*\n\n' +
+      '• Tap *Entire Desktop Screen* to capture your full monitor.\n' +
+      '• Or select any open browser / application below:';
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      menuText,
+      {
+        reply_markup: keyboard,
+        parse_mode: 'Markdown',
+      }
+    ).catch(async () => {
+      // Fallback if editMessageText fails
+      await ctx.reply(menuText, { reply_markup: keyboard, parse_mode: 'Markdown' });
+    });
+
+  } catch (err) {
+    // If window listing fails, offer quick direct capture button
+    const fallbackKeyboard = new InlineKeyboard()
+      .text('🖥️ Capture Entire Screen', 'snap_w:0').row()
+      .text('❌ Cancel', 'snap_w:cancel');
+
+    pendingScreenshotChoices.set(userId, {
+      timestamp: Date.now(),
+      choices: [{ id: 'full', type: 'desktop', title: 'Desktop', appName: 'Desktop' }],
+    });
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      '📸 *Window scanner unavailable*\n\nWould you like to capture the entire desktop screen instead?',
+      { reply_markup: fallbackKeyboard, parse_mode: 'Markdown' }
+    ).catch(() => {});
+  }
+});
+
+// Interactive screenshot selection callback handler
+bot.callbackQuery(/^snap_w:(.+)$/, async (ctx) => {
+  const choiceStr = ctx.match[1];
+  const userId = ctx.from.id;
+
+  await ctx.answerCallbackQuery().catch(() => {});
+
+  if (choiceStr === 'cancel') {
+    pendingScreenshotChoices.delete(userId);
+    await ctx.editMessageText('❌ *Screenshot cancelled.*', { parse_mode: 'Markdown' }).catch(() => {});
+    return;
+  }
+
+  const session = pendingScreenshotChoices.get(userId);
+  let target = null;
+
+  if (choiceStr === '0' || choiceStr === 'full') {
+    target = { type: 'desktop', title: 'desktop', appName: 'Desktop (Entire Screen)' };
+  } else {
+    const idx = parseInt(choiceStr, 10);
+    if (session && session.choices && session.choices[idx]) {
+      target = session.choices[idx];
+    }
+  }
+
+  pendingScreenshotChoices.delete(userId);
+
+  if (!isLaptopConnected(userId)) {
+    await ctx.editMessageText('⚠️ *Laptop disconnected before screenshot could be taken.*', {
+      parse_mode: 'Markdown',
+    }).catch(() => {});
+    return;
+  }
+
+  const targetName = target ? (target.appName || target.cleanTitle || target.title) : 'screen';
+  await ctx.editMessageText(`📸 *Capturing ${targetName} from your laptop...*`, {
+    parse_mode: 'Markdown',
+  }).catch(() => {});
+
+  try {
     const res = await captureLaptopScreenshot(userId, {
-      windowTitle: rawArg || undefined,
+      windowTitle: target && target.type !== 'desktop' ? target.title : 'desktop',
+      hwnd: target ? target.hwnd : undefined,
       sendDirect: true,
     });
 
-    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    await ctx.deleteMessage().catch(() => {});
 
     if (!res || !res.success) {
       const errText = res?.error || 'Unknown error capturing screenshot.';
@@ -3433,7 +3600,7 @@ bot.command(['screenshot', 'screen', 'snap'], async (ctx) => {
       });
     }
   } catch (err) {
-    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    await ctx.deleteMessage().catch(() => {});
     await ctx.reply(`❌ Screenshot error: ${err.message}`);
   }
 });

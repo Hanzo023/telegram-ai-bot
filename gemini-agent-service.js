@@ -11,6 +11,7 @@ import {
   getLaptopStatus,
   requestLaptopApproval,
   captureLaptopScreenshot,
+  listLaptopWindows,
   isLaptopConnected,
   joinLaptopPath,
   isPathAbsolute,
@@ -24,6 +25,15 @@ const FALLBACK_MODEL = 'gemini-3.8-flash';
  * Tool Declarations for Gemini Interactions API
  */
 export const AGENT_TOOLS = [
+  {
+    type: 'function',
+    name: 'list_open_windows',
+    description: 'List all currently open applications and browser windows (such as Roblox, Steam, Brave, Chrome, VS Code, Discord, Telegram) on the user\'s laptop. Use this whenever the user asks what is open or running, or to inspect active windows before taking a targeted screenshot.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
   {
     type: 'function',
     name: 'take_screenshot',
@@ -795,6 +805,7 @@ export async function runGeminiAgent({
           'CRITICAL EXECUTION AND GROUNDING RULES:\n' +
           '1. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s laptop. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
           '2. OFFICIAL TOOL NAMES:\n' +
+          '   • list_open_windows: Enumerate open application and browser windows on user\'s laptop\n' +
           '   • take_screenshot: Capture laptop screen or app window and deliver photo directly to user on Telegram (window_title, caption). ALWAYS use this when the user asks for a screenshot, screen capture, or to see their desktop/screen.\n' +
           '   • run_laptop_terminal: Execute shell commands on laptop (e.g. git status, git add, git commit, git push, npm test, python script.py)\n' +
           '   • read_laptop_file: Read files on laptop (file_path, max_lines)\n' +
