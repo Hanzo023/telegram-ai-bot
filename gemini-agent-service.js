@@ -9,6 +9,8 @@ import {
   writeLaptopFile,
   listLaptopDirectory,
   getLaptopStatus,
+  requestLaptopApproval,
+  captureLaptopScreenshot,
   isLaptopConnected,
   joinLaptopPath,
   isPathAbsolute,
@@ -22,6 +24,24 @@ const FALLBACK_MODEL = 'gemini-3.8-flash';
  * Tool Declarations for Gemini Interactions API
  */
 export const AGENT_TOOLS = [
+  {
+    type: 'function',
+    name: 'take_screenshot',
+    description: 'Capture a live screenshot of the user\'s laptop screen or a specific application window and send the photo directly to the user in Telegram. Use this whenever the user asks for a screenshot, wants to see their screen or desktop, or asks what is currently displayed on their PC.',
+    parameters: {
+      type: 'object',
+      properties: {
+        window_title: {
+          type: 'string',
+          description: 'Optional title or search keyword of the application window to capture (e.g. "Chrome", "Code", "Discord"). Leave empty or omit to capture the entire primary monitor/desktop.',
+        },
+        caption: {
+          type: 'string',
+          description: 'Optional brief caption to display with the screenshot in Telegram.',
+        },
+      },
+    },
+  },
   {
     type: 'function',
     name: 'run_laptop_terminal',
@@ -69,6 +89,18 @@ export const AGENT_TOOLS = [
       type: 'object',
       properties: {
         dir_path: { type: 'string', description: 'Directory path to list on the laptop (e.g. "D:\\projects")' },
+      },
+    },
+  },
+  {
+    type: 'function',
+    name: 'request_laptop_approval',
+    description: 'Request user approval on Telegram with a live screenshot when an installer dialog, confirmation modal, or unknown prompt appears on the laptop. Halts and waits for the user to review and step through via Telegram inline buttons.',
+    parameters: {
+      type: 'object',
+      properties: {
+        window_title: { type: 'string', description: 'Optional title or search keyword of the target installer or modal window (e.g. "Setup", "Installer", "Confirm")' },
+        reason: { type: 'string', description: 'Brief description of why approval is needed (e.g. "Setup wizard requires user confirmation before installing")' },
       },
     },
   },
@@ -169,6 +201,67 @@ export const AGENT_TOOLS = [
  */
 export async function executeTool(name, args = {}, context = {}) {
   const norm = String(name || '').toLowerCase().trim();
+
+  // 0. Live Laptop Screenshot
+  if (
+    [
+      'take_screenshot',
+      'capture_screenshot',
+      'capture_screen',
+      'screenshot',
+      'get_screenshot',
+      'screen_capture',
+    ].includes(norm)
+  ) {
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    const windowTitle = args.window_title || args.windowTitle || args.title || undefined;
+    const caption = args.caption || undefined;
+    try {
+      const res = await captureLaptopScreenshot(context.userId, { windowTitle, caption });
+      if (res && res.success) {
+        return JSON.stringify({
+          success: true,
+          message: `Screenshot of "${res.windowTitle}" successfully captured and sent directly to the user on Telegram.`,
+          windowTitle: res.windowTitle,
+          isDesktopFallback: res.isDesktopFallback,
+        });
+      }
+      return JSON.stringify({ error: res?.error || 'Failed to capture screenshot.' });
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // Remote Laptop Approval Request
+  if (
+    [
+      'request_laptop_approval',
+      'request_approval',
+      'ask_approval',
+      'laptop_approval',
+    ].includes(norm)
+  ) {
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    const windowTitle = args.window_title || args.windowTitle || args.title || undefined;
+    try {
+      const res = await requestLaptopApproval(context.userId, windowTitle);
+      if (res && res.success) {
+        return JSON.stringify({
+          success: true,
+          message: `Approval snapshot presented to user on Telegram for window: "${res.windowTitle}". Waiting for user confirmation via inline buttons.`,
+          windowTitle: res.windowTitle,
+          isDesktopFallback: res.isDesktopFallback,
+        });
+      }
+      return JSON.stringify({ error: res?.error || 'Failed to capture approval snapshot.' });
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
 
   // 1. Terminal / Shell command execution (with common LLM aliases)
   if (
@@ -702,22 +795,25 @@ export async function runGeminiAgent({
           'CRITICAL EXECUTION AND GROUNDING RULES:\n' +
           '1. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s laptop. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
           '2. OFFICIAL TOOL NAMES:\n' +
+          '   • take_screenshot: Capture laptop screen or app window and deliver photo directly to user on Telegram (window_title, caption). ALWAYS use this when the user asks for a screenshot, screen capture, or to see their desktop/screen.\n' +
           '   • run_laptop_terminal: Execute shell commands on laptop (e.g. git status, git add, git commit, git push, npm test, python script.py)\n' +
           '   • read_laptop_file: Read files on laptop (file_path, max_lines)\n' +
           '   • write_laptop_file: Write or overwrite files on laptop (file_path, content)\n' +
           '   • list_laptop_files: List files in a directory (dir_path)\n' +
           '   • get_laptop_status: Inspect laptop hardware specs\n' +
           '   • search_web: Search Google for documentation or solutions\n' +
-          '3. FULL MULTI-STEP WORKFLOWS: When requested to edit a file and push to Git:\n' +
+          '   • request_laptop_approval: Request user approval when installer or confirmation dialog is displayed\n' +
+          '3. SCREENSHOT RULE: To take a screenshot, NEVER attempt to run custom PowerShell or Python screenshot scripts in run_laptop_terminal. Always call `take_screenshot`.\n' +
+          '4. FULL MULTI-STEP WORKFLOWS: When requested to edit a file and push to Git:\n' +
           '   a. Read or verify target file via `read_laptop_file`\n' +
           '   b. Write the complete updated content via `write_laptop_file`\n' +
           '   c. Execute git operations via `run_laptop_terminal(command="git add . && git commit -m ... && git push", cwd="' + effectiveTargetDir + '")`\n' +
           '   d. Report the outcome with commit details in your final answer.\n' +
-          '4. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
-          '5. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
-          '6. DISCONNECTED STATE: If a tool reports the laptop is disconnected, explain clearly and provide the complete code so the user can save it manually.\n' +
-          '7. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
-          '8. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.',
+          '5. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
+          '6. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
+          '7. DISCONNECTED STATE: If a tool reports the laptop is disconnected, explain clearly and provide the complete code so the user can save it manually.\n' +
+          '8. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
+          '9. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.',
       });
 
       let stepCount = 0;

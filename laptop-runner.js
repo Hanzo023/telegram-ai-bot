@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { WebSocket } from 'ws';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
+import http from 'http';
 import fs from 'fs';
 import { promises as fsp } from 'fs';
 import path from 'path';
@@ -165,6 +166,116 @@ async function refreshHardwareInfo(force = false) {
   });
 }
 
+
+/**
+ * Local IPC Loopback Server for receiving approval snapshot events from local scripts/tools
+ */
+const IPC_PORT = parseInt(process.env.LAPTOP_RUNNER_IPC_PORT || '52199', 10);
+let ipcServer = null;
+
+function startIpcServer() {
+  try {
+    ipcServer = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/approval') {
+        let body = '';
+        req.on('data', chunk => {
+          body += chunk;
+        });
+        req.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            log(`[Runner IPC] 📸 Received local approval request: "${data.windowTitle || 'Unknown'}"`);
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              const approvalPayload = {
+                type: 'APPROVAL_REQUIRED',
+                approvalId: data.approvalId || data.id || `appr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                windowTitle: data.windowTitle || 'Prompt Window',
+                isDesktopFallback: Boolean(data.isDesktopFallback),
+                bounds: data.bounds || null,
+                image: data.image || '',
+                timestamp: data.timestamp || Date.now(),
+              };
+              ws.send(JSON.stringify(approvalPayload));
+              log(`[Runner IPC] 🚀 Forwarded APPROVAL_REQUIRED event to Cloud Agent Bridge.`);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, forwarded: true }));
+            } else {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'Laptop runner is not connected to cloud bridge.' }));
+            }
+          } catch (parseErr) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: parseErr.message }));
+          }
+        });
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
+    });
+
+    ipcServer.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        log(`[Runner IPC] Port ${IPC_PORT} is already in use (another runner instance may be active).`);
+      } else {
+        log(`[Runner IPC] Server error: ${err.message}`);
+      }
+    });
+
+    ipcServer.listen(IPC_PORT, '127.0.0.1', () => {
+      log(`[Runner IPC] 📡 Local approval IPC listener active on http://127.0.0.1:${IPC_PORT}/approval`);
+    });
+  } catch (err) {
+    log(`[Runner IPC] Failed to start local IPC server: ${err.message}`);
+  }
+}
+
+/**
+ * Run tools/request_approval.py to capture snapshots or execute input actions
+ */
+function runApprovalTool(args = [], timeoutMs = 25000) {
+  return new Promise((resolve) => {
+    const scriptPath = path.resolve(process.cwd(), 'tools', 'request_approval.py');
+    if (!fs.existsSync(scriptPath)) {
+      return resolve({ success: false, error: `Approval script not found at: ${scriptPath}` });
+    }
+
+    const pythonCmd = process.env.PYTHON_BIN || 'python';
+    execFile(
+      pythonCmd,
+      [scriptPath, ...args],
+      {
+        maxBuffer: 20 * 1024 * 1024,
+        timeout: timeoutMs,
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        if (error && !stdout) {
+          return resolve({
+            success: false,
+            error: stderr || error.message,
+            exitCode: error.code || 1,
+          });
+        }
+
+        try {
+          const parsed = JSON.parse(stdout.trim());
+          resolve(parsed);
+        } catch (parseErr) {
+          resolve({
+            success: false,
+            error: `Failed to parse approval script JSON output: ${parseErr.message}`,
+            rawStdout: stdout?.slice(0, 500),
+            rawStderr: stderr,
+          });
+        }
+      }
+    );
+  });
+}
+
 function connect() {
   if (isExiting) return;
   if (reconnectTimer) {
@@ -297,6 +408,17 @@ async function handleTask(action, payload) {
     case 'run_command': {
       const { command, cwd } = payload;
       if (!command) return { success: false, error: 'No command provided.' };
+
+      // Ensure common temp directory exists on Windows in case scripts write to C:\temp
+      if (os.platform() === 'win32') {
+        try {
+          const sysDrive = process.env.SystemDrive || 'C:';
+          const tempPath = path.join(sysDrive, 'temp');
+          if (!fs.existsSync(tempPath)) {
+            fs.mkdirSync(tempPath, { recursive: true });
+          }
+        } catch {}
+      }
 
       // Destructive command safety guard (prevent accidental wipes or prompt injection attacks)
       const DANGEROUS_PATTERNS = [
@@ -566,7 +688,141 @@ async function handleTask(action, payload) {
       };
     }
 
-    default:
+    
+    case 'take_screenshot':
+    case 'screenshot':
+    case 'capture_screenshot':
+    case 'capture_screen': {
+      const { windowTitle, quality } = payload;
+      log(`[Runner] 📸 Capturing live screenshot (target: "${windowTitle || 'primary display'}")`);
+      const args = [];
+      if (windowTitle) args.push('--title', windowTitle);
+      if (quality) args.push('--quality', String(quality || 80));
+
+      const res = await runApprovalTool(args);
+      if (res && res.success && res.image) {
+        return {
+          success: true,
+          windowTitle: res.windowTitle || 'Primary Display',
+          isDesktopFallback: Boolean(res.isDesktopFallback),
+          bounds: res.bounds,
+          image: res.image,
+          timestamp: res.timestamp || Date.now(),
+        };
+      }
+
+      // Fallback: try capture_app.py if request_approval.py fails
+      try {
+        const pythonCmd = process.env.PYTHON_BIN || 'python';
+        const captureScript = path.resolve(process.cwd(), 'tools', 'capture_app.py');
+        if (fs.existsSync(captureScript)) {
+          await new Promise((resolve) => {
+            execFile(pythonCmd, [captureScript, ...(windowTitle ? [windowTitle] : [])], { timeout: 15000 }, () => resolve());
+          });
+          const visionImg = path.resolve(process.cwd(), 'agent_vision.png');
+          if (fs.existsSync(visionImg)) {
+            const imgData = await fsp.readFile(visionImg);
+            return {
+              success: true,
+              windowTitle: windowTitle || 'Primary Display',
+              isDesktopFallback: true,
+              image: imgData.toString('base64'),
+              timestamp: Date.now(),
+            };
+          }
+        }
+      } catch (fallbackErr) {
+        log(`[Runner] Capture fallback error: ${fallbackErr.message}`);
+      }
+
+      return { success: false, error: res?.error || 'Screenshot capture failed on laptop.' };
+    }
+
+    case 'request_approval':
+    case 'capture_snapshot': {
+      const { windowTitle, quality } = payload;
+      log(`[Runner] 📸 Capturing snapshot for remote approval (target: "${windowTitle || 'auto'}")`);
+      const args = [];
+      if (windowTitle) args.push('--title', windowTitle);
+      if (quality) args.push('--quality', String(quality));
+
+      const res = await runApprovalTool(args);
+      if (res && res.success && res.image) {
+        const approvalId = payload.approvalId || `appr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'APPROVAL_REQUIRED',
+            approvalId,
+            windowTitle: res.windowTitle || 'Prompt Window',
+            isDesktopFallback: Boolean(res.isDesktopFallback),
+            bounds: res.bounds,
+            image: res.image,
+            timestamp: Date.now(),
+          }));
+        }
+        return {
+          success: true,
+          approvalId,
+          windowTitle: res.windowTitle,
+          isDesktopFallback: res.isDesktopFallback,
+          bounds: res.bounds,
+          image: res.image,
+          timestamp: res.timestamp,
+        };
+      }
+      return { success: false, error: res?.error || 'Snapshot capture failed.' };
+    }
+
+    case 'approve_step': {
+      const { approvalId, step, key, click, windowTitle, quality } = payload;
+      const normStep = (step || '').toLowerCase().trim();
+      log(`[Runner] 🕹️ Executing remote approve step: "${normStep}" (target: "${windowTitle || 'auto'}")`);
+
+      const args = [];
+      if (windowTitle) {
+        args.push('--title', windowTitle);
+      }
+      if (quality) {
+        args.push('--quality', String(quality));
+      }
+
+      if (normStep === 'refresh') {
+        // Just capture a fresh snapshot without simulating input
+      } else if (normStep === 'enter' || normStep === 'confirm') {
+        args.push('--action', 'enter', '--refresh');
+      } else if (normStep === 'space') {
+        args.push('--action', 'space', '--refresh');
+      } else if (normStep === 'cancel' || normStep === 'abort') {
+        args.push('--action', 'cancel');
+      } else if (normStep === 'click') {
+        args.push('--action', 'click', '--x', String(click?.x || 0), '--y', String(click?.y || 0), '--refresh');
+      } else if (normStep === 'key') {
+        args.push('--action', 'key', '--key', key || 'enter', '--refresh');
+      } else {
+        return { success: false, error: `Unsupported approve step: "${step}"` };
+      }
+
+      const res = await runApprovalTool(args);
+      if (!res || !res.success) {
+        return { success: false, error: res?.error || 'Approve step execution failed.' };
+      }
+
+      const refreshed = res.refreshedSnapshot || (normStep === 'refresh' ? res : null);
+
+      return {
+        success: true,
+        approvalId,
+        step: normStep,
+        executed: res.executed !== false,
+        windowTitle: refreshed?.windowTitle || res.windowTitle || windowTitle || 'Prompt Window',
+        isDesktopFallback: refreshed ? Boolean(refreshed.isDesktopFallback) : Boolean(res.isDesktopFallback),
+        bounds: refreshed ? refreshed.bounds : res.bounds,
+        image: refreshed ? refreshed.image : res.image,
+        timestamp: Date.now(),
+      };
+    }
+
+default:
       return { success: false, error: `Unknown action: ${action}` };
   }
 }
@@ -575,6 +831,11 @@ async function handleTask(action, payload) {
 process.on('SIGINT', () => {
   isExiting = true;
   console.log('\n[Runner] Shutting down laptop agent runner...');
+  if (ipcServer) {
+    try {
+      ipcServer.close();
+    } catch {}
+  }
   if (ws) {
     try {
       ws.close();
@@ -584,4 +845,6 @@ process.on('SIGINT', () => {
 });
 
 // Start initial connection
+startIpcServer();
+
 connect();

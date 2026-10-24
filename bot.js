@@ -46,6 +46,10 @@ import {
   setupLaptopBridge,
   setBotApi,
   setStorageDirCallback,
+  setApprovalRequiredCallback,
+  sendLaptopApproveStep,
+  requestLaptopApproval,
+  captureLaptopScreenshot,
   isLaptopConnected,
   getConnectedLaptopsList,
   getAllConnectedLaptops,
@@ -61,6 +65,7 @@ import {
 } from './laptop-bridge.js';
 
 // Pending file save session cache & custom path state
+const activeApprovals = new Map(); // approvalId -> { userId, windowTitle, messageId, createdAt, stepCount }
 const pendingFiles = new Map(); // userId -> { code: string, filename: string, suggestedPath: string, createdAt: number }
 const userAwaitingCustomSavePath = new Set(); // userId
 const userAwaitingRename = new Map(); // userId -> { source: 'cloud' | 'laptop', idx: number, oldName: string, fullPath?: string }
@@ -299,6 +304,50 @@ if (isMainModule && !isSimulation) {
       if (!existing && dirPath) {
         console.log(`[User Settings] 📁 Auto-registered local folder from laptop runner for User ${userId}: ${dirPath}`);
         setUserStorageDir(userId, dirPath);
+      }
+    });
+
+    setApprovalRequiredCallback(async (userId, data) => {
+      try {
+        const approvalId = data.approvalId || `appr_${Date.now()}`;
+        const windowTitle = data.windowTitle || 'Prompt / Installer';
+        const imageBase64 = data.image;
+
+        if (!imageBase64) {
+          console.warn(`[Bot Approval] Received approval request without image for User ${userId}`);
+          return;
+        }
+
+        const buffer = Buffer.from(imageBase64, 'base64');
+        const keyboard = new InlineKeyboard()
+          .text('✅ Confirm / Enter', `appr_step:${approvalId}:enter`)
+          .text('❌ Abort / Cancel', `appr_step:${approvalId}:cancel`)
+          .row()
+          .text('📸 Refresh Snapshot', `appr_step:${approvalId}:refresh`)
+          .text('␣ Space', `appr_step:${approvalId}:space`);
+
+        const caption =
+          `🚨 *Remote Laptop Approval Required*\n` +
+          `• *Target Window:* \`${windowTitle}\`\n` +
+          (data.isDesktopFallback ? `• *Note:* Window not isolated; displaying desktop view.\n` : '') +
+          `• *Action Needed:* An installer dialog or confirmation prompt is open on your laptop.\n\n` +
+          `Review the snapshot below and select an action to step through:`;
+
+        const sentMsg = await bot.api.sendPhoto(userId, new InputFile(buffer, 'approval.jpg'), {
+          caption: caption.slice(0, 1024),
+          parse_mode: 'Markdown',
+          reply_markup: keyboard,
+        });
+
+        activeApprovals.set(approvalId, {
+          userId,
+          windowTitle,
+          messageId: sentMsg.message_id,
+          createdAt: Date.now(),
+          stepCount: 0,
+        });
+      } catch (err) {
+        console.error('[Bot Approval] Error sending approval photo notification:', err);
       }
     });
   } catch (bridgeErr) {
@@ -1582,7 +1631,15 @@ async function handleAgentCommand(ctx, prompt) {
         await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, statusText, {
           parse_mode: 'Markdown',
         });
-      } catch {}
+      } catch {
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            statusText.replace(/[*_`\[\]()]/g, '')
+          );
+        } catch {}
+      }
     }
   };
 
@@ -1634,12 +1691,32 @@ async function handleAgentCommand(ctx, prompt) {
     scheduleConversationHistoryPersistence();
   } catch (err) {
     console.error('[Gemini Agent Error]:', sanitizeError(err));
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      `❌ *Gemini Agent Error:*\n${err.message || 'Failed to complete agent task.'}`,
-      { parse_mode: 'Markdown' }
-    ).catch(() => {});
+    const rawError = err.message || 'Failed to complete agent task.';
+    let edited = false;
+    try {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `❌ *Gemini Agent Error:*\n\`${rawError.replace(/`/g, "'")}\``,
+        { parse_mode: 'Markdown' }
+      );
+      edited = true;
+    } catch {
+      try {
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          `❌ Gemini Agent Error:\n${rawError}`
+        );
+        edited = true;
+      } catch {}
+    }
+    if (!edited) {
+      try {
+        await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
+      } catch {}
+      await ctx.reply(`❌ Gemini Agent Error:\n${rawError}`).catch(() => {});
+    }
   }
 }
 
@@ -1675,6 +1752,7 @@ bot.command(['start', 'help'], async (ctx) => {
     '🤖 *Autonomous AI Agent*\n' +
     '• /agent <prompt> — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +
     '• /agent_mode — 🎚️ *Toggle All Chats*: Set Agent as default for all messages (send again or /cancel to exit)\n' +
+    '• /screenshot [window] — 📸 *Screenshot*: Instant live screenshot of laptop screen or app window\n' +
     '• /devices — 💻 *Laptop Agent*: View connected laptops for remote terminal & file tasks\n' +
     '• /deep_research <topic> — 🔬 *Deep Research*: Exhaustive multi-source background report\n\n' +
     '🎙️ *Real-Time Live Voice*\n' +
@@ -3318,6 +3396,46 @@ async function handleSpecCommand(ctx, userId, isCallback = false) {
 
 bot.command(['spec', 'specs'], async (ctx) => {
   await handleSpecCommand(ctx, ctx.from.id);
+});
+
+bot.command(['screenshot', 'screen', 'snap'], async (ctx) => {
+  const userId = ctx.from.id;
+  const rawArg = (ctx.message.text || '')
+    .replace(/^\/(?:screenshot|screen|snap)\s*/i, '')
+    .trim();
+
+  if (!isLaptopConnected(userId)) {
+    await ctx.reply(
+      '⚠️ *Laptop Disconnected*\n\n' +
+      'No active laptop runner is currently connected to your account.\n' +
+      'Please run `start-agent.bat` or `npm run laptop` on your computer first.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const statusMsg = await ctx.reply('📸 *Capturing live screenshot from your laptop...*', {
+    parse_mode: 'Markdown',
+  });
+
+  try {
+    const res = await captureLaptopScreenshot(userId, {
+      windowTitle: rawArg || undefined,
+      sendDirect: true,
+    });
+
+    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+    if (!res || !res.success) {
+      const errText = res?.error || 'Unknown error capturing screenshot.';
+      await ctx.reply(`❌ *Failed to capture screenshot:*\n\`${errText.replace(/`/g, "'")}\``, {
+        parse_mode: 'Markdown',
+      });
+    }
+  } catch (err) {
+    await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    await ctx.reply(`❌ Screenshot error: ${err.message}`);
+  }
 });
 
 bot.callbackQuery(/^(?:refresh|view)_spec_(\d+)$/, async (ctx) => {
@@ -5154,6 +5272,115 @@ bot.command(['library', 'files'], async (ctx) => {
 
 bot.on('callback_query:data', async (ctx) => {
   const data = ctx.callbackQuery.data;
+  // Remote Laptop Approval Stepping Callback
+  if (data.startsWith('appr_step:')) {
+    const parts = data.split(':');
+    const approvalId = parts[1];
+    const step = parts[2] || 'enter';
+    const userId = ctx.from.id;
+
+    if (!allowedUserIds.has(Number(userId))) {
+      await ctx.answerCallbackQuery({ text: 'Unauthorized.' });
+      return;
+    }
+
+    const session = activeApprovals.get(approvalId);
+
+    const actionLabel =
+      step === 'enter'
+        ? 'Sending Enter...'
+        : step === 'space'
+        ? 'Sending Space...'
+        : step === 'cancel'
+        ? 'Aborting window...'
+        : 'Refreshing snapshot...';
+
+    await ctx.answerCallbackQuery({ text: actionLabel });
+
+    try {
+      const response = await sendLaptopApproveStep(userId, {
+        approvalId,
+        step,
+        windowTitle: session?.windowTitle,
+      });
+
+      if (!response || !response.success) {
+        await ctx.reply(
+          `⚠️ *Failed to execute "${step}":*\n${response?.error || 'Unknown error from laptop'}`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      if (step === 'cancel') {
+        activeApprovals.delete(approvalId);
+        try {
+          await ctx.editMessageCaption({
+            caption:
+              `❌ *Installation / Prompt Aborted*\n` +
+              `• *Target Window:* \`${session?.windowTitle || 'Prompt'}\`\n` +
+              `• *Action:* Closed via Esc / Alt+F4 on your laptop.`,
+            parse_mode: 'Markdown',
+            reply_markup: new InlineKeyboard().text('📸 Check Desktop', `appr_step:${approvalId}:refresh`),
+          });
+        } catch {}
+        return;
+      }
+
+      // Step succeeded: check if we have a refreshed snapshot
+      if (response.image) {
+        const nextBuffer = Buffer.from(response.image, 'base64');
+        const nextTitle = response.windowTitle || session?.windowTitle || 'Prompt Window';
+        if (session) {
+          session.stepCount = (session.stepCount || 0) + 1;
+          session.windowTitle = nextTitle;
+        }
+
+        const keyboard = new InlineKeyboard()
+          .text('✅ Confirm / Enter', `appr_step:${approvalId}:enter`)
+          .text('❌ Abort / Cancel', `appr_step:${approvalId}:cancel`)
+          .row()
+          .text('📸 Refresh Snapshot', `appr_step:${approvalId}:refresh`)
+          .text('␣ Space', `appr_step:${approvalId}:space`);
+
+        const nextCaption =
+          `🕹️ *Remote Approval: Step ${session ? session.stepCount : 1}*\n` +
+          `• *Action Sent:* \`${step.toUpperCase()}\`\n` +
+          `• *Current Window:* \`${nextTitle}\`\n\n` +
+          `Review the updated screen below to continue stepping or abort:`;
+
+        try {
+          await ctx.editMessageMedia(
+            {
+              type: 'photo',
+              media: new InputFile(nextBuffer, 'step.jpg'),
+              caption: nextCaption.slice(0, 1024),
+              parse_mode: 'Markdown',
+            },
+            { reply_markup: keyboard }
+          );
+        } catch (mediaErr) {
+          await ctx.replyWithPhoto(new InputFile(nextBuffer, 'step.jpg'), {
+            caption: nextCaption.slice(0, 1024),
+            parse_mode: 'Markdown',
+            reply_markup: keyboard,
+          });
+        }
+      } else {
+        await ctx.reply(
+          `✅ *Step "${step}" sent to laptop successfully!*`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+    } catch (err) {
+      await ctx.reply(
+        `❌ *Error sending approve step:*\n${err.message}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+    return;
+  }
+
 
   // Exit Live Voice Mode
   if (data === 'exit_live_mode') {
@@ -6687,6 +6914,7 @@ const botCommands = [
   // 🤖 AI Agent & Research
   { command: 'agent', description: '🤖 One-time task with live tools (web, files, math)' },
   { command: 'agent_mode', description: '🎚️ Toggle Agent as default for all chats (or /cancel)' },
+  { command: 'screenshot', description: '📸 Capture live screenshot of laptop desktop or app' },
   { command: 'devices', description: '💻 View connected laptop status for Agent' },
   { command: 'spec', description: '💻 View detailed laptop hardware specs (CPU, GPU, RAM, Disks)' },
   { command: 'deep_research', description: '🔬 Deep Research report (deep-research-2026)' },

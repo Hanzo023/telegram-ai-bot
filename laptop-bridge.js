@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'crypto';
 import os from 'os';
+import { InputFile } from 'grammy';
 
 /**
  * Registry of connected laptops
@@ -26,6 +27,14 @@ export function getLastKnownSpecs(userId) {
 
 let botApiRef = null;
 let onStorageDirCallback = null;
+let onApprovalRequiredCallback = null;
+
+/**
+ * Set callback for handling remote approval required events from runner
+ */
+export function setApprovalRequiredCallback(cb) {
+  onApprovalRequiredCallback = cb;
+}
 
 /**
  * Set callback for registering storage directory received from runner
@@ -305,6 +314,70 @@ export async function getLaptopStatus(userId) {
  * @param {import('http').Server} server
  * @param {Set<number>} allowedUserIds
  */
+/**
+ * Remotely send an approve step (enter, space, cancel, click, refresh) to user's laptop
+ */
+export async function sendLaptopApproveStep(userId, payload = {}, timeoutMs = 30000) {
+  return await sendLaptopTask(userId, 'approve_step', payload, timeoutMs);
+}
+
+/**
+ * Request user approval snapshot from user's active laptop
+ */
+export async function requestLaptopApproval(userId, windowTitle, timeoutMs = 30000) {
+  return await sendLaptopTask(userId, 'request_approval', { windowTitle }, timeoutMs);
+}
+
+/**
+ * Capture a screenshot from user's active laptop and optionally deliver directly to Telegram
+ */
+export async function captureLaptopScreenshot(userId, options = {}, timeoutMs = 35000) {
+  const { windowTitle, caption, quality = 80, sendDirect = true } = options;
+  const res = await sendLaptopTask(userId, 'take_screenshot', { windowTitle, quality }, timeoutMs);
+  if (!res || !res.success || !res.image) {
+    return {
+      success: false,
+      error: res?.error || 'Failed to capture screenshot from laptop.',
+    };
+  }
+
+  let photoSent = false;
+  if (sendDirect && botApiRef) {
+    try {
+      const buffer = Buffer.from(res.image, 'base64');
+      const safeTitle = (res.windowTitle || 'Desktop').replace(/[`*_\[\]()]/g, ' ');
+      const photoCaption =
+        caption ||
+        `📸 *Laptop Screenshot*\n` +
+        `• *Target:* \`${safeTitle}\`` +
+        (res.isDesktopFallback ? ' _(Full Desktop Display)_' : '');
+
+      await botApiRef.sendPhoto(userId, new InputFile(buffer, 'screenshot.jpg'), {
+        caption: photoCaption.slice(0, 1024),
+        parse_mode: 'Markdown',
+      }).catch(async () => {
+        // Fallback without parse_mode if title contains special characters
+        await botApiRef.sendPhoto(userId, new InputFile(buffer, 'screenshot.jpg'), {
+          caption: `📸 Laptop Screenshot: ${safeTitle}`.slice(0, 1024),
+        }).catch((fallbackErr) => {
+          console.error('[Laptop Bridge] Fallback sendPhoto failed:', fallbackErr);
+        });
+      });
+      photoSent = true;
+    } catch (sendErr) {
+      console.error('[Laptop Bridge] Error sending screenshot photo to Telegram:', sendErr);
+    }
+  }
+
+  return {
+    success: true,
+    photoSent,
+    windowTitle: res.windowTitle || 'Desktop',
+    isDesktopFallback: Boolean(res.isDesktopFallback),
+    image: res.image,
+  };
+}
+
 export function setupLaptopBridge(server, allowedUserIds) {
   // noServer mode for unified HTTP upgrade routing
   const wss = new WebSocketServer({ noServer: true });
@@ -431,6 +504,18 @@ export function setupLaptopBridge(server, allowedUserIds) {
           const msg = JSON.parse(data.toString());
 
           // Handle initial hardware specs broadcast from runner
+          if (msg.type === 'APPROVAL_REQUIRED') {
+            console.log(`[Laptop Bridge] 🚨 Remote approval required for User ${userId}: "${msg.windowTitle || 'Unknown'}"`);
+            if (onApprovalRequiredCallback) {
+              try {
+                onApprovalRequiredCallback(userId, msg);
+              } catch (cbErr) {
+                console.error('[Laptop Bridge] Error in onApprovalRequiredCallback:', cbErr);
+              }
+            }
+            return;
+          }
+
           if (msg.type === 'initial_status') {
             deviceRecord.lastStatus = msg;
             lastKnownSpecs.set(Number(userId), msg);
