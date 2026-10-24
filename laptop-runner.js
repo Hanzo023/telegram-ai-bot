@@ -2,7 +2,7 @@ import 'dotenv/config';
 
 import { WebSocket } from 'ws';
 
-import { exec, execFile } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 
 import http from 'http';
 
@@ -964,6 +964,39 @@ async function handleTask(action, payload) {
 
 
       console.log(`[Runner] ⚙️ Executing: "${command}" (cwd: ${cwd || process.cwd()})`);
+
+      const trimmedCmd = command.trim();
+      const isStartCmd = os.platform() === 'win32' && /^\s*start\s+/i.test(trimmedCmd);
+      const isInteractiveTui = os.platform() === 'win32' && /^(?:yazi|vim|nvim|nano|htop)\b/i.test(trimmedCmd);
+
+      // If command launches a GUI or interactive window on Windows, run detached so it doesn't block the runner
+      if (isStartCmd || isInteractiveTui) {
+        return new Promise((resolve) => {
+          const launchCmd = isInteractiveTui ? `start cmd /k "${trimmedCmd}"` : trimmedCmd;
+          const workingDir = cwd && fs.existsSync(cwd) ? cwd : process.cwd();
+          try {
+            const child = spawn('cmd.exe', ['/c', launchCmd], {
+              cwd: workingDir,
+              detached: true,
+              stdio: 'ignore',
+            });
+            child.unref();
+            resolve({
+              success: true,
+              exitCode: 0,
+              stdout: `Started in visible desktop window: ${launchCmd}`,
+              stderr: '',
+            });
+          } catch (err) {
+            resolve({
+              success: false,
+              exitCode: 1,
+              stdout: '',
+              stderr: `Failed to launch desktop window: ${err.message}`,
+            });
+          }
+        });
+      }
 
 
 

@@ -23,17 +23,23 @@ import urllib.error
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
+user32 = None
+kernel32 = None
+
 # Ensure interactive desktop access on Windows (even from detached background processes)
 def attach_default_desktop():
+    global user32, kernel32
     if sys.platform == 'win32':
         try:
             import ctypes
-            u32 = ctypes.windll.user32
-            hdesk = u32.OpenInputDesktop(0, False, 0x01FF)
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
             if not hdesk:
-                hdesk = u32.OpenDesktopW('Default', 0, False, 0x01FF) # GENERIC_ALL
+                hdesk = user32.OpenDesktopW('Default', 0, False, 0x01FF) # GENERIC_ALL
             if hdesk:
-                u32.SetThreadDesktop(hdesk)
+                user32.SetThreadDesktop(hdesk)
         except Exception:
             pass
 
@@ -83,6 +89,60 @@ APP_LAUNCH_MAP = {
     'calculator': ['cmd.exe', '/c', 'start', 'calc:'],
 }
 
+def get_process_name(hwnd):
+    """Retrieve process executable file name for a given HWND."""
+    if not (user32 and kernel32):
+        return ""
+    try:
+        from ctypes import wintypes
+        import ctypes
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == 0:
+            return ""
+        h_process = kernel32.OpenProcess(0x1000 | 0x0400, False, pid.value)
+        if not h_process:
+            return ""
+        buf = (ctypes.c_wchar * 1024)()
+        size = wintypes.DWORD(1024)
+        kernel32.QueryFullProcessImageNameW(h_process, 0, buf, ctypes.byref(size))
+        kernel32.CloseHandle(h_process)
+        exe_path = buf.value
+        return os.path.basename(exe_path).lower() if exe_path else ""
+    except Exception:
+        return ""
+
+def find_and_minimize_telegram():
+    """
+    Finds the active Telegram Desktop window, temporarily minimizes it so it doesn't block
+    desktop screenshots, and returns its HWND (or None) so it can be restored afterward.
+    """
+    if not (user32 and gw):
+        return None
+    try:
+        for w in gw.getAllWindows():
+            hwnd = getattr(w, '_hWnd', None)
+            if not hwnd:
+                continue
+            exe = get_process_name(hwnd)
+            is_tg = (exe == 'telegram.exe') or ('telegram' in (w.title or '').lower())
+            if is_tg and not user32.IsIconic(hwnd) and w.width > 150 and w.height > 150:
+                user32.ShowWindow(hwnd, 6) # SW_MINIMIZE
+                time.sleep(0.35)
+                return hwnd
+    except Exception:
+        pass
+    return None
+
+def restore_telegram(hwnd):
+    """Restore Telegram Desktop window after screenshot has been captured."""
+    if hwnd and user32:
+        try:
+            user32.ShowWindow(hwnd, 9) # SW_RESTORE
+            time.sleep(0.1)
+        except Exception:
+            pass
+
 def try_launch_target_app(title_pattern):
     """If an application isn't running, attempt to launch it via system URI or start command."""
     if not title_pattern or sys.platform != 'win32':
@@ -100,20 +160,16 @@ def try_launch_target_app(title_pattern):
 
 def force_bring_to_front(hwnd):
     """
-    Forcefully bring any window to the foreground on Windows.
-    Bypasses LockSetForegroundWindow restrictions using the Alt-key event,
-    AttachThreadInput, ShowWindow(SW_RESTORE), and SwitchToThisWindow.
+    Forcefully bring any window to the foreground on Windows without sending Alt keys.
+    Disables OS foreground lock timeout, restores minimized state, attaches thread input,
+    and calls SwitchToThisWindow.
     """
-    if not hwnd or sys.platform != 'win32':
+    if not hwnd or sys.platform != 'win32' or not user32:
         return False
     try:
-        import ctypes
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-
         attach_default_desktop()
 
-        # 1. Disable OS foreground lock timeout (prevents Alt-key side effects that close floating apps)
+        # 1. Disable OS foreground lock timeout (prevents focus stealing block without sending Alt)
         user32.SystemParametersInfoA(0x2001, 0, 0, 0x0002 | 0x0001)
 
         # 2. Restore window if minimized
@@ -146,40 +202,89 @@ def force_bring_to_front(hwnd):
     except Exception:
         return False
 
+def match_target_window(title_pattern=None):
+    """
+    Search for a target window matching title_pattern across ALL open windows.
+    Matches window titles, browser tabs, or process names.
+    """
+    attach_default_desktop()
+    if not title_pattern or not gw:
+        return None
+
+    q = title_pattern.lower().strip()
+    all_windows = gw.getAllWindows()
+    scored = []
+
+    for w in all_windows:
+        hwnd = getattr(w, '_hWnd', None)
+        title = (w.title or '').strip()
+        if not title:
+            continue
+        lower_title = title.lower()
+        exe = get_process_name(hwnd) if hwnd else ""
+
+        if any(ign in lower_title for ign in ['windows input experience', 'program manager', 'agentcursoroverlay', 'default ime']):
+            continue
+
+        score = 0
+
+        # Exact title match
+        if q == lower_title:
+            score += 100
+        elif q in lower_title:
+            score += 50
+
+        # Process name matching (e.g. 'brave' matching 'brave.exe', 'gemini' matching 'gemini.exe')
+        if q in exe:
+            score += 60
+
+        # Aliases for terminals and apps
+        if q in ['terminal', 'cmd', 'powershell', 'console', 'bash', 'yazi'] and (
+            exe in ['windowsterminal.exe', 'cmd.exe', 'powershell.exe', 'wt.exe', 'conhost.exe'] or 'yazi' in lower_title or 'cmd' in lower_title
+        ):
+            score += 75
+        if q == 'yazi' and ('yazi' in lower_title or 'yazi' in exe):
+            score += 100
+        if q in ['browser', 'web'] and exe in ['brave.exe', 'chrome.exe', 'msedge.exe', 'firefox.exe']:
+            score += 60
+        if q in ['roblox'] and ('roblox' in lower_title or 'roblox' in exe):
+            score += 75
+        if q in ['steam'] and ('steam' in lower_title or 'steam' in exe):
+            score += 75
+        if q in ['code', 'vscode'] and ('visual studio code' in lower_title or 'code.exe' in exe):
+            score += 75
+        if q in ['gemini'] and ('gemini' in lower_title or 'gemini' in exe):
+            score += 85
+
+        if score > 0:
+            if not w.isMinimized:
+                score += 15
+            if w.width > 100 and w.height > 100:
+                score += 10
+            scored.append((score, w))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1] if scored else None
+
 def find_target_window(title_pattern=None):
     """
     Search for a target window matching title_pattern, or search for
     common installer/modal windows, or fall back to the active foreground window.
     """
-    attach_default_desktop()
-    if not gw:
-        return None
-
-    all_windows = []
-    try:
-        all_windows = [w for w in gw.getAllWindows() if w.title and w.title.strip()]
-    except Exception:
-        all_windows = []
-
-    # 1. Match specific title pattern if provided
     if title_pattern:
-        pat = title_pattern.lower().strip()
-        for w in all_windows:
-            if pat in w.title.lower() and w.width >= 50 and w.height >= 50:
-                return w
-        # Also try matching without dimensions constraint (if minimized)
-        for w in all_windows:
-            if pat in w.title.lower():
-                return w
+        w = match_target_window(title_pattern)
+        if w:
+            return w
 
-    # 2. Match common installer / modal dialogue keywords
+    # Match installer keywords
+    all_windows = gw.getAllWindows() if gw else []
     for w in all_windows:
-        w_title_lower = w.title.lower()
+        w_title_lower = (w.title or '').lower()
         for kw in INSTALLER_KEYWORDS:
             if kw in w_title_lower and w.width >= 50 and w.height >= 50 and not w.isMinimized:
                 return w
 
-    # 3. Fall back to the active foreground window
+    # Fall back to active foreground window
     try:
         active = gw.getActiveWindow()
         if active and active.title and active.width >= 50 and active.height >= 50 and not active.isMinimized:
@@ -205,7 +310,7 @@ def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, q
     bounds = {"left": 0, "top": 0, "width": screen_w, "height": screen_h}
 
     # Determine if full desktop was requested
-    is_desktop_req = force_desktop or (
+    is_desktop_req = force_desktop or not target_title or (
         target_title and target_title.lower().strip() in ["full", "desktop", "screen", "primary"]
     )
 
@@ -219,11 +324,11 @@ def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, q
             except Exception:
                 target_win = None
         elif target_title:
-            target_win = find_target_window(target_title)
+            target_win = match_target_window(target_title)
             # If target app is not running, attempt to launch it and search again
             if not target_win:
                 if try_launch_target_app(target_title):
-                    target_win = find_target_window(target_title)
+                    target_win = match_target_window(target_title)
 
     img = None
     if target_win:
@@ -253,12 +358,12 @@ def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, q
             raw_height = target_win.height
 
             # Re-read precise coordinates using GetWindowRect
-            if hwnd and sys.platform == 'win32':
+            if hwnd and sys.platform == 'win32' and user32:
                 try:
-                    import ctypes
                     from ctypes import wintypes
+                    import ctypes
                     rect = wintypes.RECT()
-                    if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                         raw_left = rect.left
                         raw_top = rect.top
                         raw_width = rect.right - rect.left
@@ -285,19 +390,20 @@ def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, q
             img = None
 
     if img is None:
+        # Full Desktop / Fallback mode:
+        # Temporarily minimize Telegram Desktop so it doesn't block whatever is underneath!
+        minimized_tg = find_and_minimize_telegram()
         try:
             img = ImageGrab.grab()
-            if not is_desktop_req and (target_title or target_hwnd):
-                is_fallback = True
-                window_title = f"{window_title} (Desktop Fallback)"
-            else:
-                window_title = "Desktop (Entire Screen)"
-                is_fallback = False
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to grab screen: {str(e)}"
-            }
+        finally:
+            restore_telegram(minimized_tg)
+
+        if not is_desktop_req and (target_title or target_hwnd):
+            is_fallback = True
+            window_title = f"{window_title} (Desktop Fallback)"
+        else:
+            window_title = "Desktop (Entire Screen)"
+            is_fallback = False
 
     # Convert to RGB and compress as JPEG
     if img.mode != 'RGB':

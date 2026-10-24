@@ -26,11 +26,14 @@ if (-not $nodeExe) {
     $nodeExe = "C:\Program Files\nodejs\node.exe"
 }
 
-# 4. Launch completely hidden (laptop-runner.js manages runner.log internally)
-$proc = Start-Process -FilePath $nodeExe -ArgumentList "laptop-runner.js" -WorkingDirectory $projectDir -WindowStyle Hidden -PassThru
+# 4. Launch completely detached via WMI (laptop-runner.js manages runner.log internally)
+$res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = "`"$nodeExe`" `"$projectDir\laptop-runner.js`""
+    CurrentDirectory = $projectDir
+}
 
-if ($proc) {
-    Write-Host "[OK] Telegram AI Laptop Runner started in background (PID: $($proc.Id)). Zero terminal windows."
+if ($res.ReturnValue -eq 0) {
+    Write-Host "[OK] Telegram AI Laptop Runner started in background (PID: $($res.ProcessId)). Zero terminal windows."
 } else {
-    Write-Host "[ERROR] Failed to start laptop-runner.js process."
+    Write-Host "[ERROR] Failed to start laptop-runner.js process (Code: $($res.ReturnValue))."
 }

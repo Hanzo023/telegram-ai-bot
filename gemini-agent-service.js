@@ -55,11 +55,11 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     name: 'run_laptop_terminal',
-    description: 'Execute a terminal command (PowerShell / Bash) on the user\'s physical laptop to install packages, run tests, fix code, or inspect processes while they are away.',
+    description: 'Execute a terminal command (PowerShell / Command Prompt / Bash) on the user\'s physical laptop to install packages, run tests, fix code, inspect processes, or open interactive apps. CRITICAL: For interactive TUIs (like yazi, nano, vim) or applications meant to open on desktop, always launch in a visible GUI terminal: "start wt cmd /k \\"<command>\\"" or "start cmd /k \\"<command>\\""',
     parameters: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'The terminal command line to execute (e.g. "npm install express", "python test.py", "git status")' },
+        command: { type: 'string', description: 'The terminal command line to execute (e.g. "npm install express", "python test.py", "git status"). For interactive TUIs (yazi, etc.), use "start cmd /k <cmd>" or "start wt cmd /k <cmd>".' },
         cwd: { type: 'string', description: 'Optional working directory path on the laptop (e.g. "D:\\projects\\my-app")' },
       },
       required: ['command'],
@@ -229,6 +229,8 @@ export async function executeTool(name, args = {}, context = {}) {
     const windowTitle = args.window_title || args.windowTitle || args.title || undefined;
     const caption = args.caption || undefined;
     try {
+      // Allow newly launched GUI/TUI windows 1.5 seconds to paint on screen before snapping
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       const res = await captureLaptopScreenshot(context.userId, { windowTitle, caption });
       if (res && res.success) {
         return JSON.stringify({
@@ -828,8 +830,8 @@ export async function runGeminiAgent({
           '10. APP INSTALLATION & SCREENSHOT WORKFLOWS:\n' +
           '    When the user asks to install, launch, or screenshot an application (e.g. "install yazi, open it and take a screenshot", or "open roblox and screenshot it"):\n' +
           '    a. Install: Use `run_laptop_terminal` with winget or package manager (e.g. `winget install --id sxyazi.yazi -e --accept-package-agreements --accept-source-agreements --silent`).\n' +
-          '    b. Launch: Launch the app via `run_laptop_terminal` using `start` (e.g. `start wt yazi` or `start cmd /k yazi` or `start roblox:` or `start brave`).\n' +
-          '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. This brings the app to the front and delivers the screenshot directly to Telegram.',
+          '    b. Launch: Interactive TUIs (like Yazi) or terminal programs CANNOT run in headless background subprocesses. You MUST launch them in a visible GUI terminal window via `run_laptop_terminal(command="start cmd /k yazi")` or `start wt cmd /k yazi`. For GUI desktop apps, use `run_laptop_terminal(command="start <app_name>")` (e.g. `start roblox:`, `start brave`).\n' +
+          '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. The system will automatically allow 1.5 seconds for the window to paint, bring it to the foreground, and deliver the screenshot directly to Telegram.',
       });
 
       let stepCount = 0;
