@@ -5,8 +5,6 @@ cd /d "%~dp0"
 where node >nul 2>nul
 if %errorlevel% neq 0 (
   echo [ERROR] Node.js is not installed or not in PATH!
-  echo Opening https://nodejs.org to download Node.js LTS...
-  start https://nodejs.org/
   pause
   exit /b 1
 )
@@ -17,85 +15,33 @@ if "%1"=="--disable" goto DISABLE
 if "%1"=="--stop" goto DISABLE
 if "%1"=="-d" goto DISABLE
 
-set "SERVER_URL=https://your-bot-name.onrender.com"
-set "TELEGRAM_USER_ID="
-
-:: Dynamically read from .env if present
-if exist "%~dp0.env" (
-  for /f "usebackq tokens=1,* delims==" %%A in ("%~dp0.env") do (
-    if /i "%%A"=="SERVER_URL" set "SERVER_URL=%%~B"
-    if /i "%%A"=="TELEGRAM_USER_ID" set "TELEGRAM_USER_ID=%%~B"
-    if /i "%%A"=="ALLOWED_USER_ID" if not defined TELEGRAM_USER_ID set "TELEGRAM_USER_ID=%%~B"
-  )
-)
-
 echo ========================================================
 echo   Telegram AI Remote Laptop Agent Runner
 echo ========================================================
-echo [SERVER]  %SERVER_URL%
-echo [USER ID] %TELEGRAM_USER_ID%
+echo [CLEANUP] Stopping previous instances and starting silent background runner...
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-hidden.ps1"
+
 echo.
-
-if not exist node_modules\ws (
-  echo [INFO] Installing required dependencies...
-  call npm install ws dotenv --no-audit --no-fund
-)
-
-set "LOG_FILE=%~dp0runner.log"
-
-echo [STARTING] Launching silent detached background runner...
-start "" wscript.exe "%~dp0start-background.vbs"
-
-echo [WAITING] Connecting to Telegram AI server and confirming handshake...
-echo.
-
-set /a ATTEMPTS=0
-:WAIT_LOOP
-set /a ATTEMPTS+=1
-timeout /t 1 >nul 2>nul
-
-findstr /C:"Server handshake confirmed" "%LOG_FILE%" >nul 2>nul
-if %errorlevel% equ 0 goto SHOW_CONFIRMED
-
-if %ATTEMPTS% geq 10 goto TIMEOUT_WAIT
-goto WAIT_LOOP
-
-:SHOW_CONFIRMED
 echo ========================================================
-echo   [OK] HANDSHAKE CONFIRMED WITH TELEGRAM AI BOT!
+echo  [OK] Telegram AI Laptop Runner started in background!
 echo ========================================================
-echo  Device:   %COMPUTERNAME%
-echo  Status:   CONNECTED AND READY FOR TELEGRAM COMMANDS
-echo  Server:   %SERVER_URL%
-echo  Mode:     PERMANENT BACKGROUND DAEMON [Detached]
-echo.
-echo  Closing this window will NOT disconnect the agent.
-echo  The runner is running completely independently in background.
+echo  - Device:   %COMPUTERNAME%
+echo  - Status:   RUNNING SILENTLY (No terminal window)
+echo  - Logs:     runner.log
 echo.
 echo  To stop or disable anytime, double-click:
 echo    Disable-Laptop-Agent.bat
 echo ========================================================
-echo Window closing in 4 seconds or press any key...
-timeout /t 4
-exit /b 0
-
-:TIMEOUT_WAIT
-echo ========================================================
-echo  [INFO] Background runner launched.
-echo  If the cloud server is waking up, connection may
-echo  take up to 25 seconds to establish.
-echo.
-echo  Check live status in Telegram with: /status
-echo  Closing this window will NOT terminate the background runner.
-echo ========================================================
-timeout /t 5
+echo This window will close in 3 seconds...
+timeout /t 3 >nul
 exit /b 0
 
 :FOREGROUND
 echo Starting in foreground mode, press Ctrl+C to stop...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"CommandLine like '%%laptop-runner.js%%'\" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 node laptop-runner.js %*
 exit /b 0
 
 :DISABLE
-call "%~dp0disable-agent.bat"
-exit /b 0
+call "%~dp0Disable-Laptop-Agent.bat"

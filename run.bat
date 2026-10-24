@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-node laptop-runner.js
+call "%~dp0start-agent.bat" %*

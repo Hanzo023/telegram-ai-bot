@@ -13,17 +13,17 @@ copy /y "%~dp0start-background.vbs" "%STARTUP_VBS%" >nul
 echo [OK] Restored to Windows Startup folder.
 
 :: 2. Launch background process
-start "" wscript.exe "%~dp0start-background.vbs"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-hidden.ps1"
 echo [OK] Started silent background runner!
 
 echo.
 echo ========================================================
 echo  [ENABLED] Telegram AI Laptop Runner is ACTIVE!
 echo ========================================================
-echo  - Runner started in background via WebSocket tunnel.
+echo  - Runner started in background without terminal windows.
 echo  - Auto-start on Windows boot/login is ON.
 echo.
 echo  To disable anytime, run: Disable-Laptop-Agent.bat
 echo ========================================================
-timeout /t 4 >nul
+timeout /t 3 >nul
 exit /b 0
