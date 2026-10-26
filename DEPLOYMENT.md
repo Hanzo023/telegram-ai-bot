@@ -60,12 +60,23 @@ This guide provides step-by-step instructions for deploying your private Telegra
 Render provides a generous free tier for Web Services. By pairing Render with **UptimeRobot**, you can keep the bot alive 24/7 with zero sleeping.
 
 ### Step 1: Push your latest code to GitHub
-Make sure all repository changes are pushed to your `main` branch:
+Make sure all repository changes are pushed to your remote repository:
+
 ```bash
+# For production releases:
 git add .
 git commit -m "feat: production cloud deployment setup"
 git push origin main
+
+# For testing feature branches (e.g. Testing-branch):
+git checkout Testing-branch
+git add .
+git commit -m "feat: testing updates and fixes"
+git push origin Testing-branch
 ```
+
+> [!TIP]
+> If testing experimental changes on Render, navigate to your Web Service **Settings** ➔ **Branch** and switch the deployment target from `main` to `Testing-branch`. Render will automatically rebuild from the testing branch!
 
 ### Step 2: Create a Web Service on Render
 1. Go to [render.com](https://render.com) and log in with GitHub.

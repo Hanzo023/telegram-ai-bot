@@ -729,12 +729,15 @@ This section details the autonomous agent loop, file management safety patterns,
 
 ### 5.1 Autonomous Tool-Calling Agent (`/agent`) & Safety Boundaries
 
-The `/agent` command transforms the bot into an autonomous problem-solving agent with five live tools:
-1. **`run_laptop_terminal(command, cwd)`**: Executes PowerShell commands on your physical machine (e.g. `npm test`, `git status`, `git commit`, `git push`).
-2. **`read_laptop_file(file_path, max_lines)`**: Reads file contents from disk.
-3. **`write_laptop_file(file_path, content)`**: Writes or patches files directly.
-4. **`list_laptop_files(dir_path)`**: Lists files and folders.
-5. **`search_web(query)`**: Real-time Google Search grounding.
+The `/agent` command transforms the bot into an autonomous problem-solving agent with eight live tools:
+1. **`list_open_windows`**: Enumerates all currently visible desktop applications and browser windows (e.g., Brave, Chrome, Roblox, Steam, VS Code, Discord, Terminal) with their process names and titles.
+2. **`take_screenshot(window_title, caption)`**: Captures a live screenshot of the laptop screen or a targeted application window and delivers the photo directly to Telegram. Uses native Win32 window focus without altering or minimizing windows.
+3. **`run_laptop_terminal(command, cwd)`**: Executes shell commands on your physical machine with live streaming progress updates, detached GUI/TUI launching, and silent package installation enforcement (180s for installs, 60s for standard commands).
+4. **`read_laptop_file(file_path, max_lines)`**: Reads file contents from disk.
+5. **`write_laptop_file(file_path, content)`**: Writes or patches files directly.
+6. **`list_laptop_files(dir_path)`**: Lists files and folders.
+7. **`get_laptop_status()`**: Inspects hardware specs, battery, and thermals.
+8. **`request_laptop_approval(title, message, action_payload)`**: Prompts for user verification when security or installation dialogs appear.
 
 #### 🛡️ Autonomous Safety & Defense-in-Depth for Remote Execution
 Allowing an AI model to execute terminal commands requires strict security boundaries to prevent accidental damage, prompt injection, or malicious execution:
@@ -745,8 +748,14 @@ Allowing an AI model to execute terminal commands requires strict security bound
 2. **Destructive Command Blacklisting & Pattern Matching**:
    [`./laptop-runner.js`](./laptop-runner.js) enforces defensive regex checks before executing any command. High-risk destructive commands (such as `format <drive>:`, `diskpart`, `mkfs`, recursive drive wipes like `rmdir /s /q C:\` or `del /f /s /q C:\`, and system shutdowns) are intercepted and rejected immediately with an execution error returned to Telegram.
 
-3. **Strict Execution Timeouts (30s) & Buffer Caps (10 MB)**:
-   Every command dispatched to PowerShell is wrapped with a strict execution timeout (`child_process.exec(cmd, { timeout: 30000 })`) and a **10 MB buffer limit**. If an interactive CLI prompt, hanging network task, or runaway script blocks, it is automatically killed after 30 seconds rather than tying up the WebSocket tunnel indefinitely.
+3. **Strict Execution Timeouts (60s–180s) & Detached GUI Spawning**:
+   Every CLI command dispatched to PowerShell is wrapped with an execution timeout (`180s` for package installers like `winget`, `npm`, `pip`; `60s` for standard commands) and non-interactive stdio (`stdio: ['ignore', 'pipe', 'pipe']`). Any command that spawns interactive TUIs or GUI desktop windows (e.g. `start ...`, `start wt`, `yazi`) is automatically launched detached with `child.unref()` so child processes never freeze the runner tunnel.
+
+4. **Real-Time Terminal Streaming & Progress Updates**:
+   While long-running commands or installations run, `laptop-runner.js` sends `COMMAND_PROGRESS` WebSocket frames every 2 seconds containing the most recent terminal output. The bot throttles updates to 1500ms to respect Telegram rate limits and renders the live progress cleanly in chat.
+
+5. **Mid-Task Concurrent Checks & Immediate Cancellation**:
+   If you send a follow-up message while a task is running (e.g. *"take a screenshot of the progress"*), the bot immediately answers concurrent queries and injects the follow-up instruction into the agent's next step. Send `/stop` or `/abort` anytime to halt execution immediately.
 
 4. **Directory Sandboxing & Path Traversal Prevention**:
    Remote file reads, writes, and deletions requested by the agent are restricted using path normalization (`path.resolve()`). The runner explicitly verifies that resolved targets do not point into protected operating system roots (e.g. `C:\Windows`, `System32`), preventing directory traversal attacks (`../../Windows/System32`).
@@ -835,6 +844,7 @@ Users can manage and organize assets stored in either Telegram Cloud Vault or th
 | `/library` | 📁 Files | Browse files stored locally or in Cloud Vault sorted A-Z |
 | `/quiz` | 📝 Learning | Generate an interactive multiple-choice quiz on any loaded document |
 | `/save [path]` | 💾 Files | Accept and save pending generated code to disk |
+| `/stop` / `/abort`| 🛑 Agent | Immediately halt running agent task and clear pending execution queue |
 | `/cancel` | ❌ Control | Discard pending code save, cancel directory prompt, or exit command modes |
 | `/clear` | 🧹 Chat | Clear recent conversation turns while retaining loaded files |
 | `/clearall` | 🗑️ Chat | Wipe all conversation history, sessions, and active documents |

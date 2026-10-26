@@ -19,6 +19,10 @@
 11. [PDF or File Extraction Memory Spike / OOM Crash](#11-pdf-or-file-extraction-memory-spike--oom-crash)
 12. [YouTube Extraction Blocked by Bot Detection](#12-youtube-extraction-blocked-by-bot-detection)
 13. [Gemini API 404 / 429: Model Not Found or Quota Exhausted on Pro / Argon Models](#13-gemini-api-404--429-model-not-found-or-quota-exhausted-on-pro--argon-models)
+14. [Terminal Installation or Long Command Freezes (`winget`, `npm`, `pip`)](#14-terminal-installation-or-long-command-freezes-winget-npm-pip)
+15. [Targeted Window Screenshot Minimizes, Closes, or Captures Desktop Background](#15-targeted-window-screenshot-minimizes-closes-or-captures-desktop-background)
+16. [Follow-up Prompts Trapped or Ignored During Active Agent Execution](#16-follow-up-prompts-trapped-or-ignored-during-active-agent-execution)
+17. [Task Cancellation and Emergency Queue Purge (`/stop`, `/abort`, `/cancel`)](#17-task-cancellation-and-emergency-queue-purge-stop-abort-cancel)
 
 ---
 
@@ -318,6 +322,124 @@ GoogleGenAIError: [429 ResourceExhausted] Quota exceeded for metric 'GenerateCon
   1. Open [Google AI Studio](https://aistudio.google.com) and link your project to a billing account (Pay-As-You-Go).
   2. Set `GEMINI_MODEL=gemini-3.1-pro` (or your authorized Argon model string) in your environment variables.
   3. Or run `/model <model-name>` dynamically inside your Telegram chat.
+
+---
+
+### 14. Terminal Installation or Long Command Freezes (`winget`, `npm`, `pip`)
+
+#### 🔴 Symptom
+When the agent attempts to install packages or run package managers (e.g. `winget install yazi`, `pip install pillow`, `npm install`), the task hangs indefinitely or times out with:
+```text
+Laptop task "run_command" timed out after 60 seconds of inactivity.
+```
+No live feedback appears in Telegram, and subsequent commands cannot run until the lock clears.
+
+#### 🔍 Root Cause
+1. **Interactive Prompt Blocks**: Package managers frequently prompt for user input (e.g., license agreements, source agreements, or `[y/N]` confirmations). Without explicit non-interactive flags, standard input waits forever.
+2. **Standard I/O Pipe Hangs**: Using `child_process.exec()` creates buffered pipes. When terminal programs or GUI launchers spawn child processes, standard output streams can remain open indefinitely.
+3. **Inadequate Timeout**: Standard commands use a default 60s timeout, which is insufficient for downloading and extracting larger software packages.
+
+#### 🛠️ Fix
+1. **Enforce Non-Interactive Flags in System Instructions**:
+   In [`gemini-agent-service.js`](./gemini-agent-service.js), enforce mandatory silent flags in the agent's prompt:
+   - `winget`: `winget install <id> -e --silent --accept-package-agreements --accept-source-agreements`
+   - `pip`: `pip install <package> --no-input -q`
+   - `npm`: `npm install <package> --yes --no-audit --no-fund`
+2. **Spawn Decoupled Processes with Ignored Stdin**:
+   In [`laptop-runner.js`](./laptop-runner.js):
+   - For commands launching GUI/TUI windows (starting with `start ` or running interactive TUIs like `yazi`), spawn detached with `stdio: 'ignore'` and call `child.unref()`.
+   - For CLI commands, spawn `powershell.exe -NoProfile -NonInteractive -Command` using `stdio: ['ignore', 'pipe', 'pipe']`.
+   - Extend timeout to `180000` ms (3 minutes) for installation commands.
+3. **Stream Real-Time Progress (`COMMAND_PROGRESS`)**:
+   [`laptop-runner.js`](./laptop-runner.js) throttles `stdout`/`stderr` chunks and sends `COMMAND_PROGRESS` WebSocket frames every 2 seconds with the latest output lines. [`laptop-bridge.js`](./laptop-bridge.js) refreshes the task timeout timer on each chunk and forwards progress to the user's status message.
+
+---
+
+### 15. Targeted Window Screenshot Minimizes, Closes, or Captures Desktop Background
+
+#### 🔴 Symptom
+When asking the agent to take a screenshot of an open application window (e.g. *"take a screenshot of Gemini"*, *"screenshot Brave"*, or *"screenshot yazi"*):
+1. The target application abruptly shrinks, unmaximizes, or hides behind other windows.
+2. Telegram Desktop minimizes itself.
+3. The resulting screenshot captures the empty desktop background or an unintended window instead of the requested app.
+
+#### 🔍 Root Cause
+1. **Unwanted Window Minimization**: Legacy capture scripts contained a helper `find_and_minimize_telegram()` that actively minimized Telegram Desktop using Win32 `SW_MINIMIZE (6)` or sent close/minimize keys.
+2. **Destructive Restore on Maximized Windows**: Calling `ShowWindow(hwnd, 9)` (`SW_RESTORE`) on an already maximized browser window restores it to its normal floating dimensions, causing it to shrink or disappear behind other windows.
+3. **OS Foreground Focus Lock**: Windows forbids background processes from grabbing focus without an active user event, causing standard `.activate()` calls to fail silently.
+
+#### 🛠️ Fix
+1. **Remove All Minimization/Closing Logic**:
+   Completely removed `find_and_minimize_telegram` and `restore_telegram` from both [`tools/capture_app.py`](./tools/capture_app.py) and [`tools/request_approval.py`](./tools/request_approval.py). The system never alters other windows.
+2. **Iconic State Check with Safe Foreground Bypass**:
+   Use `bring_window_to_front(hwnd)`:
+   ```python
+   def bring_window_to_front(hwnd):
+       try:
+           # ONLY restore if the window is actually minimized
+           if user32.IsIconic(hwnd):
+               user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+               time.sleep(0.25)
+           else:
+               # Preserve Maximized or Normal state
+               user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+           # Bypass Windows foreground lock using Alt key simulation
+           user32.keybd_event(0x12, 0, 0, 0)      # Alt down
+           user32.SetForegroundWindow(hwnd)
+           user32.BringWindowToTop(hwnd)
+           user32.keybd_event(0x12, 0, 2, 0)      # Alt up
+           time.sleep(0.35)                       # Wait for repaint
+       except Exception:
+           pass
+   ```
+3. **Case-Insensitive Substring Match**:
+   Enumerate visible windows via `EnumWindows` and match against title strings (e.g. querying `"gemini"` matches `"Google Gemini - Brave"` and crops the window bounds accurately with `isDesktopFallback: false`).
+
+---
+
+### 16. Follow-up Prompts Trapped or Ignored During Active Agent Execution
+
+#### 🔴 Symptom
+While the agent is busy running a multi-step task or an installation command, sending a follow-up message in chat (e.g. *"Can you take a screenshot of the progress?"* or *"What's taking so long?"*) produces no immediate response. The message is either dropped or ignored until after the entire agent run finishes.
+
+#### 🔍 Root Cause
+The per-user concurrency queue in [`bot.js`](./bot.js) used a boolean `q.isProcessing = true` lock. When new messages arrived during an active turn, `triggerUserQueueExecution` returned silently, buffering messages in `q.items` without notifying the user or passing context to the active agent loop.
+
+#### 🛠️ Fix
+1. **Instant Acknowledgment & Status Feedback**:
+   In `enqueueUserMessage`, when a message arrives while a task is running:
+   The bot immediately sends: `⚙️ *Task in progress! Queued your follow-up request...*` (throttled to avoid duplicate spam).
+2. **Instant Concurrent Checks**:
+   - If the user asks for a screenshot (e.g. *"take a screenshot"*, *"screenshot"*), `handleConcurrentScreenshot` immediately fires an asynchronous capture and delivers the image to Telegram without interrupting the running task.
+   - If the user queries progress, `handleConcurrentStatusCheck` responds with the current status and elapsed time.
+3. **Mid-Task Agent Context Polling (`pollUserQueue`)**:
+   [`gemini-agent-service.js`](./gemini-agent-service.js) accepts a `pollUserQueue` callback. After each tool finishes, the agent checks the queue. If follow-up text exists, it injects:
+   `[USER MID-TASK FOLLOW-UP / PRIORITY INSTRUCTION]: "<text>"`
+   directly into the model's next interaction turn.
+4. **Guaranteed Chained Queue Execution**:
+   In [`bot.js`](./bot.js), both `handleAgentCommand` and `triggerUserQueueExecution` contain `finally` blocks that clear debounce timers and immediately trigger the next turn if items remain in `q.items`.
+
+---
+
+### 17. Task Cancellation and Emergency Queue Purge (`/stop`, `/abort`, `/cancel`)
+
+#### 🔴 Symptom
+A long-running agent command or incorrect prompt cannot be halted without stopping the cloud bot service or killing processes on the laptop.
+
+#### 🔍 Root Cause
+No abort signaling existed between the Telegram command dispatcher and the active `runGeminiAgent` iteration loop.
+
+#### 🛠️ Fix
+1. **Active Session Tracking**:
+   [`bot.js`](./bot.js) tracks active agent executions in `activeAgentSessions` (`Map<userId, session>`) containing an `AbortController`.
+2. **Immediate Stop Handlers**:
+   - Added command handlers for `/stop` and `/abort`.
+   - Updated `/cancel` to check `activeAgentSessions` and signal abort.
+   - Any chat message containing `stop`, `abort`, or `cancel` during an active task triggers `handleTaskStop(userId, ctx)`.
+3. **Queue Purge & Agent Termination**:
+   Calling `handleTaskStop` aborts `session.abortController`, calls `clearUserQueue(userId)` to discard pending debounced requests, and sends:
+   `🛑 *Active agent task stopped and pending queue cleared.*`
 
 ---
 

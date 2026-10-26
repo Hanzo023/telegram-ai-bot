@@ -226,6 +226,7 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+    context.onStatusUpdate?.('📸 *Capturing screenshot and sending to Telegram...*');
     const windowTitle = args.window_title || args.windowTitle || args.title || undefined;
     const caption = args.caption || undefined;
     try {
@@ -241,6 +242,27 @@ export async function executeTool(name, args = {}, context = {}) {
         });
       }
       return JSON.stringify({ error: res?.error || 'Failed to capture screenshot.' });
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // Live Laptop Open Windows Enumeration
+  if (
+    [
+      'list_open_windows',
+      'list_windows',
+      'get_windows',
+      'open_windows',
+      'enumerate_windows',
+    ].includes(norm)
+  ) {
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    try {
+      const res = await listLaptopWindows(context.userId, 12000);
+      return JSON.stringify(res);
     } catch (err) {
       return JSON.stringify({ error: err.message });
     }
@@ -302,8 +324,13 @@ export async function executeTool(name, args = {}, context = {}) {
       args.workingDirectory ||
       context.detectedWorkingDir ||
       undefined;
+    const onProgress = context.onStatusUpdate
+      ? (progressText) => {
+          context.onStatusUpdate?.(`⚙️ *Executing terminal command...*\n\`\`\`\n${progressText}\n\`\`\``);
+        }
+      : undefined;
     try {
-      const res = await runLaptopCommand(context.userId, command, effectiveCwd);
+      const res = await runLaptopCommand(context.userId, command, effectiveCwd, onProgress);
       return JSON.stringify(res);
     } catch (err) {
       return JSON.stringify({ error: err.message });
@@ -655,14 +682,31 @@ export async function executeTool(name, args = {}, context = {}) {
       }
     }
 
+    case 'list_open_windows': {
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      try {
+        const res = await listLaptopWindows(context.userId, 12000);
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
     case 'run_laptop_terminal': {
       const { command, cwd } = args;
       if (!context.userId) {
         return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
       }
       const effectiveCwd = cwd || undefined;
+      const onProgress = context.onStatusUpdate
+        ? (progressText) => {
+            context.onStatusUpdate?.(`⚙️ *Executing terminal command...*\n\`\`\`\n${progressText}\n\`\`\``);
+          }
+        : undefined;
       try {
-        const res = await runLaptopCommand(context.userId, command, effectiveCwd);
+        const res = await runLaptopCommand(context.userId, command, effectiveCwd, onProgress);
         return JSON.stringify(res);
       } catch (err) {
         return JSON.stringify({ error: err.message });
@@ -723,6 +767,41 @@ export async function executeTool(name, args = {}, context = {}) {
       }
     }
 
+    case 'take_screenshot': {
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      context.onStatusUpdate?.('📸 *Capturing screenshot and sending to Telegram...*');
+      try {
+        const windowTitle = args.window_title || args.windowTitle || args.title || null;
+        const caption = args.caption || (windowTitle ? `📸 Screenshot: ${windowTitle}` : '📸 Desktop Screenshot');
+        const res = await captureLaptopScreenshot(context.userId, {
+          windowTitle,
+          caption,
+          sendDirect: true,
+        });
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
+    case 'request_laptop_approval': {
+      if (!context.userId) {
+        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+      }
+      try {
+        const res = await requestLaptopApproval(context.userId, {
+          title: args.title || 'Action Approval',
+          message: args.message || 'The agent is requesting approval on your laptop.',
+          actionPayload: args.action_payload,
+        });
+        return JSON.stringify(res);
+      } catch (err) {
+        return JSON.stringify({ error: err.message });
+      }
+    }
+
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
@@ -746,6 +825,8 @@ export async function runGeminiAgent({
   userDirectory,
   recentHistory = [],
   model = null,
+  pollUserQueue = null,
+  abortSignal = null,
 }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -829,7 +910,11 @@ export async function runGeminiAgent({
           '9. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.\n\n' +
           '10. APP INSTALLATION & SCREENSHOT WORKFLOWS:\n' +
           '    When the user asks to install, launch, or screenshot an application (e.g. "install yazi, open it and take a screenshot", or "open roblox and screenshot it"):\n' +
-          '    a. Install: Use `run_laptop_terminal` with winget or package manager (e.g. `winget install --id sxyazi.yazi -e --accept-package-agreements --accept-source-agreements --silent`).\n' +
+          '    a. Install: Always use silent non-interactive flags so terminal commands never hang waiting on user stdin:\n' +
+          '       • winget: `winget install <id> -e --silent --accept-package-agreements --accept-source-agreements`\n' +
+          '       • pip: `pip install <package> --no-input -q`\n' +
+          '       • npm: `npm install <package> --yes --no-audit --no-fund`\n' +
+          '       CRITICAL: Never run commands that prompt for user confirmation without non-interactive flags.\n' +
           '    b. Launch: Interactive TUIs (like Yazi) or terminal programs CANNOT run in headless background subprocesses. You MUST launch them in a visible GUI terminal window via `run_laptop_terminal(command="start cmd /k yazi")` or `start wt cmd /k yazi`. For GUI desktop apps, use `run_laptop_terminal(command="start <app_name>")` (e.g. `start roblox:`, `start brave`).\n' +
           '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. The system will automatically allow 1.5 seconds for the window to paint, bring it to the foreground, and deliver the screenshot directly to Telegram.',
       });
@@ -837,6 +922,15 @@ export async function runGeminiAgent({
       let stepCount = 0;
 
       while (stepCount < maxSteps) {
+        if (abortSignal?.aborted) {
+          return {
+            finalAnswer: '🛑 Agent task was stopped by user request.',
+            stepsExecuted,
+            success: false,
+            stopped: true,
+          };
+        }
+
         stepCount++;
         const steps = currentResponse.steps || [];
         const functionCallStep = steps.find((s) => s.type === 'function_call');
@@ -912,24 +1006,58 @@ export async function runGeminiAgent({
           userDirectory,
           detectedWorkingDir,
           prompt,
+          onStatusUpdate,
         });
+
+        if (abortSignal?.aborted) {
+          return {
+            finalAnswer: '🛑 Agent task was stopped by user request.',
+            stepsExecuted,
+            success: false,
+            stopped: true,
+          };
+        }
+
+        let midTaskInstruction = null;
+        if (typeof pollUserQueue === 'function') {
+          try {
+            midTaskInstruction = pollUserQueue();
+          } catch (err) {
+            console.error('[Gemini Agent pollUserQueue Error]:', err);
+          }
+        }
+
+        if (midTaskInstruction && onStatusUpdate) {
+          onStatusUpdate(`📥 *Received follow-up:* "${midTaskInstruction.slice(0, 45)}..."`);
+        }
 
         if (onStatusUpdate) {
           onStatusUpdate(`🧠 *Analyzing results from ${toolName}...*`);
+        }
+
+        const nextInput = [
+          {
+            type: 'function_result',
+            name: toolName,
+            call_id: functionCallStep.id,
+            result: toolResult,
+          },
+        ];
+
+        if (midTaskInstruction) {
+          nextInput.push({
+            type: 'text',
+            text:
+              `[USER MID-TASK FOLLOW-UP / PRIORITY INSTRUCTION]: "${midTaskInstruction}"\n` +
+              `(The user provided this instruction while the previous tool was executing. Please address this instruction immediately, such as taking a screenshot, reporting progress, or adapting your plan.)`,
+          });
         }
 
         // Send tool result back to the model
         currentResponse = await ai.interactions.create({
           model,
           previous_interaction_id: currentResponse.id,
-          input: [
-            {
-              type: 'function_result',
-              name: toolName,
-              call_id: functionCallStep.id,
-              result: toolResult,
-            },
-          ],
+          input: nextInput,
         });
       }
 

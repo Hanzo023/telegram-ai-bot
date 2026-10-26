@@ -280,7 +280,7 @@ export function getAllConnectedLaptops(allowedUserIds) {
 
  */
 
-export function sendLaptopTask(userId, action, payload = {}, timeoutMs = 60000) {
+export function sendLaptopTask(userId, action, payload = {}, timeoutMs = 60000, onProgress = null) {
 
   const userDevices = connectedLaptops.get(Number(userId));
 
@@ -332,7 +332,7 @@ export function sendLaptopTask(userId, action, payload = {}, timeoutMs = 60000) 
 
   return new Promise((resolve, reject) => {
 
-    const timer = setTimeout(() => {
+    let timer = setTimeout(() => {
 
       pendingRequests.delete(requestId);
 
@@ -342,7 +342,21 @@ export function sendLaptopTask(userId, action, payload = {}, timeoutMs = 60000) 
 
 
 
-    pendingRequests.set(requestId, { resolve, reject, timer });
+    pendingRequests.set(requestId, {
+
+      resolve,
+
+      reject,
+
+      timer,
+
+      timeoutMs,
+
+      action,
+
+      onProgress,
+
+    });
 
 
 
@@ -424,9 +438,9 @@ export function joinLaptopPath(baseDir, relativePath) {
 
  */
 
-export async function runLaptopCommand(userId, command, cwd) {
+export async function runLaptopCommand(userId, command, cwd, onProgress = null) {
 
-  return await sendLaptopTask(userId, 'run_command', { command, cwd }, 90000);
+  return await sendLaptopTask(userId, 'run_command', { command, cwd }, 180000, onProgress);
 
 }
 
@@ -1093,6 +1107,34 @@ export function setupLaptopBridge(server, allowedUserIds) {
           }
 
 
+
+          // Handle streaming command progress
+          if (msg.type === 'COMMAND_PROGRESS' && msg.id && pendingRequests.has(msg.id)) {
+            const pending = pendingRequests.get(msg.id);
+            // Reset / extend timeout timer so active running commands don't time out while streaming progress
+            if (pending.timer) {
+              clearTimeout(pending.timer);
+            }
+            pending.timer = setTimeout(() => {
+              pendingRequests.delete(msg.id);
+              pending.reject(
+                new Error(
+                  `Laptop task "${pending.action || 'command'}" timed out after ${
+                    (pending.timeoutMs || 180000) / 1000
+                  } seconds of inactivity.`
+                )
+              );
+            }, pending.timeoutMs || 180000);
+
+            if (msg.output && typeof pending.onProgress === 'function') {
+              try {
+                pending.onProgress(msg.output);
+              } catch (progErr) {
+                console.warn('[Laptop Bridge] onProgress callback error:', progErr.message);
+              }
+            }
+            return;
+          }
 
           // Handle response to pending task
 

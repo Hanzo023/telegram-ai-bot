@@ -1220,6 +1220,70 @@ setInterval(() => {
 const userQueues = new Map();
 const DEBOUNCE_DELAY_MS = 2000;
 
+// Active autonomous agent execution sessions: userId -> session
+const activeAgentSessions = new Map();
+
+async function handleTaskStop(userId, ctx) {
+  const activeSession = activeAgentSessions.get(userId);
+  let stoppedAgent = false;
+
+  if (activeSession) {
+    try {
+      activeSession.abortController.abort();
+    } catch {}
+    activeAgentSessions.delete(userId);
+    stoppedAgent = true;
+  }
+
+  clearUserQueue(userId);
+
+  const msg = stoppedAgent
+    ? '🛑 *Active agent task stopped and pending queue cleared.*'
+    : '🛑 *Pending message queue cleared. Ready for your next command.*';
+
+  try {
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  } catch {
+    await ctx.reply(msg.replace(/[*_`]/g, ''));
+  }
+}
+
+async function handleConcurrentScreenshot(userId, ctx, rawText = '') {
+  try {
+    await ctx.reply('📸 *Capturing live screenshot while task is running...*', { parse_mode: 'Markdown' });
+
+    let windowTitle = null;
+    const windowMatch = rawText.match(/(?:screenshot|screen|window|capture)\s+(?:of\s+)?([a-zA-Z0-9_-]+)/i);
+    if (windowMatch && !['of', 'the', 'a', 'progress', 'task', 'laptop', 'desktop'].includes(windowMatch[1].toLowerCase())) {
+      windowTitle = windowMatch[1];
+    }
+
+    const caption = windowTitle
+      ? `📸 Live capture of "${windowTitle}" during active task`
+      : '📸 Live desktop capture during active task';
+
+    const res = await captureLaptopScreenshot(userId, { windowTitle, caption }, 25000);
+    if (!res || !res.success) {
+      await ctx.reply(`⚠️ Could not capture live screen: ${res?.error || 'Laptop busy or unresponsive'}`);
+    }
+  } catch (err) {
+    console.error(`[Concurrent Screenshot Error for ${userId}]:`, sanitizeError(err));
+  }
+}
+
+async function handleConcurrentStatusCheck(userId, ctx, session) {
+  try {
+    const elapsedSec = Math.round((Date.now() - session.startedAt) / 1000);
+    const currentStatus = session.lastStatusText || '⚙️ Processing autonomous task...';
+    await ctx.reply(
+      `⏱️ *Task Running (${elapsedSec}s elapsed):*\n${currentStatus}\n\n` +
+      `💡 _Your follow-up is queued and will execute after the current tool step._\n` +
+      `_Send /stop anytime to abort the task._`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch {}
+}
+
 function getUserQueue(userId) {
   let q = userQueues.get(userId);
   if (!q) {
@@ -1258,6 +1322,41 @@ function registerPendingDownload(userId, ctx) {
 
 function enqueueUserMessage(userId, item, ctx) {
   const q = getUserQueue(userId);
+
+  const activeSession = activeAgentSessions.get(userId);
+  const isAgentRunning = !!activeSession || q.isProcessing;
+
+  if (isAgentRunning && item.type === 'text') {
+    const rawText = (item.text || '').trim();
+
+    // 1. Immediate interrupt check (/stop, /abort, /cancel)
+    if (/^(?:\/(?:stop|cancel|abort)|stop|abort|cancel)$/i.test(rawText)) {
+      handleTaskStop(userId, ctx);
+      return;
+    }
+
+    // 2. Concurrent snapshot / progress check if requested
+    const isScreenshotRequest =
+      /\b(take|get|capture|show|grab)?\s*(?:a\s+)?(?:screen|screenshot|desktop|snapshot|progress\s+pic)\b/i.test(rawText);
+    const isStatusQuery =
+      /\b(status|progress|how\s+far|what's\s+happening|is\s+it\s+done|are\s+you\s+done)\b/i.test(rawText);
+
+    if (isScreenshotRequest && isLaptopConnected(userId)) {
+      handleConcurrentScreenshot(userId, ctx, rawText);
+    } else if (isStatusQuery && activeSession) {
+      handleConcurrentStatusCheck(userId, ctx, activeSession);
+    }
+
+    // 3. Send quick status acknowledgment (throttled to at most once every 2.5s)
+    const now = Date.now();
+    const lastAck = activeSession ? activeSession.lastAckTime : (q.lastAckTime || 0);
+    if (now - lastAck > 2500) {
+      if (activeSession) activeSession.lastAckTime = now;
+      q.lastAckTime = now;
+      ctx.reply('⚙️ *Task in progress! Queued your follow-up request...*', { parse_mode: 'Markdown' }).catch(() => {});
+    }
+  }
+
   q.items.push(item);
   q.latestCtx = ctx;
 
@@ -1318,13 +1417,12 @@ async function triggerUserQueueExecution(userId) {
       scheduleDebounce(userId);
     } else if (q.items.length > 0) {
       if (q.timer) {
-        // Debounce timer is still ticking down from a recent incoming message
-      } else {
-        // Debounce period already completed while AI was generating; trigger next turn immediately
-        triggerUserQueueExecution(userId).catch((err) => {
-          console.error(`Error in chained user queue execution for ${userId}:`, sanitizeError(err));
-        });
+        clearTimeout(q.timer);
+        q.timer = null;
       }
+      triggerUserQueueExecution(userId).catch((err) => {
+        console.error(`Error in chained user queue execution for ${userId}:`, sanitizeError(err));
+      });
     } else {
       if (!q.timer && q.activeDownloads === 0) {
         userQueues.delete(userId);
@@ -1622,24 +1720,108 @@ async function executeSavePendingFile(ctx, userId, targetDestination, isCallback
 
 async function handleAgentCommand(ctx, prompt) {
   const userId = ctx.from.id;
+  const q = getUserQueue(userId);
+  const wasAlreadyProcessing = q.isProcessing;
+  q.isProcessing = true;
+
   const statusMsg = await ctx.reply('🤖 *Gemini Agent initialized...*', { parse_mode: 'Markdown' });
-  let lastEditTime = Date.now();
+  let lastEditTime = 0;
+  let pendingUpdate = null;
+  let editTimeout = null;
+  let isEditing = false;
+
+  const abortController = new AbortController();
+  const session = {
+    abortController,
+    ctx,
+    statusMsgId: statusMsg.message_id,
+    startedAt: Date.now(),
+    lastAckTime: 0,
+    lastStatusText: '🤖 Agent initialized...',
+    prompt,
+  };
+  activeAgentSessions.set(userId, session);
+
+  const pollUserQueue = () => {
+    const queue = userQueues.get(userId);
+    if (!queue || !queue.items || queue.items.length === 0) return null;
+
+    const textMessages = [];
+    const remainingItems = [];
+
+    for (const item of queue.items) {
+      if (item.type === 'text' && item.text) {
+        const trimmed = item.text.trim();
+        if (/^(?:\/(?:stop|cancel|abort)|stop|abort|cancel)$/i.test(trimmed)) {
+          abortController.abort();
+          clearUserQueue(userId);
+          return null;
+        }
+        textMessages.push(trimmed);
+      } else {
+        remainingItems.push(item);
+      }
+    }
+
+    queue.items = remainingItems;
+
+    if (textMessages.length === 0) return null;
+    return textMessages.join('\n\n');
+  };
+
+  const performEdit = async (text) => {
+    session.lastStatusText = text;
+    if (isEditing) {
+      pendingUpdate = text;
+      return;
+    }
+    isEditing = true;
+    lastEditTime = Date.now();
+
+    let formattedText = text;
+    // Format multi-line terminal progress cleanly inside a code block
+    if (!formattedText.includes('```') && formattedText.includes('\n')) {
+      formattedText = `⚙️ *Terminal in progress:*\n\`\`\`\n${formattedText.trim()}\n\`\`\``;
+    }
+
+    try {
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, formattedText, {
+        parse_mode: 'Markdown',
+      });
+    } catch {
+      try {
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          formattedText.replace(/[*_`\[\]()]/g, '')
+        );
+      } catch {}
+    } finally {
+      isEditing = false;
+    }
+  };
 
   const updateStatus = async (statusText) => {
-    if (Date.now() - lastEditTime > 900) {
-      lastEditTime = Date.now();
-      try {
-        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, statusText, {
-          parse_mode: 'Markdown',
-        });
-      } catch {
-        try {
-          await ctx.api.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            statusText.replace(/[*_`\[\]()]/g, '')
-          );
-        } catch {}
+    const now = Date.now();
+    const elapsed = now - lastEditTime;
+
+    if (elapsed >= 1500 && !isEditing) {
+      if (editTimeout) {
+        clearTimeout(editTimeout);
+        editTimeout = null;
+      }
+      await performEdit(statusText);
+    } else {
+      pendingUpdate = statusText;
+      if (!editTimeout) {
+        editTimeout = setTimeout(async () => {
+          editTimeout = null;
+          if (pendingUpdate) {
+            const nextText = pendingUpdate;
+            pendingUpdate = null;
+            await performEdit(nextText);
+          }
+        }, Math.max(0, 1500 - elapsed));
       }
     }
   };
@@ -1657,8 +1839,15 @@ async function handleAgentCommand(ctx, prompt) {
       recentHistory,
       maxSteps: 25,
       model: userModel,
+      pollUserQueue,
+      abortSignal: abortController.signal,
       onStatusUpdate: (text) => updateStatus(text),
     });
+
+    if (editTimeout) {
+      clearTimeout(editTimeout);
+      editTimeout = null;
+    }
 
     await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
@@ -1691,6 +1880,10 @@ async function handleAgentCommand(ctx, prompt) {
     conversationHistory.set(userId, history);
     scheduleConversationHistoryPersistence();
   } catch (err) {
+    if (editTimeout) {
+      clearTimeout(editTimeout);
+      editTimeout = null;
+    }
     console.error('[Gemini Agent Error]:', sanitizeError(err));
     const rawError = err.message || 'Failed to complete agent task.';
     let edited = false;
@@ -1717,6 +1910,30 @@ async function handleAgentCommand(ctx, prompt) {
         await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
       } catch {}
       await ctx.reply(`❌ Gemini Agent Error:\n${rawError}`).catch(() => {});
+    }
+  } finally {
+    if (editTimeout) {
+      clearTimeout(editTimeout);
+      editTimeout = null;
+    }
+    activeAgentSessions.delete(userId);
+    if (!wasAlreadyProcessing) {
+      q.isProcessing = false;
+      if (q.activeDownloads > 0) {
+        scheduleDebounce(userId);
+      } else if (q.items.length > 0) {
+        if (q.timer) {
+          clearTimeout(q.timer);
+          q.timer = null;
+        }
+        triggerUserQueueExecution(userId).catch((err) => {
+          console.error(`Error in chained user queue execution for ${userId}:`, sanitizeError(err));
+        });
+      } else {
+        if (!q.timer && q.activeDownloads === 0) {
+          userQueues.delete(userId);
+        }
+      }
     }
   }
 }
@@ -2283,6 +2500,17 @@ bot.command('agent', async (ctx) => {
     );
     return;
   }
+
+  const userId = ctx.from.id;
+  const q = getUserQueue(userId);
+  if (activeAgentSessions.has(userId) || q.isProcessing) {
+    enqueueUserMessage(userId, {
+      type: 'text',
+      text: prompt,
+    }, ctx);
+    return;
+  }
+
   await handleAgentCommand(ctx, prompt);
 });
 
@@ -3031,11 +3259,26 @@ bot.command(['download', 'dl', 'tiktok'], async (ctx) => {
   );
 });
 
+// Stop / Abort active agent task or drain queue
+bot.command(['stop', 'abort'], async (ctx) => {
+  const userId = ctx.from.id;
+  await handleTaskStop(userId, ctx);
+});
+
 // Cancel Active Command Mode Command
 bot.command('cancel', async (ctx) => {
   const userId = ctx.from.id;
   const active = userActiveMode.get(userId);
   userActiveMode.delete(userId);
+
+  const activeSession = activeAgentSessions.get(userId);
+  if (activeSession) {
+    try {
+      activeSession.abortController.abort();
+    } catch {}
+    activeAgentSessions.delete(userId);
+  }
+  clearUserQueue(userId);
 
   const wasAgentMode = !!userAgentMode.get(userId);
   if (wasAgentMode) {
@@ -3048,6 +3291,10 @@ bot.command('cancel', async (ctx) => {
   }
 
   const cancelled = [];
+
+  if (activeSession) {
+    cancelled.push('🛑 Running Agent Task');
+  }
 
   if (pendingFiles.has(userId)) {
     const p = pendingFiles.get(userId);
@@ -4835,10 +5082,18 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
     clearInterval(typingInterval);
     if (!wasAlreadyProcessing) {
       q.isProcessing = false;
-      if (q.items.length > 0 && !q.timer && q.activeDownloads === 0) {
+      if (q.items.length > 0 && q.activeDownloads === 0) {
+        if (q.timer) {
+          clearTimeout(q.timer);
+          q.timer = null;
+        }
         triggerUserQueueExecution(userId).catch((err) => {
           console.error(`Error in chained user queue execution for ${userId}:`, sanitizeError(err));
         });
+      } else {
+        if (!q.timer && q.activeDownloads === 0) {
+          userQueues.delete(userId);
+        }
       }
     }
   }

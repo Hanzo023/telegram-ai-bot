@@ -1,45 +1,64 @@
-# Git Setup Instructions
+# Git Setup & Branch Workflow Instructions
 
-Since git is not currently installed on your system, follow these steps after installing git:
+This repository uses a two-tier branching strategy:
+* **`main`**: Production deployment branch connected to automated cloud hosting (Render).
+* **`Testing-branch`**: Active feature development, bug fixes, and integration testing branch.
 
-## Install Git
+---
 
-Download and install Git from: https://git-scm.com/download/win
+## 🚀 Daily Development Workflow (`Testing-branch`)
 
-## Initialize Repository
-
-Once git is installed, run these commands in the project directory:
+When working on bug fixes, agent tool enhancements, or test routines, always develop and push to `Testing-branch`:
 
 ```bash
-# Initialize git repository
-git init
+# 1. Ensure you are on the Testing-branch
+git checkout Testing-branch
 
-# Stage all files
-git add .
+# 2. Check changed files and ensure no credentials or temp files are staged
+git status
 
-# Make initial commit
-git commit -m "feat: initial telegram claude bot"
+# 3. Stage modified files
+git add bot.js laptop-runner.js laptop-bridge.js gemini-agent-service.js tools/ README.md TROUBLESHOOTING.md
+
+# 4. Commit with descriptive semantic message
+git commit -m "fix: terminal progress streaming, non-destructive window vision, and queue follow-up handling"
+
+# 5. Push directly to remote Testing-branch (do NOT push to main during test cycles)
+git push origin Testing-branch
 ```
 
-## Verify .gitignore
+---
 
-The .gitignore file is configured to exclude:
+## 🔒 Security & `.gitignore` Verification
+
+The repository is configured to exclude sensitive files:
 - `node_modules/` (dependencies)
-- `.env` (sensitive credentials)
+- `.env` (API keys, bot token, secret credentials)
+- `agent_vision.png`, `runner.log` (local runtime artifacts)
 
-You can verify by running:
+Verify before committing:
 ```bash
 git status
 ```
+> [!CAUTION]
+> Never commit `.env` or any file containing API keys (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`) to Git.
 
-Make sure `.env` does NOT appear in the list of files to be committed.
+---
 
-## Optional: Add Remote Repository
+## 🔀 Merging from `Testing-branch` into `main` (Production Release)
 
-To push to a remote repository (GitHub, GitLab, etc.):
+Once changes on `Testing-branch` are verified:
 
 ```bash
-git remote add origin <your-repository-url>
-git branch -M main
-git push -u origin main
+# 1. Switch to main
+git checkout main
+
+# 2. Pull latest remote main
+git pull origin main
+
+# 3. Merge tested changes
+git merge Testing-branch
+
+# 4. Push release to production
+git push origin main
 ```

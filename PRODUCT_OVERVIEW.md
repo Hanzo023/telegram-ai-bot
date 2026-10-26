@@ -63,6 +63,12 @@ Studying for an exam or learning a new framework?
 * Drop a lecture PDF, cheat-sheet, or code file into chat and type `/quiz`.
 * The bot instantly generates an interactive 5-question multiple choice test with explanations to test your comprehension.
 
+### 7. 📸 Live PC Vision & Targeted Window Screenshots
+Want to see what's on your computer screen or verify a program without being in front of it?
+* Simply ask: *"take a screenshot"*, *"screenshot Brave"*, or *"screenshot Gemini"*
+* **Non-Destructive Capture**: Accurately brings the target window to the foreground without closing, minimizing, or un-maximizing anything.
+* **Mid-Task Checks**: Even while a long installation or terminal script is running, send *"take a screenshot of the progress"* to get an instant live desktop capture delivered directly to Telegram!
+
 ---
 
 ## 🕹️ Everyday Commands Cheat-Sheet
@@ -71,6 +77,8 @@ Studying for an exam or learning a new framework?
 | :--- | :--- | :--- |
 | **Check PC Health** | `/spec` | Shows CPU, dual GPUs, RAM, battery, and free disk space |
 | **Run a PC Task** | `/agent <task>` | Executes terminal commands, reads files, and fixes issues |
+| **Stop Running Task**| `/stop` or `/abort` | Immediately halts active agent execution and clears queue |
+| **Capture Screen** | `/agent take a screenshot` | Captures desktop or targeted window without minimizing |
 | **Check Bot Uptime** | `/status` | Shows cloud bot uptime, runner connection, and active devices |
 | **Spoken Voice Notes**| `/live` | Toggles spoken voice replies on/off |
 | **Real-Time Phone Call**| `/call` | Opens a live duplex voice call WebApp |

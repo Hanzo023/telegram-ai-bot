@@ -2,15 +2,17 @@
 
 OS-level targeted window and desktop capture utility.
 Eliminates manual screenshot taking by programmatically capturing application windows or full desktop.
+Uses fast ctypes EnumWindows enumeration and safe_focus to prevent Windows OS foreground locks and hangs.
 """
 
 import sys
 import os
 import time
 import datetime
+import threading
 import ctypes
 from ctypes import wintypes
-from PIL import Image
+from PIL import Image, ImageGrab
 
 # Ensure standard UTF-8 output on Windows consoles
 if hasattr(sys.stdout, "reconfigure"):
@@ -20,6 +22,8 @@ if hasattr(sys.stderr, "reconfigure"):
 
 user32 = ctypes.windll.user32 if sys.platform == "win32" else None
 kernel32 = ctypes.windll.kernel32 if sys.platform == "win32" else None
+
+OUTPUT_FILE = "agent_vision.png"
 
 def ensure_desktop_access():
     """Ensure the calling thread is attached to the active input desktop on Windows."""
@@ -56,108 +60,101 @@ def get_process_name(hwnd):
     except Exception:
         return ""
 
-def force_bring_to_front(hwnd):
+def bring_window_to_front(hwnd):
     """
-    Forcefully bring any window to the foreground on Windows without sending Alt keys.
-    Disables OS foreground lock timeout, restores minimized state, attaches thread input,
-    and calls SwitchToThisWindow.
+    Safely bring any window to the foreground on Windows bypassing OS focus lock
+    using Alt key simulation and SW_RESTORE wrapped in try...except.
+    ONLY restores if the window is iconic/minimized so maximized windows do not shrink.
     """
-    if not hwnd or sys.platform != 'win32' or not user32:
-        return False
     try:
-        ensure_desktop_access()
-
-        # 1. Disable OS foreground lock timeout (prevents focus stealing block without sending Alt)
-        user32.SystemParametersInfoA(0x2001, 0, 0, 0x0002 | 0x0001)
-
-        # 2. Restore window if minimized
+        if not hwnd or sys.platform != 'win32' or not user32:
+            return
+        # ONLY restore if the window is minimized (iconic)
         if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9) # SW_RESTORE
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            time.sleep(0.25)
         else:
-            user32.ShowWindow(hwnd, 5) # SW_SHOW
+            # Keep its current Maximized or Normal state, just ensure it's visible
+            user32.ShowWindow(hwnd, 5)  # SW_SHOW
 
-        # 3. AttachThreadInput to steal foreground from current active window
-        fg_hwnd = user32.GetForegroundWindow()
-        fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None)
-        cur_tid = kernel32.GetCurrentThreadId()
-
-        if fg_tid and fg_tid != cur_tid:
-            user32.AttachThreadInput(cur_tid, fg_tid, True)
-
-        user32.BringWindowToTop(hwnd)
+        # Bypass Windows foreground lock safely using Alt key press/release
+        user32.keybd_event(0x12, 0, 0, 0)      # Alt down
         user32.SetForegroundWindow(hwnd)
-        user32.SetActiveWindow(hwnd)
-
-        if fg_tid and fg_tid != cur_tid:
-            user32.AttachThreadInput(cur_tid, fg_tid, False)
-
-        # 4. SwitchToThisWindow as guaranteed backup
-        user32.SwitchToThisWindow(hwnd, True)
-
-        # Allow Windows DWM compositor time to swap and paint window to screen buffer
-        time.sleep(0.4)
-        return True
-    except Exception:
-        return False
-
-import pygetwindow as gw
-import pyautogui
-
-# Set PyAutoGUI failsafe to False to allow capturing full-screen corners safely
-pyautogui.FAILSAFE = False
-
-OUTPUT_FILE = "agent_vision.png"
-
-def find_and_minimize_telegram():
-    """
-    Finds the active Telegram Desktop window, temporarily minimizes it so it doesn't block
-    desktop screenshots, and returns its HWND (or None) so it can be restored afterward.
-    """
-    if not (user32 and gw):
-        return None
-    try:
-        for w in gw.getAllWindows():
-            hwnd = getattr(w, '_hWnd', None)
-            if not hwnd:
-                continue
-            exe = get_process_name(hwnd)
-            is_tg = (exe == 'telegram.exe') or ('telegram' in (w.title or '').lower())
-            if is_tg and not user32.IsIconic(hwnd) and w.width > 150 and w.height > 150:
-                user32.ShowWindow(hwnd, 6) # SW_MINIMIZE
-                time.sleep(0.35)
-                return hwnd
+        user32.BringWindowToTop(hwnd)
+        user32.keybd_event(0x12, 0, 2, 0)      # Alt up
+        time.sleep(0.35)                       # Let window repaint in foreground
     except Exception:
         pass
-    return None
 
-def restore_telegram(hwnd):
-    """Restore Telegram Desktop window after screenshot has been captured."""
-    if hwnd and user32:
+def enum_visible_windows():
+    """
+    Fast and safe enumeration of all top-level visible windows using ctypes EnumWindows.
+    Avoids COM/pygetwindow hangs and returns list of dicts with hwnd, title, exe, rect, is_iconic.
+    """
+    windows = []
+    if sys.platform != "win32" or not user32:
+        return windows
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def enum_callback(hwnd, lparam):
         try:
-            user32.ShowWindow(hwnd, 9) # SW_RESTORE
-            time.sleep(0.1)
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value.strip().strip('\u200e\u200f\ufeff')
+            if not title:
+                return True
+
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            width = rect.right - rect.left
+            height = rect.bottom - rect.top
+            if width <= 10 or height <= 10:
+                return True
+
+            exe = get_process_name(hwnd)
+            windows.append({
+                'hwnd': hwnd,
+                'title': title,
+                'exe': exe,
+                'left': rect.left,
+                'top': rect.top,
+                'width': width,
+                'height': height,
+                'right': rect.right,
+                'bottom': rect.bottom,
+                'is_iconic': bool(user32.IsIconic(hwnd))
+            })
         except Exception:
             pass
+        return True
 
-def match_target_window(target_str):
+    cb = WNDENUMPROC(enum_callback)
+    user32.EnumWindows(cb, 0)
+    return windows
+
+def match_target_window(target_str, windows=None):
     """
-    Intelligently find the target window across ALL open windows.
-    Matches window titles, browser tabs (e.g. 'Google Gemini - Brave'), and process names.
+    Intelligently find the target window across all open windows.
+    Case-insensitive substring match across all visible window titles, browser tabs, and processes.
     """
-    if not target_str or not gw:
+    if not target_str:
         return None
+    if windows is None:
+        windows = enum_visible_windows()
 
     q = target_str.lower().strip()
-    all_windows = gw.getAllWindows()
     scored = []
 
-    for w in all_windows:
-        hwnd = getattr(w, '_hWnd', None)
-        title = (w.title or '').strip()
-        if not title:
-            continue
+    for w in windows:
+        title = w['title']
         lower_title = title.lower()
-        exe = get_process_name(hwnd) if hwnd else ""
+        exe = w['exe']
 
         # Ignore overlays and system background hosts
         if any(ign in lower_title for ign in ['windows input experience', 'program manager', 'agentcursoroverlay', 'default ime']):
@@ -169,11 +166,11 @@ def match_target_window(target_str):
         if q == lower_title:
             score += 100
         elif q in lower_title:
-            score += 50
+            score += 60
 
         # Process name matching (e.g. 'brave' matching 'brave.exe', 'gemini' matching 'gemini.exe')
         if q in exe:
-            score += 60
+            score += 50
 
         # Aliases for terminals and common apps
         if q in ['terminal', 'cmd', 'powershell', 'console', 'bash', 'yazi'] and (
@@ -194,9 +191,9 @@ def match_target_window(target_str):
             score += 85
 
         if score > 0:
-            if not w.isMinimized:
+            if not w['is_iconic']:
                 score += 15
-            if w.width > 100 and w.height > 100:
+            if w['width'] > 100 and w['height'] > 100:
                 score += 10
             scored.append((score, w))
 
@@ -206,101 +203,85 @@ def match_target_window(target_str):
 def capture_window(target_query=None):
     ensure_desktop_access()
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    screen_w, screen_h = pyautogui.size()
-    output_path = os.path.abspath(OUTPUT_FILE)
     
+    if user32:
+        screen_w = user32.GetSystemMetrics(0)
+        screen_h = user32.GetSystemMetrics(1)
+    else:
+        screen_w, screen_h = 1920, 1080
+
+    output_path = os.path.abspath(OUTPUT_FILE)
     target_str = target_query.strip() if target_query else ""
     is_desktop_req = not target_str or target_str.lower() in ["full", "desktop", "screen", "primary"]
+
+    all_windows = enum_visible_windows()
     matched_window = None
 
     if not is_desktop_req:
-        matched_window = match_target_window(target_str)
+        matched_window = match_target_window(target_str, all_windows)
 
     if matched_window:
         try:
-            hwnd = getattr(matched_window, '_hWnd', None)
-            if hwnd:
-                force_bring_to_front(hwnd)
-            else:
-                if matched_window.isMinimized:
-                    matched_window.restore()
-                    time.sleep(0.3)
-                try:
-                    matched_window.activate()
-                    time.sleep(0.3)
-                except Exception:
-                    pass
-            
-            # Re-read dimensions from Windows API
-            raw_left = matched_window.left
-            raw_top = matched_window.top
-            raw_width = matched_window.width
-            raw_height = matched_window.height
+            hwnd = matched_window['hwnd']
+            bring_window_to_front(hwnd)
 
-            if hwnd and sys.platform == 'win32' and user32:
-                try:
-                    rect = wintypes.RECT()
-                    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                        raw_left = rect.left
-                        raw_top = rect.top
-                        raw_width = rect.right - rect.left
-                        raw_height = rect.bottom - rect.top
-                except Exception:
-                    pass
-            
+            # Re-read rect after focus/restore
+            rect = wintypes.RECT()
+            raw_left = matched_window['left']
+            raw_top = matched_window['top']
+            raw_width = matched_window['width']
+            raw_height = matched_window['height']
+
+            if hwnd and user32 and user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                raw_left = rect.left
+                raw_top = rect.top
+                raw_width = rect.right - rect.left
+                raw_height = rect.bottom - rect.top
+
             # Clamp coordinates to primary display to eliminate OS negative margin borders
             left = max(0, raw_left)
             top = max(0, raw_top)
             right = min(screen_w, raw_left + raw_width)
             bottom = min(screen_h, raw_top + raw_height)
-            
+
             width = max(1, right - left)
             height = max(1, bottom - top)
-            
-            # Capture the target region
-            screenshot = pyautogui.screenshot(region=(left, top, width, height))
+
+            screenshot = ImageGrab.grab(bbox=(left, top, right, bottom))
             screenshot.save(output_path)
-            
             file_size = os.path.getsize(output_path)
-            
+
             print("=" * 80)
             print("📸 TARGETED DESKTOP VISION CAPTURE")
             print("=" * 80)
             print(f"Timestamp:         {timestamp}")
             print(f"Target Query:      '{target_str}'")
-            print(f"Matched Window:    '{matched_window.title}'")
+            print(f"Matched Window:    '{matched_window['title']}'")
             print(f"Bounding Box:      left={left}, top={top}, width={width}, height={height}")
             print(f"Screen Resolution: {screen_w}x{screen_h}")
             print(f"Saved Image:       {output_path} ({file_size:,} bytes)")
             print("Status:            SUCCESS (Window Focused & Cropped)")
             print("=" * 80)
             return True
-            
         except Exception as win_err:
             print(f"⚠️ [Vision Warning] Window crop failed ({win_err}), falling back to full screen...")
 
-    # Fallback / Entire Desktop Mode:
-    # Temporarily minimize Telegram Desktop so it doesn't block the screen!
-    minimized_tg = find_and_minimize_telegram()
-    try:
-        screenshot = pyautogui.screenshot()
-        screenshot.save(output_path)
-    finally:
-        restore_telegram(minimized_tg)
+    # Fallback / Entire Desktop Mode (do NOT minimize or close any window):
+    screenshot = ImageGrab.grab()
+    screenshot.save(output_path)
 
     file_size = os.path.getsize(output_path)
-    
     fallback_reason = (
         f"Window matching '{target_str}' not found" 
         if target_str and not is_desktop_req else "Entire Desktop Screen Requested"
     )
-    
+
     print("=" * 80)
     print("📸 PRIMARY MONITOR VISION CAPTURE")
     print("=" * 80)
     print(f"Timestamp:         {timestamp}")
     print(f"Target Query:      {f'\'{target_str}\'' if target_str else '(Entire Screen)'}")
-    print(f"Reason:            {fallback_reason} -> Captured primary monitor (Telegram minimized)")
+    print(f"Reason:            {fallback_reason} -> Captured primary monitor")
     print(f"Bounding Box:      left=0, top=0, width={screen_w}, height={screen_h}")
     print(f"Screen Resolution: {screen_w}x{screen_h}")
     print(f"Saved Image:       {output_path} ({file_size:,} bytes)")
@@ -308,7 +289,24 @@ def capture_window(target_query=None):
     print("=" * 80)
     return True
 
+def start_watchdog(timeout_seconds=7.5):
+    """Guarantees the process exits within 8 seconds max even if an OS call blocks."""
+    def watchdog_target():
+        time.sleep(timeout_seconds)
+        try:
+            out_p = os.path.abspath(OUTPUT_FILE)
+            if not os.path.exists(out_p):
+                img = ImageGrab.grab()
+                img.save(out_p)
+        except Exception:
+            pass
+        os._exit(0)
+
+    t = threading.Thread(target=watchdog_target, daemon=True)
+    t.start()
+
 if __name__ == "__main__":
+    start_watchdog(7.5)
     query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
     try:
         success = capture_window(query)

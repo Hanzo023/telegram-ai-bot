@@ -22,6 +22,14 @@ const __filename = fileURLToPath(import.meta.url);
 
 const __dirname = path.dirname(__filename);
 
+// Auto-hide console window on Windows when running as background runner (unless --visible is passed)
+if (os.platform() === 'win32' && !process.argv.includes('--visible') && !process.argv.includes('--debug')) {
+  try {
+    const hidePs = 'powershell.exe -NoProfile -NonInteractive -Command "$h=(Add-Type -MemberDefinition \'[DllImport(\\\"kernel32.dll\\\")] public static extern IntPtr GetConsoleWindow();\' -Name \'K\' -Namespace \'W\' -PassThru)::GetConsoleWindow(); if ($h -ne [IntPtr]::Zero) { (Add-Type -MemberDefinition \'[DllImport(\\\"user32.dll\\\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\' -Name \'U\' -Namespace \'W\' -PassThru)::ShowWindow($h, 0) }"';
+    exec(hidePs, () => {});
+  } catch {}
+}
+
 
 
 function getCliArg(flag) {
@@ -170,27 +178,30 @@ function buildWsUrl() {
 
 
 
-console.log('========================================================');
+if (process.stdout && process.stdout.on) {
+  process.stdout.on('error', (err) => {
+    if (err.code === 'EPIPE' || err.code === 'EBADF') return;
+  });
+}
+if (process.stderr && process.stderr.on) {
+  process.stderr.on('error', (err) => {
+    if (err.code === 'EPIPE' || err.code === 'EBADF') return;
+  });
+}
 
-console.log('💻 Telegram AI Remote Laptop Agent Runner');
-
-console.log('========================================================');
-
-console.log(`• Device Name:     ${DEVICE_NAME}`);
-
-console.log(`• Hostname:        ${rawHostname}`);
-
-console.log(`• User Account:    ${cleanUsername || 'User'}`);
-
-console.log(`• OS & Version:    ${cleanOsVersion} (${os.platform()} ${os.arch()})`);
-
-console.log(`• Target Server:   ${SERVER_URL}`);
-
-console.log(`• Bound User ID:   ${TELEGRAM_USER_ID}`);
-
-console.log(`• Outbound Only:   ✅ No open ports, fully secure on Public Wi-Fi`);
-
-console.log('========================================================\n');
+try {
+  console.log('========================================================');
+  console.log('💻 Telegram AI Remote Laptop Agent Runner');
+  console.log('========================================================');
+  console.log(`• Device Name:     ${DEVICE_NAME}`);
+  console.log(`• Hostname:        ${rawHostname}`);
+  console.log(`• User Account:    ${cleanUsername || 'User'}`);
+  console.log(`• OS & Version:    ${cleanOsVersion} (${os.platform()} ${os.arch()})`);
+  console.log(`• Target Server:   ${SERVER_URL}`);
+  console.log(`• Bound User ID:   ${TELEGRAM_USER_ID}`);
+  console.log(`• Outbound Only:   ✅ No open ports, fully secure on Public Wi-Fi`);
+  console.log('========================================================\n');
+} catch {}
 
 
 
@@ -231,17 +242,13 @@ function isRestrictedSystemPath(targetPath) {
 
 
 function log(msg) {
-
   const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
-
-  console.log(line);
-
   try {
-
-    fs.appendFileSync(LOG_FILE, line + '\n', 'utf8');
-
+    console.log(line);
   } catch {}
-
+  try {
+    fs.appendFileSync(LOG_FILE, line + '\n', 'utf8');
+  } catch {}
 }
 
 
@@ -966,7 +973,11 @@ async function handleTask(action, payload) {
       console.log(`[Runner] ⚙️ Executing: "${command}" (cwd: ${cwd || process.cwd()})`);
 
       const trimmedCmd = command.trim();
-      const isStartCmd = os.platform() === 'win32' && /^\s*start\s+/i.test(trimmedCmd);
+      const isStartCmd = os.platform() === 'win32' && (
+        /^\s*start\s+/i.test(trimmedCmd) ||
+        /\bstart\s+(?:cmd|wt)\b/i.test(trimmedCmd) ||
+        /(?:^|&&|&|;)\s*start\s+/i.test(trimmedCmd)
+      );
       const isInteractiveTui = os.platform() === 'win32' && /^(?:yazi|vim|nvim|nano|htop)\b/i.test(trimmedCmd);
 
       // If command launches a GUI or interactive window on Windows, run detached so it doesn't block the runner
@@ -979,6 +990,7 @@ async function handleTask(action, payload) {
               cwd: workingDir,
               detached: true,
               stdio: 'ignore',
+              windowsHide: false,
             });
             child.unref();
             resolve({
@@ -998,54 +1010,132 @@ async function handleTask(action, payload) {
         });
       }
 
-
+      // Determine command timeout: 180s for package managers/installs, 60s for standard
+      const isInstallCmd = /\b(?:winget|pip|npm|yarn|pnpm|choco|scoop|install)\b/i.test(command);
+      const timeoutMs = isInstallCmd ? 180000 : (parseInt(process.env.COMMAND_TIMEOUT_MS, 10) || 60000);
 
       return new Promise((resolve) => {
-
-        // Use PowerShell on Windows for modern command execution, or bash/sh on Unix
-
-        const shell = os.platform() === 'win32' ? 'powershell.exe' : '/bin/bash';
-
         const workingDir = cwd && fs.existsSync(cwd) ? cwd : process.cwd();
+        const isWindows = os.platform() === 'win32';
+        const shellExecutable = isWindows ? 'powershell.exe' : '/bin/bash';
+        const shellArgs = isWindows
+          ? ['-NoProfile', '-NonInteractive', '-Command', command]
+          : ['-c', command];
 
+        let stdout = '';
+        let stderr = '';
+        let resolved = false;
+        let lastProgressTime = 0;
+        let progressTimeout = null;
 
+        const sendProgressUpdate = () => {
+          if (resolved || !ws || ws.readyState !== WebSocket.OPEN) return;
+          const combined = (stdout + (stderr ? '\n' + stderr : '')).trim();
+          if (!combined) return;
+          const lines = combined.split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
+          const recentLines = lines.slice(-4).join('\n');
+          try {
+            ws.send(JSON.stringify({
+              type: 'COMMAND_PROGRESS',
+              id: payload.id,
+              output: recentLines,
+            }));
+            lastProgressTime = Date.now();
+          } catch {}
+        };
 
-        exec(
-
-          command,
-
-          {
-
-            cwd: workingDir,
-
-            shell: shell,
-
-            maxBuffer: 10 * 1024 * 1024, // 10 MB buffer
-
-            timeout: parseInt(process.env.COMMAND_TIMEOUT_MS, 10) || 30000, // 30s timeout
-
-          },
-
-          (error, stdout, stderr) => {
-
-            resolve({
-
-              success: !error,
-
-              exitCode: error ? error.code || 1 : 0,
-
-              stdout: stdout || '',
-
-              stderr: stderr || (error ? error.message : ''),
-
-            });
-
+        const onData = (chunk, isErr = false) => {
+          const text = chunk.toString();
+          if (isErr) {
+            stderr += text;
+          } else {
+            stdout += text;
           }
 
-        );
+          const now = Date.now();
+          if (now - lastProgressTime >= 2000) {
+            if (progressTimeout) {
+              clearTimeout(progressTimeout);
+              progressTimeout = null;
+            }
+            sendProgressUpdate();
+          } else if (!progressTimeout) {
+            progressTimeout = setTimeout(() => {
+              progressTimeout = null;
+              sendProgressUpdate();
+            }, Math.max(100, 2000 - (now - lastProgressTime)));
+          }
+        };
 
+        let child;
+        try {
+          child = spawn(shellExecutable, shellArgs, {
+            cwd: workingDir,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+          });
+        } catch (spawnErr) {
+          return resolve({
+            success: false,
+            exitCode: 1,
+            stdout: '',
+            stderr: `Spawn error: ${spawnErr.message}`,
+          });
+        }
+
+        const timer = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            if (progressTimeout) clearTimeout(progressTimeout);
+            try {
+              if (child.pid) {
+                if (isWindows) {
+                  exec(`taskkill /pid ${child.pid} /T /F`, () => {});
+                } else {
+                  child.kill('SIGKILL');
+                }
+              }
+            } catch {}
+            resolve({
+              success: false,
+              exitCode: 124,
+              stdout: stdout.slice(-4000),
+              stderr: (stderr + `\nCommand timed out after ${timeoutMs / 1000} seconds.`).slice(-4000),
+            });
+          }
+        }, timeoutMs);
+
+        child.stdout.on('data', (d) => onData(d, false));
+        child.stderr.on('data', (d) => onData(d, true));
+
+        child.on('error', (err) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            if (progressTimeout) clearTimeout(progressTimeout);
+            resolve({
+              success: false,
+              exitCode: 1,
+              stdout: stdout.slice(-4000),
+              stderr: (stderr + '\n' + err.message).slice(-4000),
+            });
+          }
+        });
+
+        child.on('close', (code) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            if (progressTimeout) clearTimeout(progressTimeout);
+            resolve({
+              success: code === 0,
+              exitCode: code ?? 0,
+              stdout: stdout.slice(-4000),
+              stderr: stderr.slice(-4000),
+            });
+          }
+        });
       });
-
     }
 
 
@@ -1524,82 +1614,73 @@ async function handleTask(action, payload) {
       }
       if (quality) args.push('--quality', String(quality || 80));
 
-
-
       const res = await runApprovalTool(args);
 
-      if (res && res.success && res.image) {
-
-        return {
-
-          success: true,
-
-          windowTitle: res.windowTitle || 'Primary Display',
-
-          isDesktopFallback: Boolean(res.isDesktopFallback),
-
-          bounds: res.bounds,
-
-          image: res.image,
-
-          timestamp: res.timestamp || Date.now(),
-
-        };
-
-      }
-
-
-
-      // Fallback: try capture_app.py if request_approval.py fails
-
-      try {
-
-        const pythonCmd = process.env.PYTHON_BIN || 'python';
-
-        const captureScript = path.resolve(process.cwd(), 'tools', 'capture_app.py');
-
-        if (fs.existsSync(captureScript)) {
-
-          await new Promise((resolve) => {
-
-            execFile(pythonCmd, [captureScript, ...(windowTitle ? [windowTitle] : [])], { timeout: 15000 }, () => resolve());
-
-          });
-
-          const visionImg = path.resolve(process.cwd(), 'agent_vision.png');
-
-          if (fs.existsSync(visionImg)) {
-
-            const imgData = await fsp.readFile(visionImg);
-
-            return {
-
-              success: true,
-
-              windowTitle: windowTitle || 'Primary Display',
-
-              isDesktopFallback: true,
-
-              image: imgData.toString('base64'),
-
-              timestamp: Date.now(),
-
-            };
-
+      // If specific windowTitle was requested, but runApprovalTool returned desktop fallback,
+      // try capture_app.py as targeted fallback
+      if (windowTitle && res && res.success && res.isDesktopFallback) {
+        try {
+          const pythonCmd = process.env.PYTHON_BIN || 'python';
+          const captureScript = path.resolve(process.cwd(), 'tools', 'capture_app.py');
+          if (fs.existsSync(captureScript)) {
+            await new Promise((resolve) => {
+              execFile(pythonCmd, [captureScript, windowTitle], { timeout: 8000 }, () => resolve());
+            });
+            const visionImg = path.resolve(process.cwd(), 'agent_vision.png');
+            if (fs.existsSync(visionImg)) {
+              const imgData = await fsp.readFile(visionImg);
+              return {
+                success: true,
+                windowTitle: windowTitle,
+                isDesktopFallback: false,
+                bounds: res.bounds,
+                image: imgData.toString('base64'),
+                timestamp: Date.now(),
+              };
+            }
           }
-
+        } catch (captureErr) {
+          log(`[Runner] capture_app.py secondary check note: ${captureErr.message}`);
         }
-
-      } catch (fallbackErr) {
-
-        log(`[Runner] Capture fallback error: ${fallbackErr.message}`);
-
       }
 
+      // If runApprovalTool succeeded (either targeted window or desktop fallback), return image immediately
+      if (res && res.success && res.image) {
+        return {
+          success: true,
+          windowTitle: res.windowTitle || windowTitle || 'Primary Display',
+          isDesktopFallback: Boolean(res.isDesktopFallback),
+          bounds: res.bounds,
+          image: res.image,
+          timestamp: res.timestamp || Date.now(),
+        };
+      }
 
+      // Fallback: try capture_app.py if request_approval.py fails completely
+      try {
+        const pythonCmd = process.env.PYTHON_BIN || 'python';
+        const captureScript = path.resolve(process.cwd(), 'tools', 'capture_app.py');
+        if (fs.existsSync(captureScript)) {
+          await new Promise((resolve) => {
+            execFile(pythonCmd, [captureScript, ...(windowTitle ? [windowTitle] : [])], { timeout: 8000 }, () => resolve());
+          });
+          const visionImg = path.resolve(process.cwd(), 'agent_vision.png');
+          if (fs.existsSync(visionImg)) {
+            const imgData = await fsp.readFile(visionImg);
+            return {
+              success: true,
+              windowTitle: windowTitle || 'Primary Display',
+              isDesktopFallback: true,
+              image: imgData.toString('base64'),
+              timestamp: Date.now(),
+            };
+          }
+        }
+      } catch (fallbackErr) {
+        log(`[Runner] Capture fallback error: ${fallbackErr.message}`);
+      }
 
       return { success: false, error: res?.error || 'Screenshot capture failed on laptop.' };
-
     }
 
 
