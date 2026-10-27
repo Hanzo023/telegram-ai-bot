@@ -1671,20 +1671,37 @@ async function executeSavePendingFile(ctx, userId, targetDestination, isCallback
   const userDir = getUserStorageDir(userId) || STORAGE_DIR;
   let dest = (targetDestination || '').trim();
 
-  // If saving to Cloud Vault
+  // Helper to save to Cloud Vault & reply with document (Requirement 2.4 & 3.3)
+  const saveToCloudAndReply = async (noticeText = null) => {
+    const buffer = Buffer.from(fileInfo.code, 'utf8');
+    const ext = fileInfo.filename.split('.').pop()?.toLowerCase() || 'py';
+    const cat = getFileCategory(ext);
+    const caption = noticeText || `☁️ **Saved to Telegram Cloud Vault** [${cat.name}]`;
+    const sent = await ctx.replyWithDocument(new InputFile(buffer, fileInfo.filename), {
+      caption,
+      parse_mode: 'Markdown',
+    });
+    if (sent?.document?.file_id) {
+      await saveCloudVaultEntry({
+        name: fileInfo.filename,
+        file_id: sent.document.file_id,
+        ext,
+        category: cat.id,
+        size: buffer.length,
+        date: Date.now(),
+      });
+    }
+    pendingFiles.delete(userId);
+    userAwaitingCustomSavePath.delete(userId);
+    if (isCallback) {
+      await ctx.answerCallbackQuery({ text: 'Saved to Cloud Vault!' }).catch(() => {});
+    }
+  };
+
+  // If explicitly saving to Cloud Vault
   if (dest === '__cloud__') {
     try {
-      const buffer = Buffer.from(fileInfo.code, 'utf8');
-      const cat = getFileCategory(fileInfo.filename.split('.').pop() || 'py');
-      await ctx.replyWithDocument(new InputFile(buffer, fileInfo.filename), {
-        caption: `☁️ **Saved to Telegram Cloud Vault** [${cat.name}]`,
-        parse_mode: 'Markdown',
-      });
-      pendingFiles.delete(userId);
-      userAwaitingCustomSavePath.delete(userId);
-      if (isCallback) {
-        await ctx.answerCallbackQuery({ text: 'Saved to Cloud Vault!' }).catch(() => {});
-      }
+      await saveToCloudAndReply();
       return;
     } catch (cloudErr) {
       console.warn('[PendingSave] Cloud vault error:', cloudErr.message);
@@ -1713,20 +1730,12 @@ async function executeSavePendingFile(ctx, userId, targetDestination, isCallback
 
   const hasLaptop = isLaptopConnected(userId);
   if (!hasLaptop) {
-    if (isCallback) {
-      await ctx.answerCallbackQuery({ text: 'Laptop runner is offline!' }).catch(() => {});
-    }
-    await ctx.reply(
-      `⚠️ **Laptop Runner Offline**\n\n` +
-      `Cannot save to \`${targetPath}\` because your laptop runner is disconnected.\n\n` +
-      `• Run \`start-agent.bat\` or \`Enable-Laptop-Agent.bat\` on your laptop.\n` +
-      `• Or tap **Cloud Vault** to save to Telegram Cloud instead.`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: new InlineKeyboard()
-          .text('☁️ Save to Cloud Vault Instead', 'save_pending_cloud')
-          .text('❌ Discard', 'cancel_pending_save'),
-      }
+    // Automatic fallback: Never drop the file when laptop is offline!
+    console.log(`[PendingSave] Laptop runner offline for user ${userId}. Auto-saving "${fileInfo.filename}" to Telegram Cloud Vault...`);
+    await saveToCloudAndReply(
+      `☁️ *Laptop offline — auto-saved to your Telegram Cloud Vault & sent to chat so nothing is lost!*\n\n` +
+      `📁 *Target Path:* \`${targetPath}\`\n` +
+      `💾 Ready on your phone anytime via /library.`
     );
     return;
   }
@@ -1746,10 +1755,17 @@ async function executeSavePendingFile(ctx, userId, targetDestination, isCallback
         { parse_mode: 'Markdown' }
       );
     } else {
-      await ctx.reply(`❌ Could not save file to laptop: ${saveRes?.error || 'Unknown error'}`);
+      // Laptop save returned error: Fall back to Cloud Vault so file is never lost!
+      console.warn(`[PendingSave] Laptop save failed (${saveRes?.error}). Falling back to Cloud Vault...`);
+      await saveToCloudAndReply(
+        `☁️ *Laptop save failed (${saveRes?.error || 'Path error'}) — auto-saved to your Telegram Cloud Vault & sent to chat so nothing is lost!*`
+      );
     }
   } catch (err) {
-    await ctx.reply(`❌ Save error: ${err.message}`);
+    console.warn(`[PendingSave] Laptop save exception (${err.message}). Falling back to Cloud Vault...`);
+    await saveToCloudAndReply(
+      `☁️ *Laptop error (${err.message}) — auto-saved to your Telegram Cloud Vault & sent to chat so nothing is lost!*`
+    );
   }
 }
 
@@ -1926,6 +1942,7 @@ async function handleAgentCommand(ctx, prompt) {
       pollUserQueue,
       abortSignal: abortController.signal,
       onStatusUpdate: (text) => updateStatus(text),
+      ctx,
     });
 
     if (editTimeout) {
@@ -1944,13 +1961,13 @@ async function handleAgentCommand(ctx, prompt) {
     const { safeText } = sanitizeAndCheckSecrets(reply, 'chat_reply');
     await sendLongMessage(ctx, safeText);
 
-    // If code was generated and NOT already written directly via write_laptop_file, prompt user before writing
+    // If code was generated and NOT already successfully written directly via write_laptop_file, prompt user before writing (Requirement 3.2)
     const alreadySavedToDisk =
       result.stepsExecuted &&
       result.stepsExecuted.some((s) =>
         ['write_laptop_file', 'write_file', 'save_file', 'save_laptop_file'].includes(
           String(s.name || '').toLowerCase()
-        )
+        ) && s.success === true
       );
 
     if (!alreadySavedToDisk && result.pendingFile && result.pendingFile.code) {
@@ -4161,7 +4178,7 @@ async function getLocalFileHashInfo(relPath) {
 }
 
 async function findDuplicateDocument(rawHash, textHash, currentFileName) {
-  // 1. Check Telegram Cloud Vault entries
+  // 1. Check in-memory Telegram Cloud Vault entries (O(N) in memory, <1ms)
   for (const entry of cloudVault) {
     if (entry.hash) {
       if (entry.hash === rawHash || entry.hash === rawHash.slice(0, 16)) {
@@ -4171,35 +4188,20 @@ async function findDuplicateDocument(rawHash, textHash, currentFileName) {
     if (entry.textHash && textHash && entry.textHash === textHash) {
       return { duplicateOf: entry.name, source: 'cloud' };
     }
-    // For legacy entries without hash, check if file exists in local storage
-    if (!entry.hash) {
-      const localInfo = await getLocalFileHashInfo(entry.name);
-      if (localInfo) {
-        entry.hash = localInfo.rawHash;
-        entry.textHash = localInfo.textHash;
-        if (localInfo.rawHash === rawHash || (textHash && localInfo.textHash === textHash)) {
-          return { duplicateOf: entry.name, source: 'cloud' };
-        }
-      }
-    }
   }
 
-  // 2. Check local files in Drive D (STORAGE_DIR)
-  try {
-    const localFiles = await getStoredFiles();
-    for (const lf of localFiles) {
-      const info = await getLocalFileHashInfo(lf.name);
+  // 2. Check in-memory localFileHashes map in O(1) time (no recursive disk scans!)
+  if (localFileHashes && localFileHashes.size > 0) {
+    for (const [filename, info] of localFileHashes.entries()) {
       if (info) {
         if (info.rawHash === rawHash) {
-          return { duplicateOf: lf.name, source: 'local' };
+          return { duplicateOf: filename, source: 'local' };
         }
         if (textHash && info.textHash && info.textHash === textHash) {
-          return { duplicateOf: lf.name, source: 'local' };
+          return { duplicateOf: filename, source: 'local' };
         }
       }
     }
-  } catch (err) {
-    console.warn('Duplicate check in local storage notice:', sanitizeError(err));
   }
 
   return null;
@@ -4247,54 +4249,60 @@ async function extractDocumentContent(file, ctx, fileExtension) {
     const isDuplicate = !!duplicateMatch;
     const duplicateOf = duplicateMatch ? duplicateMatch.duplicateOf : null;
 
+    let savedOfflineFallback = false;
+
     if (isDuplicate) {
       console.log(`Duplicate content detected: "${safeFileName}" has identical content to "${duplicateOf}". Skipped saving duplicate.`);
     } else {
-      // Save to Drive D if mode allows (local or nosave)
-      if (saveToDriveD) {
+      const laptopOnline = ctx.from?.id && isLaptopConnected(ctx.from.id);
+
+      // If user requested nosave (laptop only) but laptop is offline, never drop the file!
+      if (targetMode === 'nosave' && !laptopOnline) {
+        savedOfflineFallback = true;
+      }
+
+      // Save to Drive D if mode allows (local or nosave) and laptop is connected
+      if (saveToDriveD && laptopOnline) {
         const cat = getFileCategory(ext);
         const userDir = getUserStorageDir(ctx.from?.id) || STORAGE_DIR;
         const relativeTargetPath = `${cat.folder}\\${safeFileName}`;
         const laptopTargetPath = joinLaptopPath(userDir, relativeTargetPath);
 
-        // 1. Direct WebSocket transmission to physical laptop runner (when bot runs on Render)
-        if (ctx.from?.id && isLaptopConnected(ctx.from.id)) {
-          try {
-            const b64 = nodeBuffer.toString('base64');
-            const laptopRes = await writeLaptopFile(ctx.from.id, laptopTargetPath, b64, 'base64');
-            if (laptopRes?.success) {
-              console.log(`[Laptop Bridge] Saved "${safeFileName}" directly to physical laptop: ${laptopTargetPath}`);
-            }
-          } catch (laptopErr) {
-            console.warn('[Laptop Bridge] Could not save to physical laptop:', sanitizeError(laptopErr));
+        // Non-blocking WebSocket write with 5s timeout so confirmation is never stalled
+        const b64 = nodeBuffer.toString('base64');
+        Promise.race([
+          writeLaptopFile(ctx.from.id, laptopTargetPath, b64, 'base64'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Laptop write timeout (5s)')), 5000)),
+        ]).then((laptopRes) => {
+          if (laptopRes?.success) {
+            console.log(`[Laptop Bridge] Saved "${safeFileName}" directly to physical laptop: ${laptopTargetPath}`);
           }
-        }
+        }).catch((laptopErr) => {
+          console.warn('[Laptop Bridge] Could not save to physical laptop:', sanitizeError(laptopErr));
+        });
 
-        // 2. Also save to host filesystem if folder exists locally (for local execution or caching)
-        try {
-          if (fs.existsSync(userDir)) {
-            const localTargetDir = path.join(userDir, cat.folder);
-            if (!fs.existsSync(localTargetDir)) {
-              await fsp.mkdir(localTargetDir, { recursive: true });
-            }
+        // Background local cache write if directory exists locally
+        if (fs.existsSync(userDir)) {
+          const localTargetDir = path.join(userDir, cat.folder);
+          fsp.mkdir(localTargetDir, { recursive: true }).then(async () => {
             const localFilePath = path.join(localTargetDir, safeFileName);
             await fsp.writeFile(localFilePath, nodeBuffer);
-            console.log(`Auto-saved document to local storage [${cat.name}]: ${localFilePath}`);
             const stats = await fsp.stat(localFilePath);
             const relKey = `${cat.folder}/${safeFileName}`;
             localFileHashes.set(relKey, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
             localFileHashes.set(safeFileName, { mtime: stats.mtimeMs, size: stats.size, rawHash, textHash });
-          }
-        } catch (saveErr) {
-          console.warn('Could not auto-save file to local storage:', sanitizeError(saveErr));
+          }).catch((saveErr) => {
+            console.warn('Could not auto-save file to local cache:', sanitizeError(saveErr));
+          });
         }
       }
 
-      // Save to Telegram Cloud Vault if mode allows (local or cloud)
-      if (saveToCloudVault) {
+      // Save to Telegram Cloud Vault if mode allows (local or cloud) OR if laptop is offline fallback
+      if (saveToCloudVault || savedOfflineFallback) {
         try {
           const cat = getFileCategory(ext);
-          await saveCloudVaultEntry({
+          // Non-blocking vault persistence
+          saveCloudVaultEntry({
             name: safeFileName,
             file_id: file.file_id,
             ext: ext,
@@ -4303,7 +4311,7 @@ async function extractDocumentContent(file, ctx, fileExtension) {
             date: Date.now(),
             hash: rawHash,
             textHash: textHash,
-          });
+          }).catch((vaultErr) => console.warn('Could not save file to Telegram Cloud Vault:', sanitizeError(vaultErr)));
           console.log(`Saved document to Telegram Cloud Vault [${cat.name}]: ${safeFileName}`);
         } catch (vaultErr) {
           console.warn('Could not save file to Telegram Cloud Vault:', sanitizeError(vaultErr));
@@ -4311,7 +4319,15 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       }
     }
 
-    const textContent = await parseDocumentBuffer(buffer, ext, safeFileName);
+    // Decouple document text parsing: failures NEVER roll back or block the saved file
+    let textContent = '';
+    try {
+      textContent = await parseDocumentBuffer(buffer, ext, safeFileName);
+    } catch (parseErr) {
+      console.warn(`[Document Parser] Note: parsing failed for "${safeFileName}" (${parseErr.message}), but file was saved successfully.`);
+      textContent = `[File: ${safeFileName} (Document text could not be parsed: ${parseErr.message})]`;
+    }
+
     return {
       content: textContent,
       isDuplicate,
@@ -4319,6 +4335,7 @@ async function extractDocumentContent(file, ctx, fileExtension) {
       fileName: safeFileName,
       fileExtension: ext,
       targetMode,
+      savedOfflineFallback,
     };
   } catch (error) {
     const sanitizedMsg = sanitizeError(error);
@@ -4339,6 +4356,42 @@ async function loadLocalDocumentContent(relFilePath) {
   return await parseDocumentBuffer(buffer, ext, path.basename(cleanPath));
 }
 
+function mergeVaultEntries(existingList = [], incomingList = []) {
+  const map = new Map();
+
+  for (const item of existingList) {
+    const key = (item.file_id || item.name || '').toLowerCase().trim();
+    if (key) map.set(key, item);
+  }
+
+  for (const item of incomingList) {
+    const key = (item.file_id || item.name || '').toLowerCase().trim();
+    if (!key) continue;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, item);
+    } else {
+      const useIncoming = (item.date || 0) >= (existing.date || 0);
+      const primary = useIncoming ? item : existing;
+      const fallback = useIncoming ? existing : item;
+      const merged = {
+        id: primary.id || fallback.id || Date.now().toString(),
+        name: primary.name || fallback.name,
+        file_id: primary.file_id || fallback.file_id,
+        ext: primary.ext || fallback.ext || '',
+        category: primary.category || fallback.category || getFileCategory(primary.ext || fallback.ext || '').id,
+        size: primary.size || fallback.size || 0,
+        date: Math.max(primary.date || 0, fallback.date || 0) || Date.now(),
+        hash: primary.hash || fallback.hash || undefined,
+        textHash: primary.textHash || fallback.textHash || undefined,
+      };
+      map.set(key, merged);
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => (b.date || 0) - (a.date || 0));
+}
+
 async function persistCloudVault() {
   try {
     await fsp.writeFile(VAULT_FILE, JSON.stringify(cloudVault, null, 2), 'utf-8');
@@ -4349,20 +4402,12 @@ async function persistCloudVault() {
   // Backup sync to Telegram pinned message so it survives Render ephemeral container resets
   if (allowedUserId) {
     try {
+      // Show only top 5 recent filenames to keep human-readable text compact (Requirement 2.3)
       const summaryList = cloudVault
-        .slice(0, 15)
+        .slice(0, 5)
         .map((f) => `• ${f.name} (${formatBytes(f.size)})`)
         .join('\n');
-      const moreCount = cloudVault.length > 15 ? `\n...and ${cloudVault.length - 15} more` : '';
-
-      const vaultFiles = cloudVault.map((f) => ({
-        n: f.name,
-        f: f.file_id,
-        e: f.ext,
-        s: f.size,
-        d: f.date,
-        h: f.hash ? f.hash.slice(0, 16) : undefined,
-      }));
+      const moreCount = cloudVault.length > 5 ? `\n...and ${cloudVault.length - 5} more` : '';
 
       const storageDirs = {};
       for (const [uid, dir] of userLocalStorageDir.entries()) {
@@ -4373,52 +4418,74 @@ async function persistCloudVault() {
         storageModes[uid] = mode;
       }
 
-      const payload = {
-        v: 2,
-        files: vaultFiles,
-        settings: {
-          dirs: storageDirs,
-          modes: storageModes,
-        },
-      };
+      // Progressively format vault files to guarantee payload fits within Telegram 4096 limit
+      let maxFilesToInclude = Math.min(cloudVault.length, 120);
+      let compactData = '';
+      let msgText = '';
 
-      const compactData = JSON.stringify(payload);
+      while (maxFilesToInclude >= 0) {
+        const vaultFiles = cloudVault.slice(0, maxFilesToInclude).map((f) => ({
+          n: f.name,
+          f: f.file_id,
+          e: f.ext,
+          s: f.size,
+          d: f.date,
+          h: f.hash ? f.hash.slice(0, 16) : undefined,
+        }));
 
-      const msgText =
-        `☁️ Telegram Cloud Vault Index\n` +
-        `📂 Total Files: ${cloudVault.length}\n` +
-        `🕒 Updated: ${new Date().toLocaleString()}\n\n` +
-        (summaryList ? `${summaryList}${moreCount}\n\n` : `Vault is currently empty.\n\n`) +
-        `📌 Keep this message pinned to sync your files across cloud restarts!\n` +
-        `VAULT_DATA:\n${compactData}`;
+        const payload = {
+          v: 2,
+          files: vaultFiles,
+          settings: {
+            dirs: storageDirs,
+            modes: storageModes,
+          },
+        };
 
-      if (msgText.length < 3900) {
-        if (vaultPinnedMessageId) {
-          try {
-            await bot.api.editMessageText(allowedUserId, vaultPinnedMessageId, msgText);
-            return;
-          } catch (editErr) {
-            vaultPinnedMessageId = null;
-          }
+        compactData = JSON.stringify(payload);
+        const headerText =
+          `☁️ Telegram Cloud Vault Index\n` +
+          `📂 Total Files: ${cloudVault.length}\n` +
+          `🕒 Updated: ${new Date().toLocaleString()}\n\n` +
+          (summaryList ? `${summaryList}${moreCount}\n\n` : `Vault is currently empty.\n\n`) +
+          `📌 Keep this message pinned to sync your files across cloud restarts!\n` +
+          `VAULT_DATA:\n`;
+
+        msgText = headerText + compactData;
+        if (msgText.length <= 4000 || maxFilesToInclude === 0) {
+          break;
         }
-
-        try {
-          const chat = await bot.api.getChat(allowedUserId);
-          if (chat && chat.pinned_message && chat.pinned_message.text && chat.pinned_message.text.includes('Telegram Cloud Vault Index')) {
-            vaultPinnedMessageId = chat.pinned_message.message_id;
-            await bot.api.editMessageText(allowedUserId, vaultPinnedMessageId, msgText);
-            return;
-          }
-        } catch {}
-
-        const sent = await bot.api.sendMessage(allowedUserId, msgText, {
-          disable_notification: true,
-        });
-        vaultPinnedMessageId = sent.message_id;
-        try {
-          await bot.api.pinChatMessage(allowedUserId, sent.message_id, { disable_notification: true });
-        } catch {}
+        maxFilesToInclude = Math.floor(maxFilesToInclude * 0.8) - 1;
       }
+
+      // Edit existing pinned message if known
+      if (vaultPinnedMessageId) {
+        try {
+          await bot.api.editMessageText(allowedUserId, vaultPinnedMessageId, msgText);
+          return;
+        } catch (editErr) {
+          vaultPinnedMessageId = null;
+        }
+      }
+
+      // Check chat pinned message
+      try {
+        const chat = await bot.api.getChat(allowedUserId);
+        if (chat && chat.pinned_message && chat.pinned_message.text && chat.pinned_message.text.includes('Telegram Cloud Vault Index')) {
+          vaultPinnedMessageId = chat.pinned_message.message_id;
+          await bot.api.editMessageText(allowedUserId, vaultPinnedMessageId, msgText);
+          return;
+        }
+      } catch {}
+
+      // Send new pinned message if none exists
+      const sent = await bot.api.sendMessage(allowedUserId, msgText, {
+        disable_notification: true,
+      });
+      vaultPinnedMessageId = sent.message_id;
+      try {
+        await bot.api.pinChatMessage(allowedUserId, sent.message_id, { disable_notification: true });
+      } catch {}
     } catch (syncErr) {
       console.warn('Note: Telegram Cloud Vault sync note:', sanitizeError(syncErr));
     }
@@ -4461,18 +4528,21 @@ async function restoreVaultFromTelegram() {
       }
 
       if (fileList.length > 0 || parsedData?.settings) {
-        cloudVault = fileList.map((item, i) => ({
+        const restoredEntries = fileList.map((item, i) => ({
           id: String(item.d || Date.now() - i),
           name: item.n || item.name,
           file_id: item.f || item.file_id,
           ext: item.e || item.ext,
+          category: getFileCategory(item.e || item.ext).id,
           size: item.s || item.size || 0,
           date: item.d || item.date || Date.now(),
           hash: item.h || item.hash || undefined,
         }));
+        // Merge restored Telegram pinned vault entries with local entries (Requirement 2.2)
+        cloudVault = mergeVaultEntries(cloudVault, restoredEntries);
         vaultPinnedMessageId = pinned.message_id;
         await fsp.writeFile(VAULT_FILE, JSON.stringify(cloudVault, null, 2), 'utf-8');
-        console.log(`Restored ${cloudVault.length} files and settings for ${userLocalStorageDir.size} user directories from Telegram pinned message.`);
+        console.log(`[Cloud Vault] Restored and merged ${cloudVault.length} files from Telegram pinned message.`);
         return true;
       }
     }
@@ -4496,8 +4566,9 @@ async function initCloudVault() {
     console.warn('Could not read cloud_vault.json:', sanitizeError(err));
   }
 
-  // If local file is empty or missing, attempt to restore from Telegram pinned sync
-  if (allowedUserId && cloudVault.length === 0) {
+  // ALWAYS restore and merge from Telegram pinned message on startup (Requirement 2.1)
+  // (Because Render deployments reset ephemeral files or cloud_vault.json to git checkout)
+  if (allowedUserId) {
     await restoreVaultFromTelegram();
   }
 
@@ -5359,7 +5430,9 @@ bot.on('message:document', async (ctx) => {
       // User simply uploaded the file: confirm save with exact storage destination
       const icon = cat.icon || '📁';
       let destText = '';
-      if (docResult.targetMode === 'cloud') {
+      if (docResult.savedOfflineFallback) {
+        destText = '• ☁️ **Telegram Cloud Vault**: ⚠️ Laptop offline — auto-saved to your Telegram Cloud Vault & sent to chat so nothing is lost!\n';
+      } else if (docResult.targetMode === 'cloud') {
         destText = '• ☁️ **Telegram Cloud Vault only**: Saved to cloud (laptop storage untouched).\n';
       } else if (docResult.targetMode === 'nosave') {
         destText = '• 💻 **Drive D only**: Saved to laptop storage (cloud save skipped via /nosave).\n';

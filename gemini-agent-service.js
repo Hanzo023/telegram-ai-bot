@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import fs from 'fs';
+import fs, { promises as fsp } from 'fs';
 import path from 'path';
 import os from 'os';
 import { InputFile } from 'grammy';
@@ -17,6 +17,7 @@ import {
   isLaptopConnected,
   joinLaptopPath,
   isPathAbsolute,
+  getBotApi,
 } from './laptop-bridge.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || process.cwd();
@@ -243,6 +244,21 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+
+    // Cloud Fallback when laptop is offline
+    if (!isLaptopConnected(context.userId)) {
+      const urlMatch = (context.prompt || '').match(/https?:\/\/[^\s"'`]+/) ||
+        (args.window_title || '').match(/https?:\/\/[^\s"'`]+/);
+      if (urlMatch) {
+        const targetUrl = urlMatch[0];
+        return await executeTool('open_and_capture_webpage', { url: targetUrl }, context);
+      }
+      return JSON.stringify({
+        success: false,
+        error: 'Laptop is offline. Cannot capture desktop screen. You can capture any web page or web app using `open_and_capture_webpage(url="https://...")`.',
+      });
+    }
+
     context.onStatusUpdate?.('📸 Capturing screenshot...');
     const windowTitle = args.window_title || args.windowTitle || args.title || undefined;
     const caption = args.caption || undefined;
@@ -383,6 +399,31 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+
+    // Cloud Fallback when laptop is offline: execute inside ./temp_downloads in cloud container
+    if (!isLaptopConnected(context.userId)) {
+      const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
+      if (!fs.existsSync(cloudDir)) fs.mkdirSync(cloudDir, { recursive: true });
+
+      console.log(`[Cloud Terminal] Laptop offline. Executing "${command}" in cloud workspace (${cloudDir})...`);
+      context.onStatusUpdate?.(`☁️ *Executing in Cloud Workspace:* \`${command.slice(0, 50)}\`...`);
+
+      const { exec } = await import('child_process');
+      const terminalRes = await new Promise((resolve) => {
+        exec(command, { cwd: cloudDir, timeout: 30000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          resolve({
+            success: !err,
+            mode: 'cloud_container',
+            cwd: cloudDir,
+            stdout: (stdout || '').slice(-4000),
+            stderr: (stderr || (err ? err.message : '')).slice(-2000),
+            exitCode: err ? (err.code || 1) : 0,
+          });
+        });
+      });
+      return JSON.stringify(terminalRes);
+    }
+
     const effectiveCwd =
       args.cwd ||
       args.working_dir ||
@@ -421,9 +462,63 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+    const maxLines = args.max_lines || args.maxLines || args.lines || 300;
+
+    // Cloud Fallback when laptop is offline: read from ./temp_downloads or cloud_vault.json
+    if (!isLaptopConnected(context.userId)) {
+      const fileName = path.basename(rawPath);
+      const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
+      const localDest = path.join(cloudDir, fileName);
+      if (fs.existsSync(localDest)) {
+        try {
+          const content = await fsp.readFile(localDest, 'utf8');
+          const lines = content.split(/\r?\n/).slice(0, maxLines).join('\n');
+          return JSON.stringify({
+            success: true,
+            mode: 'cloud_container',
+            filePath: localDest,
+            content: lines,
+          });
+        } catch (readLocalErr) {
+          return JSON.stringify({ error: readLocalErr.message });
+        }
+      }
+
+      // Check cloud_vault.json
+      const vaultPath = path.resolve(process.cwd(), 'cloud_vault.json');
+      if (fs.existsSync(vaultPath)) {
+        try {
+          const vault = JSON.parse(await fsp.readFile(vaultPath, 'utf8'));
+          const entry = vault.find((f) => f.name.toLowerCase() === fileName.toLowerCase());
+          const botApi = getBotApi() || context.ctx?.api;
+          if (entry && entry.file_id && botApi && process.env.TELEGRAM_BOT_TOKEN) {
+            const fileInfo = await botApi.getFile(entry.file_id);
+            const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+            const res = await fetch(downloadUrl);
+            if (res.ok) {
+              const text = await res.text();
+              const lines = text.split(/\r?\n/).slice(0, maxLines).join('\n');
+              return JSON.stringify({
+                success: true,
+                mode: 'cloud_vault',
+                name: entry.name,
+                content: lines,
+              });
+            }
+          }
+        } catch (vaultReadErr) {
+          console.warn('[Cloud Mode] Read vault error:', vaultReadErr.message);
+        }
+      }
+
+      return JSON.stringify({
+        success: false,
+        error: `Laptop is offline and file "${fileName}" was not found in Telegram Cloud Vault or cloud workspace.`,
+      });
+    }
+
     const baseDir = context.detectedWorkingDir || context.userDirectory;
     const effectivePath = joinLaptopPath(baseDir, rawPath);
-    const maxLines = args.max_lines || args.maxLines || args.lines || 300;
     try {
       const res = await readLaptopFile(context.userId, effectivePath, maxLines);
       return JSON.stringify(res);
@@ -463,6 +558,69 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+
+    // Cloud Fallback when laptop is offline: write to ./temp_downloads, upload to chat, and register in cloud_vault.json
+    if (!isLaptopConnected(context.userId)) {
+      try {
+        const fileName = path.basename(rawPath);
+        const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
+        if (!fs.existsSync(cloudDir)) fs.mkdirSync(cloudDir, { recursive: true });
+        const localDest = path.join(cloudDir, fileName);
+        await fsp.writeFile(localDest, content, 'utf8');
+
+        let telegramFileId = null;
+        const botApi = getBotApi() || context.ctx?.api;
+        if (botApi && context.userId) {
+          try {
+            const buffer = Buffer.from(content, 'utf8');
+            const sent = await botApi.sendDocument(context.userId, new InputFile(buffer, fileName), {
+              caption: `☁️ *Saved to Telegram Cloud Vault (Standalone Phone Mode)*`,
+              parse_mode: 'Markdown',
+            });
+            telegramFileId = sent?.document?.file_id;
+          } catch (sendErr) {
+            console.warn('[Cloud Mode] Telegram document upload note:', sendErr.message);
+          }
+        }
+
+        // Register in cloud_vault.json
+        try {
+          const ext = fileName.split('.').pop()?.toLowerCase() || 'txt';
+          const vaultPath = path.resolve(process.cwd(), 'cloud_vault.json');
+          let vault = [];
+          if (fs.existsSync(vaultPath)) {
+            try {
+              vault = JSON.parse(await fsp.readFile(vaultPath, 'utf8'));
+            } catch {}
+          }
+          const newEntry = {
+            id: Date.now().toString(),
+            name: fileName,
+            file_id: telegramFileId || '',
+            ext,
+            category: 'code',
+            size: Buffer.byteLength(content, 'utf8'),
+            date: Date.now(),
+          };
+          const idx = vault.findIndex((f) => f.name.toLowerCase() === fileName.toLowerCase());
+          if (idx !== -1) vault[idx] = newEntry;
+          else vault.unshift(newEntry);
+          await fsp.writeFile(vaultPath, JSON.stringify(vault, null, 2), 'utf8');
+        } catch (vaultErr) {
+          console.warn('[Cloud Mode] Vault update note:', vaultErr.message);
+        }
+
+        return JSON.stringify({
+          success: true,
+          mode: 'cloud_vault',
+          filePath: localDest,
+          message: `Laptop is offline. Saved "${fileName}" directly to Telegram Cloud Vault and sent to chat.`,
+        });
+      } catch (cloudWriteErr) {
+        return JSON.stringify({ error: `Cloud write failed: ${cloudWriteErr.message}` });
+      }
+    }
+
     const baseDir = context.detectedWorkingDir || context.userDirectory;
     const effectivePath = joinLaptopPath(baseDir, rawPath);
     try {
@@ -485,6 +643,32 @@ export async function executeTool(name, args = {}, context = {}) {
       'listlaptopfiles',
     ].includes(norm)
   ) {
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+
+    // Cloud Fallback when laptop is offline: list files from ./temp_downloads and cloud_vault.json
+    if (!isLaptopConnected(context.userId)) {
+      const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
+      const localFiles = fs.existsSync(cloudDir) ? await fsp.readdir(cloudDir) : [];
+      let vaultFiles = [];
+      const vaultPath = path.resolve(process.cwd(), 'cloud_vault.json');
+      if (fs.existsSync(vaultPath)) {
+        try {
+          const vault = JSON.parse(await fsp.readFile(vaultPath, 'utf8'));
+          vaultFiles = vault.map((f) => f.name);
+        } catch {}
+      }
+      const allFiles = [...new Set([...localFiles, ...vaultFiles])];
+      return JSON.stringify({
+        success: true,
+        mode: 'cloud_vault',
+        directory: 'Telegram Cloud Vault & Cloud Workspace',
+        files: allFiles.map((name) => ({ name, type: 'file' })),
+        count: allFiles.length,
+      });
+    }
+
     const dirPath =
       args.dir_path ||
       args.dirPath ||
@@ -493,9 +677,6 @@ export async function executeTool(name, args = {}, context = {}) {
       args.dir ||
       context.detectedWorkingDir ||
       context.userDirectory;
-    if (!context.userId) {
-      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-    }
     try {
       const res = await listLaptopDirectory(context.userId, dirPath);
       return JSON.stringify(res);
@@ -892,6 +1073,7 @@ export async function runGeminiAgent({
   model = null,
   pollUserQueue = null,
   abortSignal = null,
+  ctx = null,
 }) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -900,6 +1082,20 @@ export async function runGeminiAgent({
 
   const ai = new GoogleGenAI({ apiKey });
   const stepsExecuted = [];
+
+  // Inspect live laptop connection status for Standalone Phone / Cloud Mode
+  const laptopOnline = isLaptopConnected(userId);
+  const connectionModeInstruction = laptopOnline
+    ? 'LAPTOP CONNECTION: ONLINE & ACTIVE. Tools execute directly on the user\'s physical laptop.\n\n'
+    : 'LAPTOP CONNECTION: OFFLINE (STANDALONE PHONE / CLOUD MODE).\n' +
+      'The user is using the bot from their mobile phone while their laptop is offline.\n' +
+      'All tools automatically and seamlessly execute in Standalone Cloud Mode:\n' +
+      '• write_laptop_file: Writes the file to the cloud workspace (./temp_downloads), uploads the file directly to the user\'s Telegram chat, and stores it in Telegram Cloud Vault.\n' +
+      '• read_laptop_file & list_laptop_files: Read and list files from Telegram Cloud Vault and the cloud workspace (./temp_downloads).\n' +
+      '• run_laptop_terminal: Runs commands directly inside the cloud workspace container (./temp_downloads), with Node.js, Python, and Git available.\n' +
+      '• take_screenshot / open_and_capture_webpage: Captures websites or web apps via the cloud headless browser.\n' +
+      '• search_web & search_youtube: Full live web and YouTube search.\n' +
+      'NEVER fail, refuse, or say you cannot proceed because the laptop is offline. Always execute the requested task in Cloud Mode!\n\n';
 
   // Extract explicit directory path from prompt if user mentioned one (e.g. "D:\projects\telegram-ai-bot")
   let detectedWorkingDir = null;
@@ -950,6 +1146,7 @@ export async function runGeminiAgent({
         tools: AGENT_TOOLS,
         system_instruction:
           'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical laptop.\n' +
+          connectionModeInstruction +
           `User\'s target folder on their laptop: "${effectiveTargetDir}".\n\n` +
           'CRITICAL EXECUTION AND GROUNDING RULES:\n' +
           '1. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s laptop. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
@@ -1064,7 +1261,8 @@ export async function runGeminiAgent({
         // Execute tool call
         const toolName = functionCallStep.name;
         const toolArgs = functionCallStep.arguments || {};
-        stepsExecuted.push({ name: toolName, args: toolArgs });
+        const stepRecord = { name: toolName, args: toolArgs, success: false };
+        stepsExecuted.push(stepRecord);
 
         const isOpeningTarget =
           toolName === 'open_and_capture_webpage' ||
@@ -1088,9 +1286,35 @@ export async function runGeminiAgent({
           prompt,
           onStatusUpdate,
           recentWindowLaunch,
+          ctx,
         });
         const toolDuration = Math.round(performance.now() - toolT0);
         console.log(`[PROFILER] Step: Tool "${toolName}" execution took ${toolDuration} ms`);
+
+        // Parse tool result success for reliable downstream checks (Requirement 3)
+        let parsedSuccess = true;
+        try {
+          if (typeof toolResult === 'string') {
+            const parsed = JSON.parse(toolResult);
+            if (parsed.success !== undefined) {
+              parsedSuccess = Boolean(parsed.success);
+            } else if (parsed.error) {
+              parsedSuccess = false;
+            }
+          } else if (toolResult && typeof toolResult === 'object') {
+            if (toolResult.success !== undefined) {
+              parsedSuccess = Boolean(toolResult.success);
+            } else if (toolResult.error) {
+              parsedSuccess = false;
+            }
+          }
+        } catch {
+          if (typeof toolResult === 'string' && /^(?:error|failed|exception)\b/i.test(toolResult.trim())) {
+            parsedSuccess = false;
+          }
+        }
+        stepRecord.success = parsedSuccess;
+        stepRecord.result = toolResult;
 
         if (toolName === 'take_screenshot') {
           recentWindowLaunch = false;

@@ -107,9 +107,11 @@ export function setStorageDirCallback(cb) {
  */
 
 export function setBotApi(botApi) {
-
   botApiRef = botApi;
+}
 
+export function getBotApi() {
+  return botApiRef;
 }
 
 
