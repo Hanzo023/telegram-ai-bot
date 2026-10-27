@@ -2,7 +2,9 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { InputFile } from 'grammy';
 import { searchWeb, searchYouTube, sanitizeError } from './search-service.js';
+import { captureWebPageSnapshot } from './browser-service.js';
 import {
   runLaptopCommand,
   readLaptopFile,
@@ -50,6 +52,21 @@ export const AGENT_TOOLS = [
           description: 'Optional brief caption to display with the screenshot in Telegram.',
         },
       },
+    },
+  },
+  {
+    type: 'function',
+    name: 'open_and_capture_webpage',
+    description: 'Open a target website URL in the lightweight persistent browser, wait for domcontentloaded (strict 12s timeout), and capture an in-memory 1280x720 JPEG screenshot directly. Use this when the user asks to open a URL/website or take a screenshot of a web page.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: 'The website URL to open and capture (e.g. "https://google.com", "https://github.com")',
+        },
+      },
+      required: ['url'],
     },
   },
   {
@@ -226,7 +243,7 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
-    context.onStatusUpdate?.('📸 *Capturing screenshot and sending to Telegram...*');
+    context.onStatusUpdate?.('📸 Capturing screenshot...');
     const windowTitle = args.window_title || args.windowTitle || args.title || undefined;
     const caption = args.caption || undefined;
     try {
@@ -244,6 +261,52 @@ export async function executeTool(name, args = {}, context = {}) {
         });
       }
       return JSON.stringify({ error: res?.error || 'Failed to capture screenshot.' });
+    } catch (err) {
+      return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // 0b. Open and capture web page with lightweight singleton browser
+  if (
+    [
+      'open_and_capture_webpage',
+      'open_browser_screenshot',
+      'capture_webpage',
+      'webpage_screenshot',
+      'screenshot_url',
+    ].includes(norm)
+  ) {
+    const targetUrl = args.url || args.target_url || args.link;
+    if (!targetUrl) {
+      return JSON.stringify({ error: 'No URL provided to open and capture.' });
+    }
+    try {
+      context.onStatusUpdate?.('🚀 Opening target...');
+      const res = await captureWebPageSnapshot(targetUrl, {
+        onStageUpdate: context.onStatusUpdate,
+      });
+      if (res && res.success && res.buffer) {
+        if (context.ctx && context.userId) {
+          const uploadT0 = performance.now();
+          await context.ctx.replyWithPhoto(new InputFile(res.buffer, 'snapshot.jpg'), {
+            caption: `📸 *Web Screenshot*\n• *URL:* \`${res.url}\`\n• *Viewport:* 1280x720 (JPEG 70%)`,
+            parse_mode: 'Markdown',
+          }).catch(async () => {
+            await context.ctx.replyWithPhoto(new InputFile(res.buffer, 'snapshot.jpg'), {
+              caption: `📸 Web Screenshot: ${res.url}`,
+            }).catch(() => {});
+          });
+          const uploadDuration = Math.round(performance.now() - uploadT0);
+          console.log(`[PROFILER] Step: Telegram photo upload took ${uploadDuration} ms`);
+        }
+        return JSON.stringify({
+          success: true,
+          url: res.url,
+          durationMs: res.durationMs,
+          message: `Screenshot of "${res.url}" successfully captured and sent directly to the user on Telegram.`,
+        });
+      }
+      return JSON.stringify({ error: res?.error || 'Failed to capture web page screenshot.' });
     } catch (err) {
       return JSON.stringify({ error: err.message });
     }
@@ -877,9 +940,10 @@ export async function runGeminiAgent({
   for (const model of uniqueCandidateModels) {
     try {
       if (onStatusUpdate) {
-        onStatusUpdate(`🤖 *Agent reasoning with ${model}...*`);
+        onStatusUpdate('🧠 Processing with Gemini...');
       }
 
+      const initialLlmT0 = performance.now();
       let currentResponse = await ai.interactions.create({
         model,
         input: inputPrompt,
@@ -920,6 +984,9 @@ export async function runGeminiAgent({
           '    b. Launch: Interactive TUIs (like Yazi) or terminal programs CANNOT run in headless background subprocesses. You MUST launch them in a visible GUI terminal window via `run_laptop_terminal(command="start cmd /k yazi")` or `start wt cmd /k yazi`. For GUI desktop apps, use `run_laptop_terminal(command="start <app_name>")` (e.g. `start roblox:`, `start brave`).\n' +
           '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. The system will automatically bring it to the foreground and deliver the screenshot directly to Telegram.',
       });
+
+      const initialLlmDuration = Math.round(performance.now() - initialLlmT0);
+      console.log(`[PROFILER] Step: Gemini initial reasoning took ${initialLlmDuration} ms (model: ${model})`);
 
       let stepCount = 0;
       let recentWindowLaunch = false;
@@ -999,15 +1066,21 @@ export async function runGeminiAgent({
         const toolArgs = functionCallStep.arguments || {};
         stepsExecuted.push({ name: toolName, args: toolArgs });
 
-        if (onStatusUpdate) {
+        const isOpeningTarget =
+          toolName === 'open_and_capture_webpage' ||
+          (toolName === 'run_laptop_terminal' && /(?:start\s+|wt\b|cmd\s+\/k)/i.test(toolArgs?.command || ''));
+
+        if (isOpeningTarget) {
+          recentWindowLaunch = true;
+          if (onStatusUpdate) onStatusUpdate('🚀 Opening target...');
+        } else if (toolName === 'take_screenshot') {
+          if (onStatusUpdate) onStatusUpdate('📸 Capturing screenshot...');
+        } else if (onStatusUpdate) {
           const argsSummary = Object.values(toolArgs).map(v => typeof v === 'string' ? `"${v.slice(0, 30)}"` : v).join(', ');
           onStatusUpdate(`⚙️ *Executing tool:* \`${toolName}(${argsSummary})\`...`);
         }
 
-        if (toolName === 'run_laptop_terminal' && /(?:start\s+|wt\b|cmd\s+\/k)/i.test(toolArgs?.command || '')) {
-          recentWindowLaunch = true;
-        }
-
+        const toolT0 = performance.now();
         const toolResult = await executeTool(toolName, toolArgs, {
           userId,
           userDirectory,
@@ -1016,6 +1089,8 @@ export async function runGeminiAgent({
           onStatusUpdate,
           recentWindowLaunch,
         });
+        const toolDuration = Math.round(performance.now() - toolT0);
+        console.log(`[PROFILER] Step: Tool "${toolName}" execution took ${toolDuration} ms`);
 
         if (toolName === 'take_screenshot') {
           recentWindowLaunch = false;
@@ -1039,18 +1114,18 @@ export async function runGeminiAgent({
           }
         }
 
-        // Fast-path resolution for screenshot actions:
-        // If the screenshot was captured and delivered to Telegram, and no mid-task instruction arrived,
-        // finish immediately without waiting 2-4 seconds for an extra redundant LLM round-trip.
-        if (toolName === 'take_screenshot' && !midTaskInstruction) {
+        // Short-Circuit the Agent Loop (Optimization 4):
+        // If the screenshot tool (or web capture) succeeded, immediately check if follow-up
+        // analysis was explicitly requested in the prompt. If not, resolve immediately to avoid redundant LLM round-trips!
+        if ((toolName === 'take_screenshot' || toolName === 'open_and_capture_webpage') && !midTaskInstruction) {
           let parsed;
           try { parsed = JSON.parse(toolResult); } catch {}
           if (parsed && parsed.success) {
-            const isPrimarilyScreenshot =
-              /\b(?:screenshot|screen|desktop|capture|snapshot|pic)\b/i.test(prompt) &&
-              !/\b(?:then|afterwards|and\s+also|next|install|fix|code)\b/i.test(prompt);
-            if (isPrimarilyScreenshot || stepsExecuted.length >= 2) {
-              const targetTitle = parsed.windowTitle || 'Primary Display';
+            const explicitlyNeedsAnalysis =
+              /\b(?:analyze|inspect|read|transcribe|explain|tell me what|check if there is an error|debug)\b/i.test(prompt);
+            if (!explicitlyNeedsAnalysis) {
+              const targetTitle = parsed.windowTitle || parsed.url || 'Target';
+              console.log(`[PROFILER] Step: Short-circuiting agent loop after screenshot delivery (no further analysis requested).`);
               return {
                 finalAnswer: `📸 *Screenshot of "${targetTitle}" captured and sent directly to Telegram.*`,
                 stepsExecuted,
@@ -1065,7 +1140,7 @@ export async function runGeminiAgent({
         }
 
         if (onStatusUpdate) {
-          onStatusUpdate(`🧠 *Analyzing results from ${toolName}...*`);
+          onStatusUpdate('🧠 Processing with Gemini...');
         }
 
         const nextInput = [
@@ -1087,11 +1162,14 @@ export async function runGeminiAgent({
         }
 
         // Send tool result back to the model
+        const followUpLlmT0 = performance.now();
         currentResponse = await ai.interactions.create({
           model,
           previous_interaction_id: currentResponse.id,
           input: nextInput,
         });
+        const followUpLlmDuration = Math.round(performance.now() - followUpLlmT0);
+        console.log(`[PROFILER] Step: Gemini tool follow-up reasoning took ${followUpLlmDuration} ms`);
       }
 
       // If max steps reached, extract whatever output exists

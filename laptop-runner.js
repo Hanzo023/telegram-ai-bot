@@ -1612,7 +1612,7 @@ async function handleTask(action, payload) {
       } else {
         args.push('--desktop');
       }
-      if (quality) args.push('--quality', String(quality || 80));
+      if (quality) args.push('--quality', String(quality || 70));
 
       const res = await runApprovalTool(args);
 
@@ -1636,9 +1636,12 @@ async function handleTask(action, payload) {
           await new Promise((resolve) => {
             execFile(pythonCmd, [captureScript, ...(windowTitle ? [windowTitle] : [])], { timeout: 8000 }, () => resolve());
           });
-          const visionImg = path.resolve(process.cwd(), 'agent_vision.png');
-          if (fs.existsSync(visionImg)) {
+          const visionJpg = path.resolve(process.cwd(), 'agent_vision.jpg');
+          const visionPng = path.resolve(process.cwd(), 'agent_vision.png');
+          const visionImg = fs.existsSync(visionJpg) ? visionJpg : (fs.existsSync(visionPng) ? visionPng : null);
+          if (visionImg) {
             const imgData = await fsp.readFile(visionImg);
+            try { await fsp.unlink(visionImg); } catch {}
             return {
               success: true,
               windowTitle: windowTitle || 'Primary Display',

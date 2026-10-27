@@ -702,7 +702,8 @@ export async function listLaptopWindows(userId, timeoutMs = 15000) {
  */
 export async function captureLaptopScreenshot(userId, options = {}, timeoutMs = 35000) {
 
-  const { windowTitle, hwnd, caption, quality = 80, sendDirect = true } = options;
+  const { windowTitle, hwnd, caption, quality = 70, sendDirect = true } = options;
+  const bridgeT0 = performance.now();
 
   const res = await sendLaptopTask(userId, 'take_screenshot', { windowTitle, hwnd, quality }, timeoutMs);
 
@@ -718,15 +719,16 @@ export async function captureLaptopScreenshot(userId, options = {}, timeoutMs = 
 
   }
 
-
+  const captureDuration = Math.round(performance.now() - bridgeT0);
+  console.log(`[PROFILER] Step: Laptop bridge screenshot RPC took ${captureDuration} ms`);
 
   let photoSent = false;
+  const buffer = Buffer.from(res.image, 'base64');
 
   if (sendDirect && botApiRef) {
 
+    const uploadT0 = performance.now();
     try {
-
-      const buffer = Buffer.from(res.image, 'base64');
 
       const safeTitle = (res.windowTitle || 'Desktop').replace(/[`*_\[\]()]/g, ' ');
 
@@ -765,6 +767,8 @@ export async function captureLaptopScreenshot(userId, options = {}, timeoutMs = 
       });
 
       photoSent = true;
+      const uploadDuration = Math.round(performance.now() - uploadT0);
+      console.log(`[PROFILER] Step: Telegram photo upload took ${uploadDuration} ms`);
 
     } catch (sendErr) {
 
@@ -787,6 +791,8 @@ export async function captureLaptopScreenshot(userId, options = {}, timeoutMs = 
     isDesktopFallback: Boolean(res.isDesktopFallback),
 
     image: res.image,
+    buffer,
+    base64: res.image,
 
   };
 

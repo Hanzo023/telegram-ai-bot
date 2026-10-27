@@ -42,6 +42,7 @@ import {
   runGeminiAgent,
   runDeepResearchAgent,
 } from './gemini-agent-service.js';
+import { captureWebPageSnapshot } from './browser-service.js';
 import {
   setupLaptopBridge,
   setBotApi,
@@ -1735,7 +1736,15 @@ async function handleAgentCommand(ctx, prompt) {
   const wasAlreadyProcessing = q.isProcessing;
   q.isProcessing = true;
 
-  const statusMsg = await ctx.reply('🤖 *Gemini Agent initialized...*', { parse_mode: 'Markdown' });
+  const profilerT0 = performance.now();
+  console.log(`[PROFILER] ========================================================`);
+  console.log(`[PROFILER] Step 1: /agent command received for user ${userId}: "${prompt.slice(0, 60)}"`);
+
+  // Immediately send initial status message and store message ID (Optimization 1)
+  const statusMsg = await ctx.reply('⚡ *Initializing agent...*', { parse_mode: 'Markdown' });
+  const initDuration = Math.round(performance.now() - profilerT0);
+  console.log(`[PROFILER] Step 2: Initial status message sent in ${initDuration} ms (msg_id: ${statusMsg.message_id})`);
+
   let lastEditTime = 0;
   let pendingUpdate = null;
   let editTimeout = null;
@@ -1748,7 +1757,7 @@ async function handleAgentCommand(ctx, prompt) {
     statusMsgId: statusMsg.message_id,
     startedAt: Date.now(),
     lastAckTime: 0,
-    lastStatusText: '🤖 Agent initialized...',
+    lastStatusText: '⚡ Initializing agent...',
     prompt,
   };
   activeAgentSessions.set(userId, session);
@@ -1796,6 +1805,7 @@ async function handleAgentCommand(ctx, prompt) {
     }
 
     try {
+      console.log(`[PROFILER] [${Math.round(performance.now() - profilerT0)}ms] UI Stage Update: "${formattedText.replace(/[*_`]/g, '').slice(0, 50)}"`);
       await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, formattedText, {
         parse_mode: 'Markdown',
       });
@@ -1816,7 +1826,7 @@ async function handleAgentCommand(ctx, prompt) {
     const now = Date.now();
     const elapsed = now - lastEditTime;
 
-    if (elapsed >= 1500 && !isEditing) {
+    if (elapsed >= 1000 && !isEditing) {
       if (editTimeout) {
         clearTimeout(editTimeout);
         editTimeout = null;
@@ -1832,10 +1842,50 @@ async function handleAgentCommand(ctx, prompt) {
             pendingUpdate = null;
             await performEdit(nextText);
           }
-        }, Math.max(0, 1500 - elapsed));
+        }, Math.max(0, 1000 - elapsed));
       }
     }
   };
+
+  // Direct URL Fast-Path (Optimization 2 & 4)
+  // If the prompt contains a web URL and asks for a screenshot/inspection, navigate with the singleton browser directly
+  const urlMatch = prompt.match(/https?:\/\/[^\s]+/i);
+  const isScreenshotRequest = /\b(?:screenshot|screen|capture|snapshot|pic|view|picture)\b/i.test(prompt);
+  if (urlMatch && isScreenshotRequest && !/\b(?:code|script|install|run|write|terminal)\b/i.test(prompt)) {
+    const targetUrl = urlMatch[0];
+    try {
+      const snapRes = await captureWebPageSnapshot(targetUrl, {
+        onStageUpdate: (stage) => updateStatus(stage),
+      });
+      if (snapRes && snapRes.success && snapRes.buffer) {
+        const uploadT0 = performance.now();
+        await ctx.replyWithPhoto(new InputFile(snapRes.buffer, 'snapshot.jpg'), {
+          caption: `📸 *Web Screenshot*\n• *URL:* \`${snapRes.url}\`\n• *Viewport:* 1280x720 (JPEG 70%)`,
+          parse_mode: 'Markdown',
+        }).catch(async () => {
+          await ctx.replyWithPhoto(new InputFile(snapRes.buffer, 'snapshot.jpg'), {
+            caption: `📸 Web Screenshot: ${snapRes.url}`,
+          }).catch(() => {});
+        });
+        const uploadDuration = Math.round(performance.now() - uploadT0);
+        console.log(`[PROFILER] Step: Telegram photo upload took ${uploadDuration} ms`);
+
+        // Check if follow-up analysis was requested
+        const requiresAnalysis = /\b(?:analyze|explain|inspect|read|check|what\s+is|summarize)\b/i.test(prompt);
+        if (!requiresAnalysis) {
+          await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+          const totalDuration = Math.round(performance.now() - profilerT0);
+          console.log(`[PROFILER] [COMPLETED] /agent direct web snapshot finished in ${totalDuration} ms`);
+          console.log(`[PROFILER] ========================================================`);
+          return;
+        }
+
+        await updateStatus('🧠 Processing with Gemini...');
+      }
+    } catch (webErr) {
+      console.warn('[PROFILER] Direct web snapshot fallback:', webErr.message);
+    }
+  }
 
   const userDirectory = getUserStorageDir(userId);
   const userHistory = conversationHistory.get(userId) || [];
@@ -1890,6 +1940,10 @@ async function handleAgentCommand(ctx, prompt) {
     history.push({ role: 'assistant', content: result.finalAnswer });
     conversationHistory.set(userId, history);
     scheduleConversationHistoryPersistence();
+
+    const totalDuration = Math.round(performance.now() - profilerT0);
+    console.log(`[PROFILER] [COMPLETED] /agent execution finished in ${totalDuration} ms`);
+    console.log(`[PROFILER] ========================================================`);
   } catch (err) {
     if (editTimeout) {
       clearTimeout(editTimeout);
