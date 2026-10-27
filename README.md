@@ -829,6 +829,8 @@ Users can manage and organize assets stored in either Telegram Cloud Vault or th
 | `/spec` | 💻 System | View complete laptop hardware specifications (CPU, dual GPUs, RAM, battery, drives) |
 | `/status` | 📊 System | Check cloud bot uptime, runner connection state, and memory health |
 | `/reboot` | 🔄 System | Cleanly restart the Telegram bot container process to auto-heal connections |
+| `/logs` | 📋 Admin | View last 50 lines of stdout/stderr and recent crash tracebacks from phone |
+| `/fix <instruction>` | 🛠️ Admin | Autonomous hot-patch with Anti-Brick syntax guard and permanent GitHub sync |
 | `/devices` | 👥 Team | View all authorized users' laptops and their online status |
 | `/agent <task>` | 🤖 Agent | Run autonomous tasks with live terminal tools, file editing, and research |
 | `/agent_mode` | 🎚️ Agent | Toggle Agent mode as default for all messages (or `/cancel` to restore standard chat) |

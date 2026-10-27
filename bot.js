@@ -44,6 +44,19 @@ import {
 } from './gemini-agent-service.js';
 import { captureWebPageSnapshot } from './browser-service.js';
 import {
+  initLogRingBuffer,
+  getRecentLogs,
+  getLastTraceback,
+  recordExplicitTraceback,
+  findRelevantSourceFile,
+  generateHotPatch,
+  applyHotPatch,
+  syncFileToGitHub,
+} from './self-healing-service.js';
+
+// Initialize in-memory log buffer for self-healing & /logs command
+initLogRingBuffer();
+import {
   setupLaptopBridge,
   setBotApi,
   setStorageDirCallback,
@@ -91,6 +104,16 @@ const allowedUserIds = new Set(allowedIdMatches.map((id) => parseInt(id, 10)));
 
 // Primary user ID for admin/vault backup operations (defaults to the first ID in the list)
 const allowedUserId = allowedUserIds.values().next().value || null;
+
+export function isAdminUser(userId) {
+  if (!userId) return false;
+  const numId = Number(userId);
+  if (process.env.ADMIN_USER_ID) {
+    const adminId = parseInt(process.env.ADMIN_USER_ID, 10);
+    if (!isNaN(adminId) && numId === adminId) return true;
+  }
+  return numId === Number(allowedUserId);
+}
 
 console.log(`[Config] Authorized Telegram User IDs configured (${allowedUserIds.size} user(s) authorized)`);
 if (allowedUserIds.size === 0) {
@@ -2549,6 +2572,129 @@ bot.callbackQuery('open_model_settings', async (ctx) => {
     reply_markup: buildModelMenuKeyboard(userId),
   });
 });
+
+// ========================================================
+// 🛠️ Self-Healing & Remote Hot-Patch Engine (Admin Only)
+// ========================================================
+
+async function handleLogsCommand(ctx) {
+  const userId = ctx.from?.id;
+  if (!isAdminUser(userId)) {
+    await ctx.reply('⛔ *Access Denied:* The `/logs` command is strictly restricted to the administrator.', {
+      parse_mode: 'Markdown',
+    }).catch(() => {});
+    return;
+  }
+
+  const logs = getRecentLogs(50);
+  const traceback = getLastTraceback();
+
+  if (!logs && !traceback) {
+    await ctx.reply('📋 *Runtime Logs Buffer:* (Clean, no recent errors or log entries recorded).', {
+      parse_mode: 'Markdown',
+    });
+    return;
+  }
+
+  let message = `📋 *Recent Runtime Logs (Last 50 Lines):*\n\`\`\`\n${logs.slice(-3000)}\n\`\`\``;
+  if (traceback) {
+    message += `\n\n💥 *Latest Error Traceback:*\n\`\`\`\n${traceback.slice(-800)}\n\`\`\``;
+  }
+
+  try {
+    await ctx.reply(message, { parse_mode: 'Markdown' });
+  } catch {
+    await ctx.reply(message.replace(/[*_`\[\]()]/g, ''));
+  }
+}
+
+async function handleFixCommand(ctx) {
+  const userId = ctx.from?.id;
+  if (!isAdminUser(userId)) {
+    await ctx.reply('⛔ *Access Denied:* The `/fix` command is strictly restricted to the administrator.', {
+      parse_mode: 'Markdown',
+    }).catch(() => {});
+    return;
+  }
+
+  const rawInstruction = (ctx.message?.text || '').replace(/^\/fix\s*/i, '').trim();
+  if (!rawInstruction) {
+    await ctx.reply(
+      '🛠️ *Self-Healing & Remote Hot-Patch Engine*\n\n' +
+      '*Usage:* `/fix <instruction>`\n' +
+      '*Example:* `/fix fix the port error in bot.js`\n\n' +
+      '• **Step 1:** Reads relevant source files and latest runtime traceback.\n' +
+      '• **Step 2:** Sends to Gemini to synthesize clean replacement code.\n' +
+      '• **Step 3:** Anti-Brick Guard runs pre-flight syntax checks (`node --check` / `py_compile`).\n' +
+      '• **Step 4:** Overwrites file, syncs permanent commit to GitHub, and hot-reloads worker in 3s!',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const statusMsg = await ctx.reply('⚡ *Self-Healing Engine initialized...*', { parse_mode: 'Markdown' });
+
+  const updateStatus = async (text) => {
+    try {
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, text, { parse_mode: 'Markdown' });
+    } catch {
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, text.replace(/[*_`\[\]()]/g, ''));
+      } catch {}
+    }
+  };
+
+  const traceback = getLastTraceback() || '';
+  const targetFile = findRelevantSourceFile(rawInstruction, traceback);
+
+  await updateStatus(`🔍 *Target identified:* \`${targetFile}\`\n🧠 *Generating hot-patch with Gemini...*`);
+
+  try {
+    const patchResult = await generateHotPatch({
+      instruction: rawInstruction,
+      targetFile,
+      traceback,
+      onProgress: (stage) => updateStatus(stage),
+    });
+
+    if (!patchResult.success) {
+      await updateStatus(`❌ *Hot-Patch Failed (Anti-Brick Guard):*\n\`${patchResult.error}\`\n\n🛡️ *Production files were left untouched.*`);
+      return;
+    }
+
+    await updateStatus(`💾 *Pre-flight passed! Overwriting local file and syncing GitHub commit...*`);
+
+    const applyResult = await applyHotPatch({
+      targetFile: patchResult.targetFile,
+      patchedCode: patchResult.patchedCode,
+      summary: patchResult.summary,
+    });
+
+    let ghInfo = '⚠️ GitHub Sync skipped (GITHUB_TOKEN not configured)';
+    if (applyResult.githubSync) {
+      if (applyResult.githubSync.success) {
+        ghInfo = `✅ *Committed to GitHub:* [\`${applyResult.githubSync.sha}\`](${applyResult.githubSync.htmlUrl}) on \`${applyResult.githubSync.branch}\``;
+      } else {
+        ghInfo = `⚠️ GitHub Sync Note: ${applyResult.githubSync.reason}`;
+      }
+    }
+
+    const finalSummary =
+      `✅ *Hot-Patch Successfully Applied!* (Passed Pre-Flight Check)\n\n` +
+      `📁 *File Patched:* \`${patchResult.targetFile}\`\n` +
+      `🛠️ *Summary of Changes:*\n${patchResult.summary}\n\n` +
+      `${ghInfo}\n\n` +
+      `🚀 *Worker hot-reloaded! Changes are live in ~3 seconds.*`;
+
+    await updateStatus(finalSummary);
+  } catch (err) {
+    console.error('[Hot-Patch Error]:', err);
+    await updateStatus(`❌ *Hot-Patch Exception:*\n\`${err.message}\``);
+  }
+}
+
+bot.command('logs', handleLogsCommand);
+bot.command('fix', handleFixCommand);
 
 bot.command('agent', async (ctx) => {
   const prompt = ctx.message.text.replace(/^\/agent\s*/i, '').trim();
@@ -7445,6 +7591,8 @@ const botCommands = [
   { command: 'cancel', description: '❌ Exit Live Voice, Agent, search, or quiz mode' },
   { command: 'clear', description: '🧹 Clear conversation history (keeps file)' },
   { command: 'clearall', description: '🗑️ Clear all conversation history & unload file' },
+  { command: 'logs', description: '📋 View recent stdout/stderr runtime logs & tracebacks (Admin)' },
+  { command: 'fix', description: '🛠️ Hot-patch bugs & sync permanent GitHub commit (Admin)' },
   { command: 'local', description: '💾 Save files to your laptop folder & Cloud Vault' },
   { command: 'cloud', description: '☁️ Save files to Cloud Vault only' },
   { command: 'nosave', description: '💻 Save files to your laptop folder only' },

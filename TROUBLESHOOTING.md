@@ -451,3 +451,25 @@ Before reporting a bug, verify these 5 checkpoints:
 3. [ ] Are you running `bot.js` in only **one** location (Render or local, never both)?
 4. [ ] Does [`run.bat`](./run.bat) connect and output `Server handshake confirmed`?
 5. [ ] Is `STORAGE_DIR` set to `./` or an accessible project folder?
+
+---
+
+## 🛡️ Autonomous Self-Healing & Remote Hot-Patch Engine
+
+When running headless on Render Free Tier (0.1 vCPU, 512 MB RAM), bugs or unexpected runtime exceptions can be inspected, patched, and deployed directly from your mobile phone via Telegram without opening a laptop.
+
+### 1. Unkillable Watchdog Architecture (`watchdog.js`)
+- Render's `npm start` command invokes [`watchdog.js`](./watchdog.js), which forks [`bot.js`](./bot.js) as a supervised child process.
+- **Zero 502 Probing Downtime**: If `bot.js` crashes or exits unexpectedly, the watchdog immediately starts an emergency HTTP health check server on `PORT` (200 OK) so UptimeRobot and Render never register a container failure.
+- **Direct Telegram Alert**: Sends an immediate crash notification with the exact error traceback to `ADMIN_USER_ID`.
+- **Emergency Telegram Poller**: When the main bot is dead, the watchdog activates an emergency Telegram long-poller to accept admin `/logs` and `/fix` commands directly from phone chat.
+
+### 2. Admin Remote Control Commands (`/logs` and `/fix`)
+- Restricted strictly to `ADMIN_USER_ID` (with fallback to `ALLOWED_USER_ID`).
+- **`/logs`**: Returns the last 50 lines of stdout/stderr captured in an in-memory ring buffer (up to 250 lines) plus the latest recorded exception traceback.
+- **`/fix <instruction>`**:
+  1. Identifies the target file (explicitly mentioned in instruction, or extracted from the latest crash traceback stack frame, defaulting to `bot.js`).
+  2. Synthesizes a patch using Gemini with low temperature (`0.2`) and resilient model fallback (`gemini-3.5-flash` ➔ `gemini-3.5-flash-lite` ➔ `gemini-3.8-flash`).
+  3. **Anti-Brick Guard**: Validates candidate code in memory/temp file before touching production files (`node --check` for JS, `python -m py_compile` for Python, `JSON.parse` for JSON). If syntax checks fail, feeds the error back to Gemini to self-correct (up to 3 retries).
+  4. **Permanent GitHub Sync**: Commits the validated code directly to `GITHUB_REPO` (`GITHUB_BRANCH`) via the GitHub REST API (`PUT /repos/{owner}/{repo}/contents/{path}`) with commit message `[Auto-Fix via Phone]`, ensuring Render's next deploy preserves the fix permanently.
+  5. **Instant Hot-Reload**: Overwrites the local file and restarts the worker process within ~3 seconds.
