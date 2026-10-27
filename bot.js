@@ -77,6 +77,7 @@ import {
   getLastKnownSpecs,
   joinLaptopPath,
   isPathAbsolute,
+  setCloudVaultBridge,
 } from './laptop-bridge.js';
 
 // Pending file save session cache & custom path state
@@ -89,6 +90,8 @@ const userAgentMode = new Map(); // userId -> boolean
 
 const STORAGE_DIR = process.env.STORAGE_DIR || 'D:\\drive-download-20260715T073323Z-1-001';
 const VAULT_FILE = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
+let cloudVault = [];
+let vaultPinnedMessageId = null;
 const CONVERSATION_HISTORY_FILE = process.env.CONVERSATION_HISTORY_FILE || path.resolve('./conversation_history.json');
 const TEMP_DOWNLOADS_DIR = path.resolve('./temp_downloads');
 
@@ -433,7 +436,28 @@ if (!telegramToken && !isSimulation) {
 }
 
 const bot = new Bot(telegramToken);
+
+// Global Grammy API transformer: Catch 400 Bad Request / can't parse entities errors and retry without parse_mode
+bot.api.config.use(async (prev, method, payload, signal) => {
+  try {
+    return await prev(method, payload, signal);
+  } catch (err) {
+    const msg = err?.description || err?.message || '';
+    if (payload?.parse_mode && (msg.includes("can't parse entities") || msg.includes('Bad Request'))) {
+      const safePayload = { ...payload };
+      delete safePayload.parse_mode;
+      return await prev(method, safePayload, signal);
+    }
+    throw err;
+  }
+});
+
 setBotApi(bot.api);
+setCloudVaultBridge({
+  saveCloudVaultEntry,
+  getCloudVault,
+  loadCloudDocumentContent,
+});
 
 // AI Engine Configuration: 100% Pure Google Gemini
 const geminiApiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
@@ -4146,8 +4170,6 @@ async function parseDocumentBuffer(buffer, fileExtension, fileName = '') {
   }
 }
 
-let cloudVault = [];
-let vaultPinnedMessageId = null;
 const localFileHashes = new Map();
 
 async function getLocalFileHashInfo(relPath) {
@@ -4589,7 +4611,11 @@ async function initCloudVault() {
   }
 }
 
-async function saveCloudVaultEntry({ name, file_id, ext, category, size, date, hash, textHash }) {
+export function getCloudVault() {
+  return cloudVault;
+}
+
+export async function saveCloudVaultEntry({ name, file_id, ext, category, size, date, hash, textHash }) {
   const cat = category || getFileCategory(ext).id;
   const newEntry = {
     id: Date.now().toString(),
@@ -4613,7 +4639,7 @@ async function saveCloudVaultEntry({ name, file_id, ext, category, size, date, h
   await persistCloudVault();
 }
 
-async function loadCloudDocumentContent(fileId, fileExtension, fileName = '') {
+export async function loadCloudDocumentContent(fileId, fileExtension, fileName = '') {
   try {
     const fileUrl = await bot.api.getFile(fileId);
     const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileUrl.file_path}`;

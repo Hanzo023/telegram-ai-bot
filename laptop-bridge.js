@@ -114,6 +114,39 @@ export function getBotApi() {
   return botApiRef;
 }
 
+let cloudVaultBridge = {
+  saveCloudVaultEntry: null,
+  getCloudVault: () => [],
+  loadCloudDocumentContent: null,
+};
+
+/**
+ * Register Cloud Vault handlers from bot.js
+ */
+export function setCloudVaultBridge(handlers = {}) {
+  cloudVaultBridge = { ...cloudVaultBridge, ...handlers };
+}
+
+export async function saveCloudVaultEntry(entry) {
+  if (typeof cloudVaultBridge.saveCloudVaultEntry === 'function') {
+    return await cloudVaultBridge.saveCloudVaultEntry(entry);
+  }
+}
+
+export function getCloudVault() {
+  if (typeof cloudVaultBridge.getCloudVault === 'function') {
+    return cloudVaultBridge.getCloudVault();
+  }
+  return [];
+}
+
+export async function loadCloudDocumentContent(fileId, fileExtension, fileName = '') {
+  if (typeof cloudVaultBridge.loadCloudDocumentContent === 'function') {
+    return await cloudVaultBridge.loadCloudDocumentContent(fileId, fileExtension, fileName);
+  }
+  throw new Error('Cloud vault document loader not configured');
+}
+
 
 
 /**

@@ -18,6 +18,9 @@ import {
   joinLaptopPath,
   isPathAbsolute,
   getBotApi,
+  saveCloudVaultEntry,
+  getCloudVault,
+  loadCloudDocumentContent,
 } from './laptop-bridge.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || process.cwd();
@@ -464,7 +467,7 @@ export async function executeTool(name, args = {}, context = {}) {
     }
     const maxLines = args.max_lines || args.maxLines || args.lines || 300;
 
-    // Cloud Fallback when laptop is offline: read from ./temp_downloads or cloud_vault.json
+    // Cloud Fallback when laptop is offline: read from ./temp_downloads or Cloud Vault
     if (!isLaptopConnected(context.userId)) {
       const fileName = path.basename(rawPath);
       const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
@@ -484,31 +487,22 @@ export async function executeTool(name, args = {}, context = {}) {
         }
       }
 
-      // Check cloud_vault.json
-      const vaultPath = path.resolve(process.cwd(), 'cloud_vault.json');
-      if (fs.existsSync(vaultPath)) {
-        try {
-          const vault = JSON.parse(await fsp.readFile(vaultPath, 'utf8'));
-          const entry = vault.find((f) => f.name.toLowerCase() === fileName.toLowerCase());
-          const botApi = getBotApi() || context.ctx?.api;
-          if (entry && entry.file_id && botApi && process.env.TELEGRAM_BOT_TOKEN) {
-            const fileInfo = await botApi.getFile(entry.file_id);
-            const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
-            const res = await fetch(downloadUrl);
-            if (res.ok) {
-              const text = await res.text();
-              const lines = text.split(/\r?\n/).slice(0, maxLines).join('\n');
-              return JSON.stringify({
-                success: true,
-                mode: 'cloud_vault',
-                name: entry.name,
-                content: lines,
-              });
-            }
-          }
-        } catch (vaultReadErr) {
-          console.warn('[Cloud Mode] Read vault error:', vaultReadErr.message);
+      // Check in-memory Cloud Vault via bot.js
+      try {
+        const vault = getCloudVault() || [];
+        const entry = vault.find((f) => f.name.toLowerCase() === fileName.toLowerCase());
+        if (entry && entry.file_id) {
+          const fileContent = await loadCloudDocumentContent(entry.file_id, entry.ext || path.extname(entry.name).slice(1), entry.name);
+          const lines = (typeof fileContent === 'string' ? fileContent : JSON.stringify(fileContent)).split(/\r?\n/).slice(0, maxLines).join('\n');
+          return JSON.stringify({
+            success: true,
+            mode: 'cloud_vault',
+            name: entry.name,
+            content: lines,
+          });
         }
+      } catch (vaultReadErr) {
+        console.warn('[Cloud Mode] Read vault error:', vaultReadErr.message);
       }
 
       return JSON.stringify({
@@ -559,7 +553,7 @@ export async function executeTool(name, args = {}, context = {}) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
 
-    // Cloud Fallback when laptop is offline: write to ./temp_downloads, upload to chat, and register in cloud_vault.json
+    // Cloud Fallback when laptop is offline: write to ./temp_downloads, upload to chat, and register in Cloud Vault via bot.js
     if (!isLaptopConnected(context.userId)) {
       try {
         const fileName = path.basename(rawPath);
@@ -583,29 +577,17 @@ export async function executeTool(name, args = {}, context = {}) {
           }
         }
 
-        // Register in cloud_vault.json
+        // Register in Cloud Vault via bot.js in-memory vault and persist
         try {
           const ext = fileName.split('.').pop()?.toLowerCase() || 'txt';
-          const vaultPath = path.resolve(process.cwd(), 'cloud_vault.json');
-          let vault = [];
-          if (fs.existsSync(vaultPath)) {
-            try {
-              vault = JSON.parse(await fsp.readFile(vaultPath, 'utf8'));
-            } catch {}
-          }
-          const newEntry = {
-            id: Date.now().toString(),
+          await saveCloudVaultEntry({
             name: fileName,
             file_id: telegramFileId || '',
             ext,
             category: 'code',
             size: Buffer.byteLength(content, 'utf8'),
             date: Date.now(),
-          };
-          const idx = vault.findIndex((f) => f.name.toLowerCase() === fileName.toLowerCase());
-          if (idx !== -1) vault[idx] = newEntry;
-          else vault.unshift(newEntry);
-          await fsp.writeFile(vaultPath, JSON.stringify(vault, null, 2), 'utf8');
+          });
         } catch (vaultErr) {
           console.warn('[Cloud Mode] Vault update note:', vaultErr.message);
         }
@@ -647,18 +629,15 @@ export async function executeTool(name, args = {}, context = {}) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
 
-    // Cloud Fallback when laptop is offline: list files from ./temp_downloads and cloud_vault.json
+    // Cloud Fallback when laptop is offline: list files from ./temp_downloads and in-memory Cloud Vault
     if (!isLaptopConnected(context.userId)) {
       const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
       const localFiles = fs.existsSync(cloudDir) ? await fsp.readdir(cloudDir) : [];
       let vaultFiles = [];
-      const vaultPath = path.resolve(process.cwd(), 'cloud_vault.json');
-      if (fs.existsSync(vaultPath)) {
-        try {
-          const vault = JSON.parse(await fsp.readFile(vaultPath, 'utf8'));
-          vaultFiles = vault.map((f) => f.name);
-        } catch {}
-      }
+      try {
+        const vault = getCloudVault() || [];
+        vaultFiles = vault.map((f) => f.name);
+      } catch {}
       const allFiles = [...new Set([...localFiles, ...vaultFiles])];
       return JSON.stringify({
         success: true,
@@ -753,25 +732,22 @@ export async function executeTool(name, args = {}, context = {}) {
           } catch {}
         }
 
-        // 2. Check Telegram Cloud Vault (always works on Render 24/7)
-        const vaultFile = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
-        if (fs.existsSync(vaultFile)) {
-          try {
-            const vaultData = JSON.parse(await fs.promises.readFile(vaultFile, 'utf8'));
-            if (Array.isArray(vaultData)) {
-              for (const v of vaultData) {
-                if (v.name && !foundFiles.has(v.name.toLowerCase())) {
-                  foundFiles.set(v.name.toLowerCase(), {
-                    name: v.name,
-                    source: 'telegram_cloud_vault',
-                    size: v.size,
-                    category: v.category,
-                  });
-                }
+        // 2. Check in-memory Telegram Cloud Vault (always works on Render 24/7)
+        try {
+          const vaultData = getCloudVault() || [];
+          if (Array.isArray(vaultData)) {
+            for (const v of vaultData) {
+              if (v.name && !foundFiles.has(v.name.toLowerCase())) {
+                foundFiles.set(v.name.toLowerCase(), {
+                  name: v.name,
+                  source: 'telegram_cloud_vault',
+                  size: v.size,
+                  category: v.category,
+                });
               }
             }
-          } catch {}
-        }
+          }
+        } catch {}
 
         let fileList = Array.from(foundFiles.values());
         if (args.extension) {
@@ -815,49 +791,25 @@ export async function executeTool(name, args = {}, context = {}) {
           }
         }
 
-        // 2. Check Telegram Cloud Vault (for Render cloud deployments)
-        const vaultFile = process.env.VAULT_FILE || path.resolve('./cloud_vault.json');
-        if (fs.existsSync(vaultFile)) {
-          try {
-            const vaultData = JSON.parse(await fs.promises.readFile(vaultFile, 'utf8'));
-            const entry = Array.isArray(vaultData)
-              ? vaultData.find((v) => v.name.toLowerCase() === filename.toLowerCase())
-              : null;
+        // 2. Check in-memory Telegram Cloud Vault (for Render cloud deployments)
+        try {
+          const vaultData = getCloudVault() || [];
+          const entry = Array.isArray(vaultData)
+            ? vaultData.find((v) => v.name.toLowerCase() === filename.toLowerCase())
+            : null;
 
-            if (entry && entry.file_id) {
-              const token = process.env.TELEGRAM_BOT_TOKEN;
-              if (token) {
-                const infoRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${entry.file_id}`);
-                const fileInfo = await infoRes.json();
-                if (fileInfo?.ok && fileInfo.result?.file_path) {
-                  const downRes = await fetch(`https://api.telegram.org/file/bot${token}/${fileInfo.result.file_path}`);
-                  const arrayBuf = await downRes.arrayBuffer();
-                  let textContent = '';
-
-                  if (filename.toLowerCase().endsWith('.pdf')) {
-                    try {
-                      const { PDFParse } = await import('pdf-parse');
-                      const parsed = await PDFParse(Buffer.from(arrayBuf));
-                      textContent = parsed.text || '';
-                    } catch (pdfErr) {
-                      textContent = `[PDF extraction note: ${pdfErr.message}]`;
-                    }
-                  } else {
-                    textContent = Buffer.from(arrayBuf).toString('utf8');
-                  }
-
-                  const lines = textContent.split('\n').slice(0, maxLines).join('\n');
-                  return JSON.stringify({
-                    filename,
-                    source: 'telegram_cloud_vault',
-                    content: lines,
-                  });
-                }
-              }
-            }
-          } catch (cloudErr) {
-            console.warn('[Gemini Agent] Cloud vault file fetch error:', cloudErr.message);
+          if (entry && entry.file_id) {
+            const ext = entry.ext || path.extname(entry.name).slice(1);
+            const content = await loadCloudDocumentContent(entry.file_id, ext, entry.name);
+            const lines = (typeof content === 'string' ? content : JSON.stringify(content)).split('\n').slice(0, maxLines).join('\n');
+            return JSON.stringify({
+              filename,
+              source: 'telegram_cloud_vault',
+              content: lines,
+            });
           }
+        } catch (cloudErr) {
+          console.warn('[Gemini Agent] Cloud vault file fetch error:', cloudErr.message);
         }
 
         return JSON.stringify({
