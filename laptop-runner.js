@@ -1616,34 +1616,6 @@ async function handleTask(action, payload) {
 
       const res = await runApprovalTool(args);
 
-      // If specific windowTitle was requested, but runApprovalTool returned desktop fallback,
-      // try capture_app.py as targeted fallback
-      if (windowTitle && res && res.success && res.isDesktopFallback) {
-        try {
-          const pythonCmd = process.env.PYTHON_BIN || 'python';
-          const captureScript = path.resolve(process.cwd(), 'tools', 'capture_app.py');
-          if (fs.existsSync(captureScript)) {
-            await new Promise((resolve) => {
-              execFile(pythonCmd, [captureScript, windowTitle], { timeout: 8000 }, () => resolve());
-            });
-            const visionImg = path.resolve(process.cwd(), 'agent_vision.png');
-            if (fs.existsSync(visionImg)) {
-              const imgData = await fsp.readFile(visionImg);
-              return {
-                success: true,
-                windowTitle: windowTitle,
-                isDesktopFallback: false,
-                bounds: res.bounds,
-                image: imgData.toString('base64'),
-                timestamp: Date.now(),
-              };
-            }
-          }
-        } catch (captureErr) {
-          log(`[Runner] capture_app.py secondary check note: ${captureErr.message}`);
-        }
-      }
-
       // If runApprovalTool succeeded (either targeted window or desktop fallback), return image immediately
       if (res && res.success && res.image) {
         return {

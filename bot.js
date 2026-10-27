@@ -1218,7 +1218,7 @@ setInterval(() => {
 // Eliminates duplicate replies, handles multi-part message bursts (text + photo + comment),
 // and guarantees atomic single-turn execution per user.
 const userQueues = new Map();
-const DEBOUNCE_DELAY_MS = 2000;
+const DEBOUNCE_DELAY_MS = 350;
 
 // Active autonomous agent execution sessions: userId -> session
 const activeAgentSessions = new Map();
@@ -1249,8 +1249,13 @@ async function handleTaskStop(userId, ctx) {
 }
 
 async function handleConcurrentScreenshot(userId, ctx, rawText = '') {
+  let statusMsg = null;
   try {
-    await ctx.reply('📸 *Capturing live screenshot while task is running...*', { parse_mode: 'Markdown' });
+    const activeSession = activeAgentSessions.get(userId);
+    const statusText = activeSession
+      ? '📸 *Capturing live screenshot while task is running...*'
+      : '📸 *Capturing live screenshot...*';
+    statusMsg = await ctx.reply(statusText, { parse_mode: 'Markdown' }).catch(() => null);
 
     let windowTitle = null;
     const windowMatch = rawText.match(/(?:screenshot|screen|window|capture)\s+(?:of\s+)?([a-zA-Z0-9_-]+)/i);
@@ -1259,14 +1264,20 @@ async function handleConcurrentScreenshot(userId, ctx, rawText = '') {
     }
 
     const caption = windowTitle
-      ? `📸 Live capture of "${windowTitle}" during active task`
-      : '📸 Live desktop capture during active task';
+      ? (activeSession ? `📸 Live capture of "${windowTitle}" during active task` : `📸 Live capture of "${windowTitle}"`)
+      : (activeSession ? '📸 Live desktop capture during active task' : '📸 Live desktop capture');
 
     const res = await captureLaptopScreenshot(userId, { windowTitle, caption }, 25000);
+    if (statusMsg) {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    }
     if (!res || !res.success) {
       await ctx.reply(`⚠️ Could not capture live screen: ${res?.error || 'Laptop busy or unresponsive'}`);
     }
   } catch (err) {
+    if (statusMsg) {
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+    }
     console.error(`[Concurrent Screenshot Error for ${userId}]:`, sanitizeError(err));
   }
 }
@@ -1831,14 +1842,14 @@ async function handleAgentCommand(ctx, prompt) {
   const recentHistory = userHistory.slice(-6);
 
   try {
-    const userModel = getUserModel(userId);
+    const explicitlyChosenModel = userModelPreference.get(Number(userId)) || null;
     const result = await runGeminiAgent({
       prompt,
       userId,
       userDirectory,
       recentHistory,
       maxSteps: 25,
-      model: userModel,
+      model: explicitlyChosenModel,
       pollUserQueue,
       abortSignal: abortController.signal,
       onStatusUpdate: (text) => updateStatus(text),
@@ -7240,6 +7251,20 @@ bot.on('message:text', async (ctx) => {
     const hasLaptop = isLaptopConnected(userId);
     if (hasLaptop) {
       await handleSpecCommand(ctx, userId);
+      return;
+    }
+  }
+
+  // Natural language screenshot fast-path intercept:
+  // e.g. "take a screenshot", "screenshot", "can you take a screenshot", "screenshot brave", "desktop screenshot"
+  const isDirectScreenshot =
+    /\b(take|get|capture|show|grab)?\s*(?:a\s+)?(?:screen|screenshot|desktop|snapshot|progress\s+pic)\b/i.test(userMessage) &&
+    !/\b(and|then|after|install|run|write|code|script|fix|search|yt|youtube)\b/i.test(userMessage);
+
+  if (isDirectScreenshot) {
+    const hasLaptop = isLaptopConnected(userId);
+    if (hasLaptop) {
+      await handleConcurrentScreenshot(userId, ctx, userMessage);
       return;
     }
   }

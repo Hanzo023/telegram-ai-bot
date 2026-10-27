@@ -230,8 +230,10 @@ export async function executeTool(name, args = {}, context = {}) {
     const windowTitle = args.window_title || args.windowTitle || args.title || undefined;
     const caption = args.caption || undefined;
     try {
-      // Allow newly launched GUI/TUI windows 1.5 seconds to paint on screen before snapping
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // If a window launch command was just executed, give it 500ms to paint; otherwise capture instantly without delay
+      if (context.recentWindowLaunch) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
       const res = await captureLaptopScreenshot(context.userId, { windowTitle, caption });
       if (res && res.success) {
         return JSON.stringify({
@@ -916,10 +918,11 @@ export async function runGeminiAgent({
           '       • npm: `npm install <package> --yes --no-audit --no-fund`\n' +
           '       CRITICAL: Never run commands that prompt for user confirmation without non-interactive flags.\n' +
           '    b. Launch: Interactive TUIs (like Yazi) or terminal programs CANNOT run in headless background subprocesses. You MUST launch them in a visible GUI terminal window via `run_laptop_terminal(command="start cmd /k yazi")` or `start wt cmd /k yazi`. For GUI desktop apps, use `run_laptop_terminal(command="start <app_name>")` (e.g. `start roblox:`, `start brave`).\n' +
-          '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. The system will automatically allow 1.5 seconds for the window to paint, bring it to the foreground, and deliver the screenshot directly to Telegram.',
+          '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. The system will automatically bring it to the foreground and deliver the screenshot directly to Telegram.',
       });
 
       let stepCount = 0;
+      let recentWindowLaunch = false;
 
       while (stepCount < maxSteps) {
         if (abortSignal?.aborted) {
@@ -1001,13 +1004,22 @@ export async function runGeminiAgent({
           onStatusUpdate(`⚙️ *Executing tool:* \`${toolName}(${argsSummary})\`...`);
         }
 
+        if (toolName === 'run_laptop_terminal' && /(?:start\s+|wt\b|cmd\s+\/k)/i.test(toolArgs?.command || '')) {
+          recentWindowLaunch = true;
+        }
+
         const toolResult = await executeTool(toolName, toolArgs, {
           userId,
           userDirectory,
           detectedWorkingDir,
           prompt,
           onStatusUpdate,
+          recentWindowLaunch,
         });
+
+        if (toolName === 'take_screenshot') {
+          recentWindowLaunch = false;
+        }
 
         if (abortSignal?.aborted) {
           return {
@@ -1024,6 +1036,27 @@ export async function runGeminiAgent({
             midTaskInstruction = pollUserQueue();
           } catch (err) {
             console.error('[Gemini Agent pollUserQueue Error]:', err);
+          }
+        }
+
+        // Fast-path resolution for screenshot actions:
+        // If the screenshot was captured and delivered to Telegram, and no mid-task instruction arrived,
+        // finish immediately without waiting 2-4 seconds for an extra redundant LLM round-trip.
+        if (toolName === 'take_screenshot' && !midTaskInstruction) {
+          let parsed;
+          try { parsed = JSON.parse(toolResult); } catch {}
+          if (parsed && parsed.success) {
+            const isPrimarilyScreenshot =
+              /\b(?:screenshot|screen|desktop|capture|snapshot|pic)\b/i.test(prompt) &&
+              !/\b(?:then|afterwards|and\s+also|next|install|fix|code)\b/i.test(prompt);
+            if (isPrimarilyScreenshot || stepsExecuted.length >= 2) {
+              const targetTitle = parsed.windowTitle || 'Primary Display';
+              return {
+                finalAnswer: `📸 *Screenshot of "${targetTitle}" captured and sent directly to Telegram.*`,
+                stepsExecuted,
+                success: true,
+              };
+            }
           }
         }
 

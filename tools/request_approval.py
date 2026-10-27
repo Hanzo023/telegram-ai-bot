@@ -317,10 +317,6 @@ def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, q
                     break
         elif target_title:
             target_win = match_target_window(target_title, all_windows)
-            if not target_win:
-                if try_launch_target_app(target_title):
-                    all_windows = enum_visible_windows()
-                    target_win = match_target_window(target_title, all_windows)
 
     img = None
     if target_win:
