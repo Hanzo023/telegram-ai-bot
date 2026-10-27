@@ -1037,11 +1037,18 @@ export async function runGeminiAgent({
 
   // Inspect live laptop connection status for Standalone Phone / Cloud Mode
   const laptopOnline = isLaptopConnected(userId);
+  const offlineDirective = !laptopOnline
+    ? '⚠️ SYSTEM NOTICE: The user\'s physical laptop is currently OFFLINE (disconnected).\n' +
+      'You are operating in STANDALONE PHONE / CLOUD MODE.\n' +
+      '- Do NOT say "I don\'t have access to your personal device" or give up.\n' +
+      '- If the user asks about installed apps, files, or system info, use available tools like search_web, list_drive_files, read_drive_file, or run shell commands in the cloud container.\n' +
+      '- If they ask for a screenshot of a website, use open_and_capture_webpage.\n' +
+      '- Be resourceful and proactive.\n\n'
+    : '';
+
   const connectionModeInstruction = laptopOnline
     ? 'LAPTOP CONNECTION: ONLINE & ACTIVE. Tools execute directly on the user\'s physical laptop.\n\n'
-    : 'LAPTOP CONNECTION: OFFLINE (STANDALONE PHONE / CLOUD MODE).\n' +
-      'The user is using the bot from their mobile phone while their laptop is offline.\n' +
-      'All tools automatically and seamlessly execute in Standalone Cloud Mode:\n' +
+    : 'All tools automatically and seamlessly execute in Standalone Cloud Mode:\n' +
       '• write_laptop_file: Writes the file to the cloud workspace (./temp_downloads), uploads the file directly to the user\'s Telegram chat, and stores it in Telegram Cloud Vault.\n' +
       '• read_laptop_file & list_laptop_files: Read and list files from Telegram Cloud Vault and the cloud workspace (./temp_downloads).\n' +
       '• run_laptop_terminal: Runs commands directly inside the cloud workspace container (./temp_downloads), with Node.js, Python, and Git available.\n' +
@@ -1097,6 +1104,7 @@ export async function runGeminiAgent({
         input: inputPrompt,
         tools: AGENT_TOOLS,
         system_instruction:
+          offlineDirective +
           'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical laptop.\n' +
           connectionModeInstruction +
           `User\'s target folder on their laptop: "${effectiveTargetDir}".\n\n` +
