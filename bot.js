@@ -466,13 +466,13 @@ if (isMainModule && !isSimulation) {
   server.on('upgrade', (request, socket, head) => {
     try {
       const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
-      const pathname = url.pathname;
+      const cleanPath = url.pathname.replace(/\/+$/, '').toLowerCase();
 
-      if (pathname === '/ws/live-call' && liveCallWss) {
+      if ((cleanPath === '/ws/live-call' || cleanPath === '/live-call') && liveCallWss) {
         liveCallWss.handleUpgrade(request, socket, head, (ws) => {
           liveCallWss.emit('connection', ws, request);
         });
-      } else if (pathname === '/ws/laptop-agent' && laptopWss) {
+      } else if ((cleanPath === '/ws/laptop-agent' || cleanPath === '/laptop-agent') && laptopWss) {
         laptopWss.handleUpgrade(request, socket, head, (ws) => {
           laptopWss.emit('connection', ws, request);
         });

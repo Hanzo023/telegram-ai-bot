@@ -152,8 +152,10 @@ if (!TELEGRAM_USER_ID) {
 
 // Build WebSocket URL
 function buildWsUrl() {
-  const base = SERVER_URL.replace(/\/+$/, '');
-  const targetPath = base.includes('/ws/laptop-agent') ? base : `${base}/ws/laptop-agent`;
+  let base = SERVER_URL.replace(/\/+$/, '');
+  // Strip any trailing endpoint path if user or env already included it
+  base = base.replace(/\/(ws\/)?laptop-agent\/?$/i, '');
+  const targetPath = `${base}/ws/laptop-agent`;
   const url = new URL(targetPath);
 
   url.searchParams.set('secret', RUNNER_SECRET);
@@ -252,11 +254,10 @@ function log(msg) {
 
 
 process.on('uncaughtException', (err) => {
-
-  log(`[CRITICAL] Uncaught exception: ${err.message}`);
-
-  scheduleReconnect();
-
+  log(`[CRITICAL] Uncaught exception: ${err.stack || err.message}`);
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    scheduleReconnect();
+  }
 });
 
 
@@ -270,13 +271,10 @@ process.on('unhandledRejection', (reason) => {
 
 
 let ws = null;
-
 let pingInterval = null;
-
 let reconnectTimer = null;
-
+let connectionStabilityTimer = null;
 let reconnectAttempts = 0;
-
 let isExiting = false;
 
 
@@ -627,269 +625,202 @@ function runListWindowsTool(timeoutMs = 12000) {
 }
 
 function connect() {
-
   if (isExiting) return;
 
   if (reconnectTimer) {
-
     clearTimeout(reconnectTimer);
-
     reconnectTimer = null;
+  }
 
+  if (connectionStabilityTimer) {
+    clearTimeout(connectionStabilityTimer);
+    connectionStabilityTimer = null;
   }
 
   if (pingInterval) {
-
     clearInterval(pingInterval);
-
     pingInterval = null;
-
   }
 
   if (ws) {
-
     try {
-
       ws.removeAllListeners();
-
       ws.terminate();
-
     } catch {}
-
     ws = null;
-
   }
 
-
-
   const wsUrl = buildWsUrl();
-
   log(`[Runner] Connecting to Cloud Agent Bridge at ${SERVER_URL}...`);
 
-
-
   try {
-
     ws = new WebSocket(wsUrl);
 
-
-
-    // Keepalive ping timer (every 5 seconds) to prevent cloud reverse proxy (Render) from timing out
-
-    pingInterval = setInterval(() => {
-
-      if (ws && ws.readyState === WebSocket.OPEN) {
-
-        try {
-
-          ws.ping();
-
-        } catch {}
-
-      }
-
-    }, 5000);
-
-
+    // Heartbeat tracking to detect silent or half-open TCP disconnects
+    let isAlive = true;
 
     ws.on('open', async () => {
-
-      reconnectAttempts = 0;
-
       log('✅ Connected to Cloud Agent Bridge! Waiting for commands from Telegram...');
+      isAlive = true;
 
-      // Broadcast live hardware specs immediately upon connection for instant /status and /spec caching
+      // Only reset reconnectAttempts after maintaining connection stably for 15s
+      connectionStabilityTimer = setTimeout(() => {
+        reconnectAttempts = 0;
+        connectionStabilityTimer = null;
+      }, 15000);
 
-      try {
-
-        await refreshHardwareInfo(true);
-
-        const specs = await handleTask('status', {});
-
-        if (ws && ws.readyState === WebSocket.OPEN) {
-
-          ws.send(JSON.stringify({ type: 'initial_status', storageDir: RUNNER_STORAGE_DIR, deviceType: DEVICE_TYPE, ...specs }));
-
-          log('[Runner] 📊 Live system specs transmitted to server.');
-
+      // Keepalive ping timer (every 20s) to keep reverse proxy tunnel alive
+      if (pingInterval) clearInterval(pingInterval);
+      pingInterval = setInterval(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+          }
+          return;
         }
 
-      } catch (specErr) {
+        if (!isAlive) {
+          log('[Runner] ⚠️ Bridge heartbeat timeout (no response from server). Terminating socket to reconnect...');
+          try {
+            ws.terminate();
+          } catch {}
+          return;
+        }
 
-        log(`[Runner] Could not send initial specs: ${specErr.message}`);
+        isAlive = false;
+        try {
+          ws.ping();
+        } catch {}
+      }, 20000);
 
-      }
-
-    });
-
-
-
-    ws.on('ping', () => {
-
+      // Broadcast live hardware specs immediately upon connection for instant /status and /spec caching
       try {
-
-        ws.pong();
-
-      } catch {}
-
+        await refreshHardwareInfo(true);
+        const specs = await handleTask('status', {});
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'initial_status', storageDir: RUNNER_STORAGE_DIR, deviceType: DEVICE_TYPE, ...specs }));
+          log('[Runner] 📊 Live system specs transmitted to server.');
+        }
+      } catch (specErr) {
+        log(`[Runner] Could not send initial specs: ${specErr.message}`);
+      }
     });
-
-
 
     ws.on('pong', () => {
-
-      // Server pong received, connection is healthy
-
+      isAlive = true;
     });
 
-
+    ws.on('ping', () => {
+      // ws package automatically sends pong frame. We mark heartbeat as active.
+      isAlive = true;
+    });
 
     ws.on('message', async (data) => {
-
+      isAlive = true;
       try {
-
         const msg = JSON.parse(data.toString());
 
         if (msg.type === 'connected') {
-
           log(`[Runner] Server handshake confirmed: ${msg.message}`);
-
           return;
-
         }
 
-
+        if (msg.type === 'replaced') {
+          log(`[Runner] 🛑 Exiting: ${msg.message}`);
+          isExiting = true;
+          if (connectionStabilityTimer) clearTimeout(connectionStabilityTimer);
+          if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+          if (ipcServer) try { ipcServer.close(); } catch {}
+          process.exit(0);
+        }
 
         if (msg.type === 'error') {
-
           log(`[Runner] ❌ Bridge Error: ${msg.message}`);
-
+          if (/auth|unauthorized|secret|forbidden|invalid user/i.test(msg.message)) {
+            log(`[Runner] 🛑 Fatal authentication error. Exiting to avoid reconnect loop.`);
+            isExiting = true;
+            if (connectionStabilityTimer) clearTimeout(connectionStabilityTimer);
+            if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            if (ipcServer) try { ipcServer.close(); } catch {}
+            process.exit(1);
+          }
           return;
-
         }
-
-
 
         if (msg.id && msg.action) {
-
           log(`[Runner] 📥 Received task [${msg.id}]: action="${msg.action}"`);
-
           const response = await handleTask(msg.action, msg);
-
           if (ws && ws.readyState === WebSocket.OPEN) {
-
             ws.send(JSON.stringify({ id: msg.id, ...response }));
-
             log(`[Runner] 📤 Completed task [${msg.id}]: success=${response.success}`);
-
           }
-
         }
-
       } catch (err) {
-
         log(`[Runner] Error handling incoming message: ${err.message}`);
-
       }
-
     });
 
-
-
     ws.on('close', (code, reason) => {
-
+      if (connectionStabilityTimer) {
+        clearTimeout(connectionStabilityTimer);
+        connectionStabilityTimer = null;
+      }
       if (pingInterval) {
-
         clearInterval(pingInterval);
-
         pingInterval = null;
-
       }
 
       const reasonStr = reason ? reason.toString() : '';
-
       let diag = '';
-
       if (code === 4001) {
-
         diag = ' (Secret mismatch: Check LAPTOP_RUNNER_SECRET or TELEGRAM_BOT_TOKEN)';
-
       } else if (code === 4003) {
-
         diag = ` (Unauthorized Telegram User ID: ${TELEGRAM_USER_ID} is not in ALLOWED_USER_ID on bot)`;
-
       } else if (code === 1006) {
-
         diag = ' (Connection dropped or target server unreachable)';
-
       }
-
       log(`[Runner] Disconnected (code: ${code}${reasonStr ? `, reason: "${reasonStr}"` : ''})${diag}.`);
 
-
-
       // If connection was replaced by a newer instance or rejected by auth, exit immediately
-
       if (reasonStr.includes('Replaced by new connection') || code === 4001 || code === 4003) {
-
         log(`[Runner] 🛑 Exiting process because server rejected or replaced connection (${reasonStr || code}).`);
-
+        isExiting = true;
         if (ipcServer) {
-
           try { ipcServer.close(); } catch {}
-
         }
-
         process.exit(0);
-
       }
 
-
-
       scheduleReconnect();
-
     });
-
-
 
     ws.on('error', (err) => {
-
       log(`[Runner] WebSocket connection error: ${err.message}`);
-
     });
-
   } catch (err) {
-
     log(`[Runner] Failed to initialize WebSocket: ${err.message}`);
-
     scheduleReconnect();
-
   }
-
 }
 
-
-
 function scheduleReconnect() {
-
   if (isExiting) return;
-
   if (reconnectTimer) return;
 
   reconnectAttempts++;
-
-  const delay = Math.min(10000, 1500 + Math.min(reconnectAttempts * 1500, 8500));
+  // Exponential backoff with jitter: 2.5s, 3.5s, 5s, 7s, 10s, up to 30s + jitter
+  const baseDelay = Math.min(30000, Math.round(2000 * Math.pow(1.35, Math.min(reconnectAttempts, 8))));
+  const jitter = Math.floor(Math.random() * 1200);
+  const delay = baseDelay + jitter;
 
   log(`[Runner] Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts})...`);
-
   reconnectTimer = setTimeout(() => {
-
     reconnectTimer = null;
-
     connect();
-
   }, delay);
-
 }
 
 
@@ -1603,8 +1534,11 @@ async function handleTask(action, payload) {
     case 'disable_runner':
 
     case 'stop_runner': {
-
       console.log('[Runner] Remote disable/stop signal received from Telegram.');
+      isExiting = true;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+      if (connectionStabilityTimer) { clearTimeout(connectionStabilityTimer); connectionStabilityTimer = null; }
 
       try {
 

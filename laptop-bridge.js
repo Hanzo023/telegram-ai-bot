@@ -733,10 +733,10 @@ export function setupLaptopBridge(server, allowedUserIds) {
 
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-      const secret = url.searchParams.get('secret') || '';
-      const userIdParam = url.searchParams.get('userId') || url.searchParams.get('user') || '';
+      const secret = (url.searchParams.get('secret') || '').trim();
+      const userIdParam = (url.searchParams.get('userId') || url.searchParams.get('user') || '').trim();
 
-      const expectedSecret = getExpectedSecret();
+      const expectedSecret = (getExpectedSecret() || '').trim();
       if (expectedSecret && secret !== expectedSecret) {
         ws.send(JSON.stringify({ type: 'error', message: 'Authentication failed: Invalid secret.' }));
         ws.close(4001, 'Invalid secret');
@@ -789,6 +789,12 @@ export function setupLaptopBridge(server, allowedUserIds) {
         try {
           if (prevDev.ws && prevDev.ws !== ws && prevDev.ws.readyState === WebSocket.OPEN) {
             console.log(`[Laptop Bridge] Closing prior connection for device "${deviceId}" (User ${userId})`);
+            try {
+              prevDev.ws.send(JSON.stringify({
+                type: 'replaced',
+                message: `Connection replaced by newer session for device "${deviceId}".`
+              }));
+            } catch {}
             prevDev.ws.close(1000, 'Replaced by new connection');
           }
         } catch {}
@@ -860,27 +866,35 @@ export function setupLaptopBridge(server, allowedUserIds) {
         console.log(`[Laptop Bridge] ℹ️ Suppressed redundant Telegram connect notification for User ${userId}, device "${deviceName}" [${deviceId}] (reconnected within cooldown).`);
       }
 
+      // Heartbeat tracking to detect dropped/silent connections
+      let isAlive = true;
+      ws.on('pong', () => {
+        isAlive = true;
+        deviceRecord.lastPing = Date.now();
+      });
 
-
-      // Keepalive ping timer (every 10s to keep reverse proxy tunnel alive)
-
+      // Keepalive ping timer (every 15s to keep reverse proxy tunnel alive)
       const pingInterval = setInterval(() => {
-
         if (ws.readyState === WebSocket.OPEN) {
-
-          ws.ping();
-
+          if (!isAlive) {
+            console.log(`[Laptop Bridge] Device "${deviceName}" [${deviceId}] heartbeat timeout (no pong). Terminating dead socket.`);
+            clearInterval(pingInterval);
+            try {
+              ws.terminate();
+            } catch {}
+            return;
+          }
+          isAlive = false;
+          try {
+            ws.ping();
+          } catch {}
         } else {
-
           clearInterval(pingInterval);
-
         }
-
-      }, 10000);
-
-
+      }, 15000);
 
       ws.on('message', (data) => {
+        isAlive = true;
 
         try {
 
