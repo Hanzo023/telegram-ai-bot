@@ -15,17 +15,52 @@ import {
   captureLaptopScreenshot,
   listLaptopWindows,
   isLaptopConnected,
+  getConnectedLaptopsList,
+  getActiveDevicePlatform,
   joinLaptopPath,
   isPathAbsolute,
   getBotApi,
   saveCloudVaultEntry,
   getCloudVault,
   loadCloudDocumentContent,
+  getUserPreferredDevice,
+  getPreferredDevice,
 } from './laptop-bridge.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || process.cwd();
 const PRIMARY_MODEL = process.env.GEMINI_AGENT_MODEL || 'gemini-3.5-flash-lite';
 const FALLBACK_MODEL = 'gemini-3.8-flash';
+
+/**
+ * Normalize device paths, handling Android Termux download/document directories
+ * and stripping Windows drive letters when operating on Android.
+ *
+ * @param {string} rawPath
+ * @param {object|string} devInfo Device info object or platform string
+ * @param {string} [fallbackDir=''] Base directory for non-Android laptops
+ * @returns {string}
+ */
+export function normalizeDevicePath(rawPath, devInfo, fallbackDir = '') {
+  const isAndroid = typeof devInfo === 'string'
+    ? devInfo.toLowerCase().trim() === 'android'
+    : devInfo?.platform === 'android';
+
+  if (isAndroid) {
+    const androidBase = (typeof devInfo === 'object' && devInfo?.storageDir) || '/sdcard/Download';
+    const trimmed = typeof rawPath === 'string' ? rawPath.trim() : '';
+    if (!trimmed || /^(?:\.?[\/\\])?downloads?$/i.test(trimmed) || /^[\/\\]?sdcard[\/\\]download/i.test(trimmed)) {
+      return androidBase;
+    }
+    if (/^(?:\.?[\/\\])?documents?$/i.test(trimmed)) {
+      return '/sdcard/Documents';
+    }
+    if (/^[a-zA-Z]:[\/\\]/i.test(trimmed)) {
+      return `${androidBase}/${path.win32.basename(trimmed)}`;
+    }
+    return joinLaptopPath(androidBase, trimmed);
+  }
+  return joinLaptopPath(fallbackDir, rawPath);
+}
 
 /**
  * Tool Declarations for Gemini Interactions API
@@ -43,7 +78,7 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     name: 'take_screenshot',
-    description: 'Capture a live screenshot of the user\'s laptop screen or a specific application window and send the photo directly to the user in Telegram. Use this whenever the user asks for a screenshot, wants to see their screen or desktop, or asks what is currently displayed on their PC.',
+    description: 'Capture a live screenshot of the user\'s laptop screen, phone screen, or a specific application window and send the photo directly to the user in Telegram. Use this whenever the user asks for a screenshot, wants to see their screen or desktop, or asks what is currently displayed on their device.',
     parameters: {
       type: 'object',
       properties: {
@@ -54,6 +89,11 @@ export const AGENT_TOOLS = [
         caption: {
           type: 'string',
           description: 'Optional brief caption to display with the screenshot in Telegram.',
+        },
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to capture screenshot from. Default is laptop, or phone/tablet if the user mentions their phone or Android device.',
         },
       },
     },
@@ -76,12 +116,17 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     name: 'run_laptop_terminal',
-    description: 'Execute a terminal command (PowerShell / Command Prompt / Bash) on the user\'s physical laptop to install packages, run tests, fix code, inspect processes, or open interactive apps. CRITICAL: For interactive TUIs (like yazi, nano, vim) or applications meant to open on desktop, always launch in a visible GUI terminal: "start wt cmd /k \\"<command>\\"" or "start cmd /k \\"<command>\\""',
+    description: 'Execute a terminal command (PowerShell / Command Prompt / Bash / Termux) on the user\'s physical device(s). You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to run commands on their phone, ALWAYS use `run_laptop_terminal` targeting `/sdcard/Download` or `target_device: "phone"`. For interactive TUIs on Windows, launch in a visible GUI terminal: "start wt cmd /k \\"<command>\\"" or "start cmd /k \\"<command>\\""; on Android/Termux, commands run directly in bash/sh or termux-open.',
     parameters: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'The terminal command line to execute (e.g. "npm install express", "python test.py", "git status"). For interactive TUIs (yazi, etc.), use "start cmd /k <cmd>" or "start wt cmd /k <cmd>".' },
-        cwd: { type: 'string', description: 'Optional working directory path on the laptop (e.g. "D:\\projects\\my-app")' },
+        command: { type: 'string', description: 'The terminal command line to execute (e.g. "npm install express", "python test.py", "git status", "pkg install git"). For interactive TUIs (yazi, etc.), use "start cmd /k <cmd>" or "start wt cmd /k <cmd>".' },
+        cwd: { type: 'string', description: 'Optional working directory path on the laptop or device (e.g. "D:\\projects\\my-app" on laptop, or "/sdcard/Download" on phone)' },
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to execute on. Default is laptop, or phone/tablet if the user mentions their phone, mobile, Android, or tablet.',
+        },
       },
       required: ['command'],
     },
@@ -89,12 +134,17 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     name: 'read_laptop_file',
-    description: 'Read the contents of a file directly from the user\'s physical laptop filesystem.',
+    description: 'Read the contents of a file directly from the user\'s physical laptop, phone, or tablet filesystem. You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to check or read files on their phone, ALWAYS use `read_laptop_file` targeting `/sdcard/Download` or `target_device: "phone"`.',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: 'Full or relative path to the file on the laptop (e.g. "D:\\projects\\app\\index.js")' },
+        file_path: { type: 'string', description: 'Full or relative path to the file on the laptop or phone (e.g. "D:\\projects\\app\\index.js" or "/sdcard/Download/file.txt")' },
         max_lines: { type: 'integer', description: 'Max lines to read (default 200)' },
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to execute on. Default is laptop, or phone/tablet if the user mentions their phone, mobile, Android, or tablet.',
+        },
       },
       required: ['file_path'],
     },
@@ -102,12 +152,17 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     name: 'write_laptop_file',
-    description: 'Create, write, or patch a file directly on the user\'s physical laptop filesystem to fix bugs or update code.',
+    description: 'Create, write, or patch a file directly on the user\'s physical laptop, phone, or tablet filesystem. You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to save, create, or write files on their phone, ALWAYS use `write_laptop_file` targeting `/sdcard/Download` or `target_device: "phone"`.',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: 'Full path to the file on the laptop' },
+        file_path: { type: 'string', description: 'Full path to the file on the target device' },
         content: { type: 'string', description: 'The complete text/code content to write to the file' },
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to execute on. Default is laptop, or phone/tablet if the user mentions their phone, mobile, Android, or tablet.',
+        },
       },
       required: ['file_path', 'content'],
     },
@@ -115,11 +170,16 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     name: 'list_laptop_files',
-    description: 'List files and directories directly on the user\'s physical laptop filesystem.',
+    description: 'List files and directories directly on the user\'s physical laptop, phone, or tablet filesystem. You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to check files on their phone, ALWAYS use `list_laptop_files` targeting `/sdcard/Download` or `target_device: "phone"`.',
     parameters: {
       type: 'object',
       properties: {
-        dir_path: { type: 'string', description: 'Directory path to list on the laptop (e.g. "D:\\projects")' },
+        dir_path: { type: 'string', description: 'Directory path to list on the device (e.g. "D:\\projects" on laptop or "/sdcard/Download" on phone)' },
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to execute on. Default is laptop, or phone/tablet if the user mentions their phone, mobile, Android, or tablet.',
+        },
       },
     },
   },
@@ -138,10 +198,16 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     name: 'get_laptop_status',
-    description: 'Get live hardware and system status of the user\'s physical laptop (CPU, memory, battery, hostname, platform).',
+    description: 'Get live hardware and system status of the user\'s physical laptop, phone, or tablet (CPU, memory, battery, hostname, platform).',
     parameters: {
       type: 'object',
-      properties: {},
+      properties: {
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to execute on. Default is laptop, or phone/tablet if the user mentions their phone, mobile, Android, or tablet.',
+        },
+      },
     },
   },
   {
@@ -248,8 +314,11 @@ export async function executeTool(name, args = {}, context = {}) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
 
-    // Cloud Fallback when laptop is offline
-    if (!isLaptopConnected(context.userId)) {
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+    const devInfo = getActiveDevicePlatform(context.userId, targetDevice);
+
+    // Cloud Fallback when device is offline
+    if (!isLaptopConnected(context.userId, targetDevice)) {
       const urlMatch = (context.prompt || '').match(/https?:\/\/[^\s"'`]+/) ||
         (args.window_title || '').match(/https?:\/\/[^\s"'`]+/);
       if (urlMatch) {
@@ -258,7 +327,7 @@ export async function executeTool(name, args = {}, context = {}) {
       }
       return JSON.stringify({
         success: false,
-        error: 'Laptop is offline. Cannot capture desktop screen. You can capture any web page or web app using `open_and_capture_webpage(url="https://...")`.',
+        error: 'Target device is offline. Cannot capture desktop screen. You can capture any web page or web app using `open_and_capture_webpage(url="https://...")`.',
       });
     }
 
@@ -270,7 +339,7 @@ export async function executeTool(name, args = {}, context = {}) {
       if (context.recentWindowLaunch) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      const res = await captureLaptopScreenshot(context.userId, { windowTitle, caption });
+      const res = await captureLaptopScreenshot(context.userId, { windowTitle, caption, sendDirect: true, targetDevice });
       if (res && res.success) {
         return JSON.stringify({
           success: true,
@@ -279,8 +348,40 @@ export async function executeTool(name, args = {}, context = {}) {
           isDesktopFallback: res.isDesktopFallback,
         });
       }
+
+      // Check fallback to open_and_capture_webpage if Android or web target
+      const promptLower = (context.prompt || '').toLowerCase();
+      const urlMatch = (context.prompt || '').match(/https?:\/\/[^\s"'`]+/) ||
+        (windowTitle || '').match(/https?:\/\/[^\s"'`]+/);
+      if (devInfo?.platform === 'android' || urlMatch || /\b(gemini|google|github|website|web page|url)\b/i.test(promptLower)) {
+        let webUrl = urlMatch ? urlMatch[0] : null;
+        if (!webUrl) {
+          if (/\bgemini\b/i.test(promptLower)) webUrl = 'https://gemini.google.com';
+          else if (/\bgithub\b/i.test(promptLower)) webUrl = 'https://github.com';
+          else if (/\bgoogle\b/i.test(promptLower)) webUrl = 'https://google.com';
+        }
+        if (webUrl) {
+          context.onStatusUpdate?.('🌐 Falling back to web snapshot...');
+          return await executeTool('open_and_capture_webpage', { url: webUrl }, context);
+        }
+      }
+
       return JSON.stringify({ error: res?.error || 'Failed to capture screenshot.' });
     } catch (err) {
+      const promptLower = (context.prompt || '').toLowerCase();
+      const urlMatch = (context.prompt || '').match(/https?:\/\/[^\s"'`]+/);
+      if (devInfo?.platform === 'android' || urlMatch || /\b(gemini|google|github|website|web page|url)\b/i.test(promptLower)) {
+        let webUrl = urlMatch ? urlMatch[0] : null;
+        if (!webUrl) {
+          if (/\bgemini\b/i.test(promptLower)) webUrl = 'https://gemini.google.com';
+          else if (/\bgithub\b/i.test(promptLower)) webUrl = 'https://github.com';
+          else if (/\bgoogle\b/i.test(promptLower)) webUrl = 'https://google.com';
+        }
+        if (webUrl) {
+          context.onStatusUpdate?.('🌐 Falling back to web snapshot...');
+          return await executeTool('open_and_capture_webpage', { url: webUrl }, context);
+        }
+      }
       return JSON.stringify({ error: err.message });
     }
   }
@@ -403,12 +504,15 @@ export async function executeTool(name, args = {}, context = {}) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
 
-    // Cloud Fallback when laptop is offline: execute inside ./temp_downloads in cloud container
-    if (!isLaptopConnected(context.userId)) {
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+    const devInfo = getActiveDevicePlatform(context.userId, targetDevice);
+
+    // Cloud Fallback when device is offline: execute inside ./temp_downloads in cloud container
+    if (!isLaptopConnected(context.userId, targetDevice)) {
       const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
       if (!fs.existsSync(cloudDir)) fs.mkdirSync(cloudDir, { recursive: true });
 
-      console.log(`[Cloud Terminal] Laptop offline. Executing "${command}" in cloud workspace (${cloudDir})...`);
+      console.log(`[Cloud Terminal] Target device offline. Executing "${command}" in cloud workspace (${cloudDir})...`);
       context.onStatusUpdate?.(`☁️ *Executing in Cloud Workspace:* \`${command.slice(0, 50)}\`...`);
 
       const { exec } = await import('child_process');
@@ -427,19 +531,26 @@ export async function executeTool(name, args = {}, context = {}) {
       return JSON.stringify(terminalRes);
     }
 
-    const effectiveCwd =
+    let effectiveCwd =
       args.cwd ||
       args.working_dir ||
       args.workingDirectory ||
       context.detectedWorkingDir ||
       undefined;
+
+    if (devInfo?.platform === 'android' && (!effectiveCwd || /^[a-zA-Z]:/i.test(effectiveCwd))) {
+      effectiveCwd = devInfo.storageDir || '/sdcard/Download';
+    } else if (devInfo?.platform === 'android' && effectiveCwd) {
+      effectiveCwd = normalizeDevicePath(effectiveCwd, devInfo, devInfo.storageDir || '/sdcard/Download');
+    }
+
     const onProgress = context.onStatusUpdate
       ? (progressText) => {
           context.onStatusUpdate?.(`⚙️ *Executing terminal command...*\n\`\`\`\n${progressText}\n\`\`\``);
         }
       : undefined;
     try {
-      const res = await runLaptopCommand(context.userId, command, effectiveCwd, onProgress);
+      const res = await runLaptopCommand(context.userId, command, effectiveCwd, onProgress, targetDevice);
       return JSON.stringify(res);
     } catch (err) {
       return JSON.stringify({ error: err.message });
@@ -466,10 +577,14 @@ export async function executeTool(name, args = {}, context = {}) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
     const maxLines = args.max_lines || args.maxLines || args.lines || 300;
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+    const devInfo = getActiveDevicePlatform(context.userId, targetDevice);
+    const fallbackDir = context.detectedWorkingDir || context.userDirectory || '';
+    const normalizedPath = normalizeDevicePath(rawPath, devInfo, fallbackDir);
 
-    // Cloud Fallback when laptop is offline: read from ./temp_downloads or Cloud Vault
-    if (!isLaptopConnected(context.userId)) {
-      const fileName = path.basename(rawPath);
+    // Cloud Fallback when device is offline: read from ./temp_downloads or Cloud Vault
+    if (!isLaptopConnected(context.userId, targetDevice)) {
+      const fileName = path.basename(normalizedPath);
       const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
       const localDest = path.join(cloudDir, fileName);
       if (fs.existsSync(localDest)) {
@@ -507,14 +622,12 @@ export async function executeTool(name, args = {}, context = {}) {
 
       return JSON.stringify({
         success: false,
-        error: `Laptop is offline and file "${fileName}" was not found in Telegram Cloud Vault or cloud workspace.`,
+        error: `Target device is offline and file "${fileName}" was not found in Telegram Cloud Vault or cloud workspace.`,
       });
     }
 
-    const baseDir = context.detectedWorkingDir || context.userDirectory;
-    const effectivePath = joinLaptopPath(baseDir, rawPath);
     try {
-      const res = await readLaptopFile(context.userId, effectivePath, maxLines);
+      const res = await readLaptopFile(context.userId, normalizedPath, maxLines, targetDevice);
       return JSON.stringify(res);
     } catch (err) {
       return JSON.stringify({ error: err.message });
@@ -552,11 +665,15 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+    const devInfo = getActiveDevicePlatform(context.userId, targetDevice);
+    const fallbackDir = context.detectedWorkingDir || context.userDirectory || '';
+    const normalizedPath = normalizeDevicePath(rawPath, devInfo, fallbackDir);
 
-    // Cloud Fallback when laptop is offline: write to ./temp_downloads, upload to chat, and register in Cloud Vault via bot.js
-    if (!isLaptopConnected(context.userId)) {
+    // Cloud Fallback when device is offline: write to ./temp_downloads, upload to chat, and register in Cloud Vault via bot.js
+    if (!isLaptopConnected(context.userId, targetDevice)) {
       try {
-        const fileName = path.basename(rawPath);
+        const fileName = path.basename(normalizedPath);
         const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
         if (!fs.existsSync(cloudDir)) fs.mkdirSync(cloudDir, { recursive: true });
         const localDest = path.join(cloudDir, fileName);
@@ -596,17 +713,15 @@ export async function executeTool(name, args = {}, context = {}) {
           success: true,
           mode: 'cloud_vault',
           filePath: localDest,
-          message: `Laptop is offline. Saved "${fileName}" directly to Telegram Cloud Vault and sent to chat.`,
+          message: `Target device is offline. Saved "${fileName}" directly to Telegram Cloud Vault and sent to chat.`,
         });
       } catch (cloudWriteErr) {
         return JSON.stringify({ error: `Cloud write failed: ${cloudWriteErr.message}` });
       }
     }
 
-    const baseDir = context.detectedWorkingDir || context.userDirectory;
-    const effectivePath = joinLaptopPath(baseDir, rawPath);
     try {
-      const res = await writeLaptopFile(context.userId, effectivePath, content);
+      const res = await writeLaptopFile(context.userId, normalizedPath, content, 'utf8', targetDevice);
       return JSON.stringify(res);
     } catch (err) {
       return JSON.stringify({ error: err.message });
@@ -628,9 +743,11 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+    const devInfo = getActiveDevicePlatform(context.userId, targetDevice);
 
-    // Cloud Fallback when laptop is offline: list files from ./temp_downloads and in-memory Cloud Vault
-    if (!isLaptopConnected(context.userId)) {
+    // Cloud Fallback when device is offline: list files from ./temp_downloads and in-memory Cloud Vault
+    if (!isLaptopConnected(context.userId, targetDevice)) {
       const cloudDir = path.resolve(process.cwd(), 'temp_downloads');
       const localFiles = fs.existsSync(cloudDir) ? await fsp.readdir(cloudDir) : [];
       let vaultFiles = [];
@@ -648,16 +765,18 @@ export async function executeTool(name, args = {}, context = {}) {
       });
     }
 
-    const dirPath =
+    const rawDirPath =
       args.dir_path ||
       args.dirPath ||
       args.directory ||
       args.path ||
       args.dir ||
-      context.detectedWorkingDir ||
-      context.userDirectory;
+      '';
+    const fallbackDir = context.detectedWorkingDir || context.userDirectory || '';
+    const effectiveDir = normalizeDevicePath(rawDirPath, devInfo, fallbackDir);
+
     try {
-      const res = await listLaptopDirectory(context.userId, dirPath);
+      const res = await listLaptopDirectory(context.userId, effectiveDir, targetDevice);
       return JSON.stringify(res);
     } catch (err) {
       return JSON.stringify({ error: err.message });
@@ -678,8 +797,9 @@ export async function executeTool(name, args = {}, context = {}) {
     if (!context.userId) {
       return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
     }
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
     try {
-      const res = await getLaptopStatus(context.userId);
+      const res = await getLaptopStatus(context.userId, targetDevice);
       return JSON.stringify(res);
     } catch (err) {
       return JSON.stringify({ error: err.message });
@@ -880,126 +1000,6 @@ export async function executeTool(name, args = {}, context = {}) {
       }
     }
 
-    case 'list_open_windows': {
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      try {
-        const res = await listLaptopWindows(context.userId, 12000);
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
-    case 'run_laptop_terminal': {
-      const { command, cwd } = args;
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      const effectiveCwd = cwd || undefined;
-      const onProgress = context.onStatusUpdate
-        ? (progressText) => {
-            context.onStatusUpdate?.(`⚙️ *Executing terminal command...*\n\`\`\`\n${progressText}\n\`\`\``);
-          }
-        : undefined;
-      try {
-        const res = await runLaptopCommand(context.userId, command, effectiveCwd, onProgress);
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
-    case 'read_laptop_file': {
-      const rawPath = args.file_path || args.filename;
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      const effectivePath = joinLaptopPath(context.userDirectory, rawPath);
-      try {
-        const res = await readLaptopFile(context.userId, effectivePath, args.max_lines);
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
-    case 'write_laptop_file': {
-      const rawPath = args.file_path || args.filename;
-      const content = args.content;
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      const effectivePath = joinLaptopPath(context.userDirectory, rawPath);
-      try {
-        const res = await writeLaptopFile(context.userId, effectivePath, content);
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
-    case 'list_laptop_files': {
-      const dirPath = args.dir_path || args.path || context.userDirectory;
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      try {
-        const res = await listLaptopDirectory(context.userId, dirPath);
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
-    case 'get_laptop_status': {
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      try {
-        const res = await getLaptopStatus(context.userId);
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
-    case 'take_screenshot': {
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      context.onStatusUpdate?.('📸 *Capturing screenshot and sending to Telegram...*');
-      try {
-        const windowTitle = args.window_title || args.windowTitle || args.title || null;
-        const caption = args.caption || (windowTitle ? `📸 Screenshot: ${windowTitle}` : '📸 Desktop Screenshot');
-        const res = await captureLaptopScreenshot(context.userId, {
-          windowTitle,
-          caption,
-          sendDirect: true,
-        });
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
-    case 'request_laptop_approval': {
-      if (!context.userId) {
-        return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
-      }
-      try {
-        const res = await requestLaptopApproval(context.userId, {
-          title: args.title || 'Action Approval',
-          message: args.message || 'The agent is requesting approval on your laptop.',
-          actionPayload: args.action_payload,
-        });
-        return JSON.stringify(res);
-      } catch (err) {
-        return JSON.stringify({ error: err.message });
-      }
-    }
-
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
@@ -1035,26 +1035,82 @@ export async function runGeminiAgent({
   const ai = new GoogleGenAI({ apiKey });
   const stepsExecuted = [];
 
-  // Inspect live laptop connection status for Standalone Phone / Cloud Mode
-  const laptopOnline = isLaptopConnected(userId);
-  const offlineDirective = !laptopOnline
-    ? '⚠️ SYSTEM NOTICE: The user\'s physical laptop is currently OFFLINE (disconnected).\n' +
-      'You are operating in STANDALONE PHONE / CLOUD MODE.\n' +
+  // Infer inferredTargetDevice from user's prompt or preferred device
+  let inferredTargetDevice = undefined;
+  if (/\b(phone|mobile|termux|sdcard|apk)\b/i.test(prompt)) {
+    inferredTargetDevice = 'phone';
+  } else if (/\b(tablet|pad)\b/i.test(prompt)) {
+    inferredTargetDevice = 'tablet';
+  } else if (/\b(laptop|pc|desktop|windows|powershell)\b/i.test(prompt)) {
+    inferredTargetDevice = 'laptop';
+  } else {
+    const pref = getUserPreferredDevice(userId);
+    if (pref && pref !== 'auto') {
+      inferredTargetDevice = pref;
+    }
+  }
+
+  // Inspect live device connection status for Multi-Device & Standalone Phone / Cloud Mode
+  const userDevicesList = getConnectedLaptopsList(userId);
+  const onlineDevices = userDevicesList.filter((d) => d.isOnline);
+  const anyDeviceOnline = onlineDevices.length > 0;
+
+  let primaryOnlineDevice = null;
+  if (onlineDevices.length === 1) {
+    primaryOnlineDevice = onlineDevices[0];
+  } else if (onlineDevices.length > 1) {
+    if (inferredTargetDevice) {
+      primaryOnlineDevice = onlineDevices.find((d) =>
+        (d.deviceType && d.deviceType.toLowerCase() === inferredTargetDevice) ||
+        (d.deviceName && d.deviceName.toLowerCase().includes(inferredTargetDevice)) ||
+        (d.deviceId && d.deviceId.toLowerCase().includes(inferredTargetDevice))
+      );
+    }
+    if (!primaryOnlineDevice) {
+      const preferred = getUserPreferredDevice(userId);
+      if (preferred && preferred !== 'auto') {
+        primaryOnlineDevice = onlineDevices.find((d) =>
+          (d.deviceType && d.deviceType.toLowerCase() === preferred) ||
+          (d.deviceName && d.deviceName.toLowerCase().includes(preferred)) ||
+          (d.deviceId && d.deviceId.toLowerCase().includes(preferred))
+        );
+      }
+    }
+    if (!primaryOnlineDevice) {
+      primaryOnlineDevice = onlineDevices.find((d) => d.deviceType === 'laptop') || onlineDevices[0];
+    }
+  }
+
+  const defaultDeviceDirective = primaryOnlineDevice
+    ? `ACTIVE DEFAULT DEVICE: [${(primaryOnlineDevice?.deviceType || 'laptop').toUpperCase()}] "${primaryOnlineDevice?.deviceName || 'Device'}" (${primaryOnlineDevice?.platform || 'unknown'}).\n` +
+      `When the user asks to check files, download files, or run commands without specifying a device, ALWAYS target this active default device.\n` +
+      `If the active default device is an Android phone/tablet, "downloads folder" or "download folder" refers to "/sdcard/Download". NEVER claim you are running in a mobile/sandbox environment or tell the user to press Win+E on their computer when their phone is connected.\n\n`
+    : '';
+
+  const devicesStatusSection = anyDeviceOnline
+    ? `ONLINE CONNECTED DEVICES (${onlineDevices.length}):\n` +
+      onlineDevices.map((d) => `• [${(d.deviceType || 'laptop').toUpperCase()}] "${d.deviceName}" (${d.platform}, host: ${d.hostname})`).join('\n') +
+      `\n\n`
+    : `⚠️ ALL PHYSICAL DEVICES CURRENTLY OFFLINE.\nOperating in Standalone Cloud Mode.\n\n`;
+
+  const offlineDirective = !anyDeviceOnline
+    ? '⚠️ SYSTEM NOTICE: The user\'s physical devices (laptop, phone, tablet) are currently OFFLINE (disconnected).\n' +
+      'You are operating in STANDALONE CLOUD MODE.\n' +
       '- Do NOT say "I don\'t have access to your personal device" or give up.\n' +
       '- If the user asks about installed apps, files, or system info, use available tools like search_web, list_drive_files, read_drive_file, or run shell commands in the cloud container.\n' +
       '- If they ask for a screenshot of a website, use open_and_capture_webpage.\n' +
       '- Be resourceful and proactive.\n\n'
     : '';
 
-  const connectionModeInstruction = laptopOnline
-    ? 'LAPTOP CONNECTION: ONLINE & ACTIVE. Tools execute directly on the user\'s physical laptop.\n\n'
+  const connectionModeInstruction = anyDeviceOnline
+    ? 'DEVICE CONNECTIONS: ONLINE & ACTIVE. Tools route directly to the user\'s physical devices (laptop, Android phone, tablet).\n\n'
     : 'All tools automatically and seamlessly execute in Standalone Cloud Mode:\n' +
       '• write_laptop_file: Writes the file to the cloud workspace (./temp_downloads), uploads the file directly to the user\'s Telegram chat, and stores it in Telegram Cloud Vault.\n' +
       '• read_laptop_file & list_laptop_files: Read and list files from Telegram Cloud Vault and the cloud workspace (./temp_downloads).\n' +
       '• run_laptop_terminal: Runs commands directly inside the cloud workspace container (./temp_downloads), with Node.js, Python, and Git available.\n' +
       '• take_screenshot / open_and_capture_webpage: Captures websites or web apps via the cloud headless browser.\n' +
       '• search_web & search_youtube: Full live web and YouTube search.\n' +
-      'NEVER fail, refuse, or say you cannot proceed because the laptop is offline. Always execute the requested task in Cloud Mode!\n\n';
+      'NEVER fail, refuse, or say you cannot proceed because devices are offline. Always execute the requested task in Cloud Mode!\n\n';
 
   // Extract explicit directory path from prompt if user mentioned one (e.g. "D:\projects\telegram-ai-bot")
   let detectedWorkingDir = null;
@@ -1080,7 +1136,20 @@ export async function runGeminiAgent({
     inputPrompt = `CONVERSATION CONTEXT (Previous turns in this chat):\n${historyText}\n\nCURRENT USER REQUEST:\n${prompt}`;
   }
 
-  const effectiveTargetDir = detectedWorkingDir || userDirectory || 'default working directory';
+  // If active connected device is Android, override any Windows C:\ or D:\ userDirectory with '/sdcard/Download'
+  const activeDevice = getActiveDevicePlatform(userId);
+  let resolvedUserDir = userDirectory;
+  const isAndroidActive = primaryOnlineDevice?.platform === 'android' || activeDevice?.platform === 'android';
+  if (isAndroidActive) {
+    if (!resolvedUserDir || /^[a-zA-Z]:/i.test(resolvedUserDir)) {
+      resolvedUserDir = primaryOnlineDevice?.storageDir || activeDevice?.storageDir || '/sdcard/Download';
+    }
+    if (detectedWorkingDir && /^[a-zA-Z]:/i.test(detectedWorkingDir)) {
+      detectedWorkingDir = resolvedUserDir;
+    }
+  }
+
+  const effectiveTargetDir = detectedWorkingDir || resolvedUserDir || 'default working directory';
 
   // Models to attempt: user requested (if any) -> primary (gemini-3.5-flash-lite) -> gemini-3.5-flash -> fallback (gemini-3.8-flash)
   const candidateModels = [
@@ -1105,40 +1174,53 @@ export async function runGeminiAgent({
         tools: AGENT_TOOLS,
         system_instruction:
           offlineDirective +
-          'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical laptop.\n' +
+          'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical devices (laptop, Android phone via Termux, tablet).\n' +
+          'You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to check files, download files, or run commands on their phone, ALWAYS use `list_laptop_files`, `read_laptop_file`, `write_laptop_file`, and `run_laptop_terminal` targeting `/sdcard/Download`.\n\n' +
+          devicesStatusSection +
+          defaultDeviceDirective +
           connectionModeInstruction +
-          `User\'s target folder on their laptop: "${effectiveTargetDir}".\n\n` +
-          'CRITICAL EXECUTION AND GROUNDING RULES:\n' +
-          '1. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s laptop. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
-          '2. OFFICIAL TOOL NAMES:\n' +
+          `User\'s target folder on their laptop: "${effectiveTargetDir}".\n` +
+          `User\'s storage directory on Android phone/tablet (Termux): "/sdcard/Download".\n\n` +
+          'CRITICAL EXECUTION AND MULTI-DEVICE RULES:\n' +
+          '1. MULTI-DEVICE CONTROL & ROUTING:\n' +
+          '   • You can control the user\'s Windows laptop, Android phone (via Termux), and tablet simultaneously!\n' +
+          '   • When the user mentions their "phone", "mobile", "Android", or "tablet", specify `target_device: "phone"` or `target_device: "tablet"` in your tool calls (`run_laptop_terminal`, `read_laptop_file`, `write_laptop_file`, `list_laptop_files`, `get_laptop_status`).\n' +
+          `   • Default \`target_device\` is "${primaryOnlineDevice?.deviceType || 'laptop'}" if not specified by the user.\n` +
+          '   • On Android / Termux:\n' +
+          '     - User storage and downloads are located in `/sdcard/Download`.\n' +
+          '     - You can install CLI packages via `pkg install -y <package>`, `pip install <package>`, or `npm install <package>`.\n' +
+          '     - You can trigger native Android APK installs or open files via `run_laptop_terminal(command="termux-open <file.apk>", target_device="phone")`. Android will immediately pop up the native package installer prompt on the phone screen.\n' +
+          '2. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s devices. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content, target_device)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
+          '3. OFFICIAL TOOL NAMES:\n' +
+          '   • run_laptop_terminal: Execute shell commands on device (command, cwd, target_device)\n' +
+          '   • read_laptop_file: Read files on device (file_path, max_lines, target_device)\n' +
+          '   • write_laptop_file: Write or overwrite files on device (file_path, content, target_device)\n' +
+          '   • list_laptop_files: List files in a directory on device (dir_path, target_device)\n' +
+          '   • get_laptop_status: Inspect device hardware specs (target_device)\n' +
           '   • list_open_windows: Enumerate open application and browser windows on user\'s laptop\n' +
           '   • take_screenshot: Capture laptop screen or app window and deliver photo directly to user on Telegram (window_title, caption). ALWAYS use this when the user asks for a screenshot, screen capture, or to see their desktop/screen.\n' +
-          '   • run_laptop_terminal: Execute shell commands on laptop (e.g. git status, git add, git commit, git push, npm test, python script.py)\n' +
-          '   • read_laptop_file: Read files on laptop (file_path, max_lines)\n' +
-          '   • write_laptop_file: Write or overwrite files on laptop (file_path, content)\n' +
-          '   • list_laptop_files: List files in a directory (dir_path)\n' +
-          '   • get_laptop_status: Inspect laptop hardware specs\n' +
           '   • search_web: Search Google for documentation or solutions\n' +
           '   • request_laptop_approval: Request user approval when installer or confirmation dialog is displayed\n' +
-          '3. SCREENSHOT RULE: To take a screenshot, NEVER attempt to run custom PowerShell or Python screenshot scripts in run_laptop_terminal. Always call `take_screenshot`.\n' +
-          '4. FULL MULTI-STEP WORKFLOWS: When requested to edit a file and push to Git:\n' +
+          '4. SCREENSHOT RULE: To take a screenshot, NEVER attempt to run custom PowerShell or Python screenshot scripts in run_laptop_terminal. Always call `take_screenshot`.\n' +
+          '5. FULL MULTI-STEP WORKFLOWS: When requested to edit a file and push to Git:\n' +
           '   a. Read or verify target file via `read_laptop_file`\n' +
           '   b. Write the complete updated content via `write_laptop_file`\n' +
           '   c. Execute git operations via `run_laptop_terminal(command="git add . && git commit -m ... && git push", cwd="' + effectiveTargetDir + '")`\n' +
           '   d. Report the outcome with commit details in your final answer.\n' +
-          '5. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
-          '6. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
-          '7. DISCONNECTED STATE: If a tool reports the laptop is disconnected, explain clearly and provide the complete code so the user can save it manually.\n' +
-          '8. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
-          '9. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.\n\n' +
-          '10. APP INSTALLATION & SCREENSHOT WORKFLOWS:\n' +
+          '6. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
+          '7. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
+          '8. DISCONNECTED STATE: If a tool reports a device is disconnected, explain clearly and inform the user how to connect it.\n' +
+          '9. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
+          '10. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.\n\n' +
+          '11. APP INSTALLATION & SCREENSHOT WORKFLOWS:\n' +
           '    When the user asks to install, launch, or screenshot an application (e.g. "install yazi, open it and take a screenshot", or "open roblox and screenshot it"):\n' +
           '    a. Install: Always use silent non-interactive flags so terminal commands never hang waiting on user stdin:\n' +
-          '       • winget: `winget install <id> -e --silent --accept-package-agreements --accept-source-agreements`\n' +
+          '       • winget (Windows): `winget install <id> -e --silent --accept-package-agreements --accept-source-agreements`\n' +
+          '       • pkg (Android Termux): `pkg install -y <package>`\n' +
           '       • pip: `pip install <package> --no-input -q`\n' +
           '       • npm: `npm install <package> --yes --no-audit --no-fund`\n' +
           '       CRITICAL: Never run commands that prompt for user confirmation without non-interactive flags.\n' +
-          '    b. Launch: Interactive TUIs (like Yazi) or terminal programs CANNOT run in headless background subprocesses. You MUST launch them in a visible GUI terminal window via `run_laptop_terminal(command="start cmd /k yazi")` or `start wt cmd /k yazi`. For GUI desktop apps, use `run_laptop_terminal(command="start <app_name>")` (e.g. `start roblox:`, `start brave`).\n' +
+          '    b. Launch: Interactive TUIs (like Yazi) or terminal programs on Windows CANNOT run in headless background subprocesses. You MUST launch them in a visible GUI terminal window via `run_laptop_terminal(command="start cmd /k yazi")` or `start wt cmd /k yazi`. For GUI desktop apps, use `run_laptop_terminal(command="start <app_name>")` (e.g. `start roblox:`, `start brave`). On Android, use `termux-open <file>`.\n' +
           '    c. Verify & Capture: Call `take_screenshot(window_title="yazi")` or `take_screenshot(window_title="Roblox")`. The system will automatically bring it to the foreground and deliver the screenshot directly to Telegram.',
       });
 
@@ -1241,8 +1323,9 @@ export async function runGeminiAgent({
         const toolT0 = performance.now();
         const toolResult = await executeTool(toolName, toolArgs, {
           userId,
-          userDirectory,
+          userDirectory: resolvedUserDir,
           detectedWorkingDir,
+          inferredTargetDevice,
           prompt,
           onStatusUpdate,
           recentWindowLaunch,

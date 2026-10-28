@@ -116,64 +116,60 @@ const TELEGRAM_USER_ID = idMatch ? idMatch[0] : '';
 
 
 
-const rawHostname = (os.hostname() || 'My-Laptop').replace(/\.local$/i, '');
+const isAndroid = os.platform() === 'android' || Boolean(process.env.TERMUX_VERSION);
 
-const cleanUsername = os.userInfo ? (os.userInfo().username || '') : '';
-
-const cleanOsVersion = os.version ? os.version() : os.release();
-
-const DEVICE_NAME = getCliArg('--name') || process.env.DEVICE_NAME || rawHostname;
-
-const RUNNER_STORAGE_DIR =
-
-  getCliArg('--dir') ||
-
-  process.env.STORAGE_DIR ||
-
-  process.cwd();
-
-
-
-if (!TELEGRAM_USER_ID) {
-
-  console.error('❌ ERROR: TELEGRAM_USER_ID could not be determined!');
-
-  console.error('Please pass --user <id> or set TELEGRAM_USER_ID in .env or environment variables.');
-
-  process.exit(1);
-
+const cliType = (getCliArg('--type') || process.env.DEVICE_TYPE || '').toLowerCase().trim();
+let DEVICE_TYPE = 'laptop';
+if (['laptop', 'phone', 'tablet'].includes(cliType)) {
+  DEVICE_TYPE = cliType;
+} else if (isAndroid) {
+  DEVICE_TYPE = 'phone';
 }
 
+const rawHostname = (os.hostname() || (isAndroid ? 'Android-Device' : 'My-Laptop')).replace(/\.local$/i, '');
+const cleanUsername = os.userInfo ? (() => { try { return os.userInfo().username || ''; } catch { return ''; } })() : '';
+const cleanOsVersion = os.version ? (() => { try { return os.version(); } catch { return os.release(); } })() : os.release();
 
+let defaultDeviceName = rawHostname;
+if ((!rawHostname || rawHostname === 'localhost' || rawHostname === 'localhost.localdomain') && isAndroid) {
+  defaultDeviceName = DEVICE_TYPE === 'tablet' ? 'Android-Tablet' : 'Android-Phone';
+}
+const DEVICE_NAME = getCliArg('--name') || process.env.DEVICE_NAME || defaultDeviceName;
+
+// On Android/Termux, default RUNNER_STORAGE_DIR to '/sdcard/Download' if --dir was not explicitly passed
+const explicitDir = getCliArg('--dir') || process.env.STORAGE_DIR;
+let defaultStorageDir = process.cwd();
+if (!explicitDir && isAndroid) {
+  defaultStorageDir = '/sdcard/Download';
+}
+const RUNNER_STORAGE_DIR = explicitDir || defaultStorageDir;
+
+if (!TELEGRAM_USER_ID) {
+  console.error('❌ ERROR: TELEGRAM_USER_ID could not be determined!');
+  console.error('Please pass --user <id> or set TELEGRAM_USER_ID in .env or environment variables.');
+  process.exit(1);
+}
 
 // Build WebSocket URL
-
 function buildWsUrl() {
-
   const base = SERVER_URL.replace(/\/+$/, '');
-
   const targetPath = base.includes('/ws/laptop-agent') ? base : `${base}/ws/laptop-agent`;
-
   const url = new URL(targetPath);
 
   url.searchParams.set('secret', RUNNER_SECRET);
-
   url.searchParams.set('userId', TELEGRAM_USER_ID);
-
   url.searchParams.set('deviceName', DEVICE_NAME);
-
+  url.searchParams.set('deviceType', DEVICE_TYPE);
   url.searchParams.set('hostname', rawHostname);
-
-  url.searchParams.set('platform', os.platform());
-
+  url.searchParams.set('platform', isAndroid ? 'android' : os.platform());
   url.searchParams.set('username', cleanUsername);
-
   url.searchParams.set('osVersion', cleanOsVersion);
-
   url.searchParams.set('storageDir', RUNNER_STORAGE_DIR);
+  const customId = getCliArg('--deviceId') || getCliArg('--device-id') || process.env.DEVICE_ID;
+  const uniqueDeviceId = customId || `${DEVICE_NAME}_${rawHostname}_${cleanUsername || 'user'}_${isAndroid ? 'android' : os.platform()}`;
+  url.searchParams.set('deviceId', uniqueDeviceId);
 
   return url.toString();
-
 }
 
 
@@ -191,12 +187,14 @@ if (process.stderr && process.stderr.on) {
 
 try {
   console.log('========================================================');
-  console.log('💻 Telegram AI Remote Laptop Agent Runner');
+  console.log(`📱 Telegram AI Remote Agent Runner [${DEVICE_TYPE.toUpperCase()}]`);
   console.log('========================================================');
   console.log(`• Device Name:     ${DEVICE_NAME}`);
+  console.log(`• Device Type:     ${DEVICE_TYPE}`);
   console.log(`• Hostname:        ${rawHostname}`);
   console.log(`• User Account:    ${cleanUsername || 'User'}`);
   console.log(`• OS & Version:    ${cleanOsVersion} (${os.platform()} ${os.arch()})`);
+  console.log(`• Storage Dir:     ${RUNNER_STORAGE_DIR}`);
   console.log(`• Target Server:   ${SERVER_URL}`);
   console.log(`• Bound User ID:   ${TELEGRAM_USER_ID}`);
   console.log(`• Outbound Only:   ✅ No open ports, fully secure on Public Wi-Fi`);
@@ -710,7 +708,7 @@ function connect() {
 
         if (ws && ws.readyState === WebSocket.OPEN) {
 
-          ws.send(JSON.stringify({ type: 'initial_status', storageDir: RUNNER_STORAGE_DIR, ...specs }));
+          ws.send(JSON.stringify({ type: 'initial_status', storageDir: RUNNER_STORAGE_DIR, deviceType: DEVICE_TYPE, ...specs }));
 
           log('[Runner] 📊 Live system specs transmitted to server.');
 
@@ -1010,14 +1008,44 @@ async function handleTask(action, payload) {
         });
       }
 
+      // Android / Termux file open or APK install helper
+      if (isAndroid && /^\s*termux-open\s+/i.test(trimmedCmd)) {
+        return new Promise((resolve) => {
+          const workingDir = cwd && fs.existsSync(cwd) ? cwd : process.cwd();
+          exec(trimmedCmd, { cwd: workingDir, timeout: 20000 }, (err, stdout, stderr) => {
+            if (err) {
+              return resolve({
+                success: false,
+                exitCode: err.code || 1,
+                stdout: stdout || '',
+                stderr: stderr || err.message,
+              });
+            }
+            resolve({
+              success: true,
+              exitCode: 0,
+              stdout: stdout || `Triggered Android open intent: ${trimmedCmd}`,
+              stderr: '',
+            });
+          });
+        });
+      }
+
       // Determine command timeout: 180s for package managers/installs, 60s for standard
-      const isInstallCmd = /\b(?:winget|pip|npm|yarn|pnpm|choco|scoop|install)\b/i.test(command);
+      const isInstallCmd = /\b(?:winget|pip|npm|yarn|pnpm|choco|scoop|pkg|apt|install)\b/i.test(command);
       const timeoutMs = isInstallCmd ? 180000 : (parseInt(process.env.COMMAND_TIMEOUT_MS, 10) || 60000);
 
       return new Promise((resolve) => {
         const workingDir = cwd && fs.existsSync(cwd) ? cwd : process.cwd();
         const isWindows = os.platform() === 'win32';
-        const shellExecutable = isWindows ? 'powershell.exe' : '/bin/bash';
+        let unixShell = process.env.SHELL;
+        if (isAndroid && (!unixShell || !fs.existsSync(unixShell))) {
+          const termuxBash = '/data/data/com.termux/files/usr/bin/bash';
+          unixShell = fs.existsSync(termuxBash) ? termuxBash : 'sh';
+        }
+        const shellExecutable = isWindows
+          ? 'powershell.exe'
+          : (unixShell || process.env.SHELL || '/data/data/com.termux/files/usr/bin/bash' || 'sh');
         const shellArgs = isWindows
           ? ['-NoProfile', '-NonInteractive', '-Command', command]
           : ['-c', command];
@@ -1380,7 +1408,25 @@ async function handleTask(action, payload) {
 
       try {
 
-        const targetDir = dirPath ? path.resolve(dirPath) : process.cwd();
+        let targetDir;
+
+        if (isAndroid) {
+          const raw = typeof dirPath === 'string' ? dirPath.trim() : '';
+          if (!raw || /^(?:\.?[\/\\])?downloads?$/i.test(raw) || /^[a-zA-Z]:/i.test(raw)) {
+            targetDir = '/sdcard/Download';
+          } else {
+            targetDir = path.resolve(dirPath);
+          }
+          if (!fs.existsSync(targetDir) && fs.existsSync('/sdcard/Download')) {
+            targetDir = '/sdcard/Download';
+          }
+        } else {
+
+          targetDir = dirPath ? path.resolve(dirPath) : process.cwd();
+
+        }
+
+
 
         if (!fs.existsSync(targetDir)) {
 
@@ -1394,7 +1440,29 @@ async function handleTask(action, payload) {
 
         async function scanDir(currentDir, relativePrefix = '', depth = 0) {
 
-          const entries = await fsp.readdir(currentDir, { withFileTypes: true });
+          let entries;
+
+          try {
+
+            entries = await fsp.readdir(currentDir, { withFileTypes: true });
+
+          } catch (readdirErr) {
+
+            if (isAndroid && currentDir !== '/sdcard/Download' && fs.existsSync('/sdcard/Download')) {
+
+              currentDir = '/sdcard/Download';
+
+              targetDir = '/sdcard/Download';
+
+              entries = await fsp.readdir(currentDir, { withFileTypes: true });
+
+            } else {
+
+              throw readdirErr;
+
+            }
+
+          }
 
           for (const e of entries) {
 
@@ -1590,6 +1658,34 @@ async function handleTask(action, payload) {
 
     
 
+    case 'install_apk':
+    case 'open_file': {
+      const targetFile = payload.apkPath || payload.filePath || payload.file || payload.path;
+      if (!targetFile) return { success: false, error: 'No apkPath or filePath provided.' };
+      const resolved = path.resolve(targetFile);
+      if (!fs.existsSync(resolved)) {
+        return { success: false, error: `Target file not found: ${resolved}` };
+      }
+      return new Promise((resolve) => {
+        exec(`termux-open "${resolved}"`, { timeout: 20000 }, (err, stdout, stderr) => {
+          if (err) {
+            return resolve({
+              success: false,
+              exitCode: err.code || 1,
+              stdout: stdout || '',
+              stderr: `Failed to execute termux-open: ${err.message}`,
+            });
+          }
+          resolve({
+            success: true,
+            exitCode: 0,
+            stdout: stdout || `Triggered Android package installer / app for: ${path.basename(resolved)}`,
+            stderr: '',
+          });
+        });
+      });
+    }
+
     case 'list_windows':
     case 'get_windows':
     case 'enumerate_windows': {
@@ -1604,6 +1700,44 @@ async function handleTask(action, payload) {
     case 'capture_screen': {
       const { windowTitle, hwnd, quality } = payload;
       log(`[Runner] 📸 Capturing live screenshot (target: "${windowTitle || (hwnd ? `HWND:${hwnd}` : 'primary display')}")`);
+
+      if (isAndroid) {
+        const screenPath = '/sdcard/Download/screen.png';
+        const tryScreencap = () =>
+          new Promise((resolve) => {
+            exec(`screencap -p "${screenPath}"`, { timeout: 10000 }, (err) => {
+              if (!err && fs.existsSync(screenPath)) return resolve(true);
+              exec(`adb shell screencap -p "${screenPath}"`, { timeout: 10000 }, (adbErr) => {
+                if (!adbErr && fs.existsSync(screenPath)) return resolve(true);
+                resolve(false);
+              });
+            });
+          });
+
+        try {
+          const ok = await tryScreencap();
+          if (ok && fs.existsSync(screenPath)) {
+            const imgData = await fsp.readFile(screenPath);
+            try { await fsp.unlink(screenPath); } catch {}
+            return {
+              success: true,
+              windowTitle: windowTitle || 'Android Screen',
+              isDesktopFallback: true,
+              image: imgData.toString('base64'),
+              timestamp: Date.now(),
+            };
+          }
+        } catch (captureErr) {
+          log(`[Runner] Android screencap error: ${captureErr.message}`);
+        }
+
+        return {
+          success: false,
+          error:
+            'Android OS blocks background screen capture without root or ADB permissions. All file, terminal, and download tools work normally on this device.',
+        };
+      }
+
       const args = [];
       if (hwnd) {
         args.push('--hwnd', String(hwnd));

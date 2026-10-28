@@ -75,6 +75,11 @@ import {
   disableLaptopRunner,
   getLaptopStatus,
   getLastKnownSpecs,
+  getActiveDevicePlatform,
+  setUserPreferredDevice,
+  getUserPreferredDevice,
+  setPreferredDevice,
+  getPreferredDevice,
   joinLaptopPath,
   isPathAbsolute,
   setCloudVaultBridge,
@@ -270,6 +275,81 @@ node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $ser
         'Cache-Control': 'no-cache',
       });
       return res.end(ps1Content);
+    }
+
+    // 3b. Bash / Termux One-Line Setup Script: /setup/:userId.sh or /setup.sh?userId=...
+    const setupShMatch = pathname.match(/^\/setup(?:\/(-?\d+))?\.sh$/i);
+    if (setupShMatch || pathname === '/setup.sh') {
+      const uid = (setupShMatch && setupShMatch[1]) || url.searchParams.get('userId') || allowedUserId || '';
+      const serverUrl = getPublicBotUrl(req);
+      const secret = getExpectedSecret();
+      const shContent =
+`#!/bin/bash
+# Telegram AI Agent Setup for Android / Termux
+set -e
+
+TARGET_USER_ID="${uid}"
+SERVER_URL="${serverUrl}"
+SECRET="${secret}"
+AGENT_DIR="$HOME/telegram-ai-agent"
+
+echo "========================================================"
+echo " 📱 Setting Up Telegram AI Phone Agent (User: $TARGET_USER_ID)"
+echo "========================================================"
+
+# Check if Node.js or curl are installed
+if ! command -v node >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    echo "📦 Installing prerequisites (nodejs, curl) via pkg..."
+    pkg update -y && pkg install -y nodejs curl
+fi
+
+# Acquire wake lock if running in Termux so daemon stays alive in background
+if command -v termux-wake-lock >/dev/null 2>&1; then
+    echo "🔒 Enabling Termux wake lock to prevent background suspension..."
+    termux-wake-lock
+fi
+
+# a. Create ~/telegram-ai-agent and cd into it
+mkdir -p "$AGENT_DIR"
+cd "$AGENT_DIR"
+
+# b. Download laptop-runner.js from $SERVER_URL/download/laptop-runner.js
+echo "[1/3] Downloading latest laptop-runner.js..."
+curl -sSL "$SERVER_URL/download/laptop-runner.js" -o "$AGENT_DIR/laptop-runner.js"
+
+# c. Run npm install ws dotenv --no-audit --no-fund if node_modules/ws is missing
+if [ ! -d "$AGENT_DIR/node_modules/ws" ]; then
+    echo "[2/3] Installing dependencies (ws, dotenv)..."
+    npm install ws dotenv --no-audit --no-fund
+fi
+
+# d & e. Create start-phone.sh launcher script and start node laptop-runner.js
+echo "[3/3] Creating start-phone.sh launcher script..."
+cat << 'LAUNCHER_EOF' > "$AGENT_DIR/start-phone.sh"
+#!/bin/bash
+cd "$HOME/telegram-ai-agent"
+if command -v termux-wake-lock >/dev/null 2>&1; then
+    termux-wake-lock
+fi
+node laptop-runner.js --user TARGET_USER_ID_PLACEHOLDER --server SERVER_URL_PLACEHOLDER --secret SECRET_PLACEHOLDER --type phone --name "Android-Phone"
+LAUNCHER_EOF
+
+sed -i "s/TARGET_USER_ID_PLACEHOLDER/$TARGET_USER_ID/g" "$AGENT_DIR/start-phone.sh"
+sed -i "s|SERVER_URL_PLACEHOLDER|$SERVER_URL|g" "$AGENT_DIR/start-phone.sh"
+sed -i "s/SECRET_PLACEHOLDER/$SECRET/g" "$AGENT_DIR/start-phone.sh"
+chmod +x "$AGENT_DIR/start-phone.sh"
+
+echo ""
+echo "✅ Setup complete! Launching phone agent..."
+echo "💡 Tip: To restart anytime later, run: ~/telegram-ai-agent/start-phone.sh"
+node "$AGENT_DIR/laptop-runner.js" --user "$TARGET_USER_ID" --server "$SERVER_URL" --secret "$SECRET" --type phone --name "Android-Phone"
+`;
+
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      });
+      return res.end(shContent);
     }
 
     // 4. Remote /restart or /reboot endpoint to self-heal or restart container on demand
@@ -1089,6 +1169,15 @@ async function initUserSettings() {
 
 function getUserStorageDir(userId) {
   const uid = Number(userId);
+
+  // If active connected device is Android, dynamically route storage to /sdcard/Download
+  try {
+    const activeDev = getActiveDevicePlatform(uid);
+    if (activeDev && activeDev.platform === 'android') {
+      return activeDev.storageDir || '/sdcard/Download';
+    }
+  } catch {}
+
   if (userLocalStorageDir.has(uid) && userLocalStorageDir.get(uid)) {
     return userLocalStorageDir.get(uid);
   }
@@ -2100,7 +2189,8 @@ bot.command(['start', 'help'], async (ctx) => {
     '• /agent <prompt> — 🤖 *One-Time Task*: Run a single goal with live tools (web, files, math) without switching mode\n' +
     '• /agent_mode — 🎚️ *Toggle All Chats*: Set Agent as default for all messages (send again or /cancel to exit)\n' +
     '• /screenshot [window] — 📸 *Screenshot*: Instant live screenshot of laptop screen or app window\n' +
-    '• /devices — 💻 *Laptop Agent*: View connected laptops for remote terminal & file tasks\n' +
+    '• /devices — 💻 *Device Fleet*: View connected laptops, Android phones & tablets\n' +
+    '• /setup_phone — 📱 *Phone Agent*: 1-line setup command for Android / Termux\n' +
     '• /deep_research <topic> — 🔬 *Deep Research*: Exhaustive multi-source background report\n\n' +
     '🎙️ *Real-Time Live Voice*\n' +
     '• /live [query] — 🎙️ Toggle Live Voice mode (spoken voice replies until /cancel)\n' +
@@ -2802,39 +2892,56 @@ bot.command(['agent_mode', 'agentmode'], async (ctx) => {
   );
 });
 
-bot.command(['devices', 'laptops', 'device'], async (ctx) => {
-  const userId = ctx.from.id;
-  const list = getConnectedLaptopsList(userId);
+/**
+ * Helper to build the /devices text and interactive inline keyboard
+ * @param {number|string} userId
+ * @returns {{ text: string, keyboard: InlineKeyboard }}
+ */
+function buildDevicesMessageAndKeyboard(userId) {
+  const uid = Number(userId);
+  const list = getConnectedLaptopsList(uid);
   const allLaptops = getAllConnectedLaptops(allowedUserIds);
+  const currentPref = getUserPreferredDevice(uid);
 
-  let text = `💻 *Laptop Fleet & Device Status*\n\n`;
+  let text = `💻 *Device Fleet & Connection Status*\n\n`;
 
-  // 1. Caller's own device
-  text += `👤 *Your Laptop (${userId}):*\n`;
+  // Active Target Mode Display
+  text += `🎯 *Active Target Mode:* \`${(currentPref || 'auto').toUpperCase()}\`\n\n`;
+
+  // 1. Caller's own devices
+  text += `👤 *Your Devices (${uid}):*\n`;
   if (!list || list.length === 0) {
-    text += `└─ 🔴 Not Connected (Run \`start-agent.bat\` on your machine)\n\n`;
+    text += `└─ 🔴 No Devices Connected (Setup your laptop or phone below)\n\n`;
   } else {
     for (const d of list) {
       const statusIcon = d.isOnline ? '🟢' : '🔴';
       const statusText = d.isOnline ? 'Online & Ready' : 'Disconnected';
       const osText = d.osVersion ? `${d.platform} (${d.osVersion})` : d.platform;
       const userText = d.username ? ` | User: \`${d.username}\`` : '';
-      text += `${statusIcon} *${d.deviceName}* (\`${d.hostname}\`)\n` +
+      const typeIcon = d.deviceType === 'phone' ? '📱' : d.deviceType === 'tablet' ? '📟' : '💻';
+      const typeLabel = d.deviceType ? ` [${d.deviceType.toUpperCase()}]` : '';
+      const isPreferred = currentPref && currentPref !== 'auto' && (
+        (d.deviceId && d.deviceId.toLowerCase() === currentPref) ||
+        (d.deviceType && d.deviceType.toLowerCase() === currentPref)
+      );
+      const prefBadge = isPreferred ? ' ⭐ *[ACTIVE TARGET]*' : '';
+      text += `${statusIcon} ${typeIcon} *${d.deviceName}*${typeLabel}${prefBadge} (\`${d.hostname}\`)\n` +
         `   • OS: \`${osText}\`${userText}\n` +
         `   • Status: ${statusText}\n` +
         `   • Connected: ${new Date(d.connectedAt).toLocaleTimeString()}\n\n`;
     }
   }
 
-  // 2. All authorized users' laptop names & statuses
+  // 2. All authorized users' fleet
   if (allowedUserIds.size > 1) {
     text += `👥 *All Authorized Users Fleet:*\n`;
     for (const item of allLaptops) {
-      const isYou = item.userId === userId ? ' (You)' : '';
+      const isYou = item.userId === uid ? ' (You)' : '';
       if (item.hasOnlineDevice) {
         for (const d of item.devices.filter((x) => x.isOnline)) {
           const osInfo = d.osVersion ? `${d.platform} - ${d.osVersion}` : d.platform;
-          text += `• User \`${item.userId}\`${isYou}: 🟢 *${d.deviceName}* (\`${d.hostname}\` | \`${osInfo}\`)\n`;
+          const typeIcon = d.deviceType === 'phone' ? '📱' : d.deviceType === 'tablet' ? '📟' : '💻';
+          text += `• User \`${item.userId}\`${isYou}: 🟢 ${typeIcon} *${d.deviceName}* (\`${d.hostname}\` | \`${osInfo}\`)\n`;
         }
       } else {
         text += `• User \`${item.userId}\`${isYou}: 🔴 Disconnected\n`;
@@ -2844,17 +2951,41 @@ bot.command(['devices', 'laptops', 'device'], async (ctx) => {
   }
 
   text += `• **Safe on Public Wi-Fi:** Uses an outbound encrypted TLS tunnel (\`wss://\`) with 0 open incoming ports.\n` +
-    `• **Multi-User Isolation:** Each user's agent commands only execute on their own machine.\n\n` +
-    `_Try: /status to view live CPU/RAM specs, or /agent run tests on my laptop._`;
+    `• **Multi-User Isolation:** Each user's agent commands only execute on their own machine/device.\n\n` +
+    `_Tap a button below to switch your target device or connect a new device._`;
 
   const keyboard = new InlineKeyboard();
-  if (!list || list.length === 0) {
-    keyboard.text('💻 Setup My Laptop', `setup_laptop_${userId}`).row();
-  } else {
-    keyboard.text('📥 Re-download start-agent.bat', `dl_bat_${userId}`).row();
-  }
-  keyboard.text('🔄 Refresh Status', `refresh_devices_${userId}`);
 
+  // 1-Tap target switcher buttons with checkmark on active
+  const isAuto = !currentPref || currentPref === 'auto';
+  const isLaptop = currentPref === 'laptop';
+  const isPhone = currentPref === 'phone';
+  const isTablet = currentPref === 'tablet';
+
+  keyboard
+    .text(isAuto ? '🎯 Auto ✅' : '🎯 Auto', 'set_target:auto')
+    .text(isLaptop ? '💻 Laptop ✅' : '💻 Laptop', 'set_target:laptop')
+    .row()
+    .text(isPhone ? '📱 Phone ✅' : '📱 Phone', 'set_target:phone')
+    .text(isTablet ? '📟 Tablet ✅' : '📟 Tablet', 'set_target:tablet')
+    .row();
+
+  // Setup buttons
+  keyboard
+    .text('💻 Setup Laptop', `setup_laptop_${uid}`)
+    .text('📱 Setup Phone / Termux', `setup_phone_${uid}`)
+    .row();
+
+  if (list && list.length > 0) {
+    keyboard.text('📥 Re-download start-agent.bat', `dl_bat_${uid}`).row();
+  }
+  keyboard.text('🔄 Refresh Status', `refresh_devices_${uid}`);
+
+  return { text, keyboard };
+}
+
+bot.command(['devices', 'laptops', 'device'], async (ctx) => {
+  const { text, keyboard } = buildDevicesMessageAndKeyboard(ctx.from.id);
   await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
 });
 
@@ -2864,12 +2995,13 @@ bot.command(['devices', 'laptops', 'device'], async (ctx) => {
 async function sendLaptopRunnerSetup(ctx, targetUserId) {
   const uid = Number(targetUserId || ctx.from.id);
   const serverUrl = getPublicBotUrl();
-  const isOnline = isLaptopConnected(uid);
+  const isOnline = isLaptopConnected(uid, 'laptop');
 
   const ps1Command = `irm ${serverUrl}/setup/${uid}.ps1 | iex`;
 
   const keyboard = new InlineKeyboard()
     .text('📥 Download start-agent.bat', `dl_bat_${uid}`)
+    .text('📱 Setup Phone / Termux', `setup_phone_${uid}`).row()
     .text('🔄 Check Connection', `refresh_devices_${uid}`);
 
   const msg =
@@ -2902,6 +3034,51 @@ async function sendLaptopRunnerSetup(ctx, targetUserId) {
   }
 }
 
+/**
+ * Send pre-configured phone agent runner files and 1-line Termux setup command to a user
+ */
+async function sendPhoneRunnerSetup(ctx, targetUserId) {
+  const uid = Number(targetUserId || ctx.from.id);
+  const serverUrl = getPublicBotUrl();
+  const isOnline = isLaptopConnected(uid, 'phone');
+
+  const shCommand = `curl -sL ${serverUrl}/setup/${uid}.sh | bash`;
+
+  const keyboard = new InlineKeyboard()
+    .text('🔄 Check Connection', `refresh_devices_${uid}`)
+    .text('💻 Setup Laptop', `setup_laptop_${uid}`);
+
+  const msg =
+    `📱 *Telegram AI Phone Agent Setup (Android / Termux)*\n\n` +
+    `• **Target User:** \`${uid}\` ${uid === ctx.from.id ? '(You)' : ''}\n` +
+    `• **Phone Status:** ${isOnline ? '🟢 Connected & Online' : '🔴 Disconnected'}\n\n` +
+    `Run the agent daemon inside **Termux** on your Android smartphone or tablet so the AI agent can inspect \`/sdcard/Download\`, install packages, and open APKs simultaneously with your laptop!\n\n` +
+    `⚡ *1-Line Setup for Termux:*\n` +
+    `Open Termux on your phone, paste this command, and press Enter:\n\n` +
+    `\`${shCommand}\`\n\n` +
+    `📋 *Quick Prerequisites in Termux (if first time):*\n` +
+    `1. Allow storage access: \`termux-setup-storage\`\n` +
+    `2. Install tools: \`pkg update && pkg install nodejs curl\`\n\n` +
+    `💡 *To start anytime later:*\n` +
+    `\`~/telegram-ai-agent/start-phone.sh\`\n\n` +
+    `🔒 *100% Safe:* Outbound encrypted TLS connection (\`wss://\`) with zero incoming ports.`;
+
+  await ctx.reply(msg, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard,
+  });
+}
+
+bot.command(['setup_phone', 'connect_phone', 'termux', 'setup_android', 'setup_tablet'], async (ctx) => {
+  await sendPhoneRunnerSetup(ctx, ctx.from.id);
+});
+
+bot.callbackQuery(/^setup_phone_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  const targetUid = Number(ctx.match[1]);
+  await sendPhoneRunnerSetup(ctx, targetUid);
+});
+
 bot.command(['setup_laptop', 'connect_laptop', 'runner', 'install_agent', 'setup_agent'], async (ctx) => {
   await sendLaptopRunnerSetup(ctx, ctx.from.id);
 });
@@ -2923,20 +3100,80 @@ bot.callbackQuery(/^dl_bat_(\d+)$/, async (ctx) => {
   });
 });
 
+bot.callbackQuery(/^set_target:(.+)$/, async (ctx) => {
+  const target = (ctx.match[1] || 'auto').toLowerCase().trim();
+  setUserPreferredDevice(ctx.from.id, target);
+  await ctx.answerCallbackQuery({ text: `🎯 Target set to: ${target.toUpperCase()}` }).catch(() => {});
+  const { text, keyboard } = buildDevicesMessageAndKeyboard(ctx.from.id);
+  await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(async () => {
+    await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(() => {});
+  });
+});
+
+bot.callbackQuery(/^set_pref_dev_(\d+)_([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  const targetUid = Number(ctx.match[1]);
+  const devType = ctx.match[2];
+  if (ctx.from.id !== targetUid) return ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
+  setUserPreferredDevice(targetUid, devType);
+  await ctx.answerCallbackQuery({ text: `⭐ Default target device set to: ${devType.toUpperCase()}` }).catch(() => {});
+  const { text, keyboard } = buildDevicesMessageAndKeyboard(targetUid);
+  await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(async () => {
+    await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(() => {});
+  });
+});
+
+bot.command(['target', 'use', 'prefer', 'target_device'], async (ctx) => {
+  const userId = ctx.from.id;
+  const rawArg = (ctx.message.text || '').replace(/^\/(?:target|use|prefer|target_device)\s*/i, '').trim().toLowerCase();
+  if (!rawArg) {
+    const current = getUserPreferredDevice(userId);
+    return ctx.reply(
+      `🎯 *Active Target Device:* \`${current.toUpperCase()}\`\n\n` +
+      `To switch your active target, use:\n` +
+      `• \`/use phone\` — Default to Android phone / Termux\n` +
+      `• \`/use laptop\` — Default to laptop / PC\n` +
+      `• \`/use tablet\` — Default to Android tablet\n` +
+      `• \`/use auto\` — Automatically prioritize laptop or available device\n\n` +
+      `Or use /devices to switch with a single tap.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+  const target = rawArg === 'reset' ? 'auto' : rawArg;
+  setUserPreferredDevice(userId, target);
+  const { text, keyboard } = buildDevicesMessageAndKeyboard(userId);
+  await ctx.reply(
+    `🎯 *Active Target Mode set to:* \`${target.toUpperCase()}\`\n\n` +
+    `Commands without an explicit device will now target this device.\n\n` +
+    text,
+    { parse_mode: 'Markdown', reply_markup: keyboard }
+  );
+});
+
 bot.callbackQuery(/^refresh_devices_(\d+)$/, async (ctx) => {
   const targetUid = Number(ctx.match[1]);
-  const isOnline = isLaptopConnected(targetUid);
-  await ctx.answerCallbackQuery({
-    text: isOnline ? '🟢 Laptop is Online & Ready!' : '🔴 Laptop is currently offline.',
-    show_alert: true,
-  }).catch(() => {});
+  const list = getConnectedLaptopsList(targetUid);
+  const onlineDevices = list.filter((d) => d.isOnline);
+  if (onlineDevices.length > 0) {
+    const summary = onlineDevices.map((d) => `${d.deviceName} (${d.deviceType || d.platform})`).join(', ');
+    await ctx.answerCallbackQuery({
+      text: `🟢 ${onlineDevices.length} device(s) online: ${summary}`,
+      show_alert: false,
+    }).catch(() => {});
+  } else {
+    await ctx.answerCallbackQuery({
+      text: '🔴 No devices are currently connected.',
+      show_alert: false,
+    }).catch(() => {});
+  }
+  const { text, keyboard } = buildDevicesMessageAndKeyboard(targetUid);
+  await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(() => {});
 });
 
 bot.callbackQuery(/^refresh_status_(\d+)$/, async (ctx) => {
   const targetUid = Number(ctx.match[1]);
   const isOnline = isLaptopConnected(targetUid);
   await ctx.answerCallbackQuery({
-    text: isOnline ? '🟢 Laptop connected! Use /status to view specs.' : '🔴 Laptop is still offline.',
+    text: isOnline ? '🟢 Device connected! Use /status to view specs.' : '🔴 All devices are still offline.',
     show_alert: true,
   }).catch(() => {});
 });
