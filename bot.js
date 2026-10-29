@@ -2601,6 +2601,46 @@ async function handleAgentCommand(ctx, prompt) {
     }
   }
 
+  // Direct Device Screenshot Fast-Path (Optimization 5)
+  // If user runs `/agent take a screenshot` or `/agent screenshot [window/device]`, execute directly in <1s without LLM loop overhead
+  const isPureScreenReq =
+    isScreenshotRequest &&
+    !urlMatch &&
+    !/\b(?:code|script|install|run|write|terminal|download|create|build|make|edit|delete)\b/i.test(prompt) &&
+    !/\b(?:analyze|explain|inspect|read|check|why|error|what\s+is|transcribe)\b/i.test(prompt);
+
+  if (isPureScreenReq && isLaptopConnected(userId)) {
+    try {
+      await updateStatus('📸 Capturing screenshot...');
+      let targetDevice = null;
+      if (/\b(phone|mobile|android)\b/i.test(prompt)) targetDevice = 'phone';
+      else if (/\b(tablet|pad)\b/i.test(prompt)) targetDevice = 'tablet';
+      else if (/\b(laptop|pc|desktop|windows)\b/i.test(prompt)) targetDevice = 'laptop';
+
+      let windowTitle = null;
+      const windowMatch = prompt.match(/(?:screenshot|screen|window|capture)\s+(?:of\s+)?([a-zA-Z0-9_-]+)/i);
+      if (windowMatch && !['of', 'the', 'a', 'progress', 'task', 'laptop', 'desktop', 'phone', 'mobile', 'android', 'tablet'].includes(windowMatch[1].toLowerCase())) {
+        windowTitle = windowMatch[1];
+      }
+
+      const res = await captureLaptopScreenshot(userId, {
+        windowTitle: windowTitle || 'desktop',
+        sendDirect: true,
+        targetDevice,
+      });
+
+      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+
+      if (res && res.success) {
+        const totalDuration = Math.round(performance.now() - profilerT0);
+        console.log(`[PROFILER] [COMPLETED] /agent fast-path screenshot finished in ${totalDuration} ms`);
+        return;
+      }
+    } catch (fastErr) {
+      console.warn('[PROFILER] Fast-path screenshot fallback to full agent loop:', fastErr.message);
+    }
+  }
+
   const userDirectory = getUserStorageDir(userId);
   const userHistory = conversationHistory.get(userId) || [];
   const recentHistory = userHistory.slice(-6);
