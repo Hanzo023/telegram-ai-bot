@@ -7,6 +7,7 @@ import fs from 'fs';
 import { promises as fsp } from 'fs';
 import path from 'path';
 import http from 'http';
+import { Readable } from 'stream';
 import os from 'os';
 import crypto from 'crypto';
 import logger from './logger.js';
@@ -297,10 +298,10 @@ echo "========================================================"
 echo " 📱 Setting Up Telegram AI Phone Agent (User: $TARGET_USER_ID)"
 echo "========================================================"
 
-# Check if Node.js or curl are installed
-if ! command -v node >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
-    echo "📦 Installing prerequisites (nodejs, curl) via pkg..."
-    pkg update -y && pkg install -y nodejs curl
+# Check and install prerequisites (nodejs, curl, coreutils for split)
+if ! command -v node >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v split >/dev/null 2>&1; then
+    echo "📦 Installing prerequisites (nodejs, curl, coreutils) via pkg..."
+    pkg update -y && pkg install -y nodejs curl coreutils
 fi
 
 # Acquire wake lock if running in Termux so daemon stays alive in background
@@ -309,29 +310,128 @@ if command -v termux-wake-lock >/dev/null 2>&1; then
     termux-wake-lock
 fi
 
+# Request storage access if in Termux and ~/storage does not exist yet
+if command -v termux-setup-storage >/dev/null 2>&1 && [ ! -d "$HOME/storage" ]; then
+    echo "📱 Initializing Termux storage access..."
+    termux-setup-storage || true
+fi
+
 # a. Create ~/telegram-ai-agent and cd into it
 mkdir -p "$AGENT_DIR"
 cd "$AGENT_DIR"
 
 # b. Download laptop-runner.js from $SERVER_URL/download/laptop-runner.js
-echo "[1/3] Downloading latest laptop-runner.js..."
+echo "[1/4] Downloading latest laptop-runner.js..."
 curl -sSL "$SERVER_URL/download/laptop-runner.js" -o "$AGENT_DIR/laptop-runner.js"
 
 # c. Run npm install ws dotenv --no-audit --no-fund if node_modules/ws is missing
 if [ ! -d "$AGENT_DIR/node_modules/ws" ]; then
-    echo "[2/3] Installing dependencies (ws, dotenv)..."
+    echo "[2/4] Installing dependencies (ws, dotenv)..."
     npm install ws dotenv --no-audit --no-fund
 fi
 
-# d & e. Create start-phone.sh launcher script and start node laptop-runner.js
-echo "[3/3] Creating start-phone.sh launcher script..."
+# d. Create helper script: upload-to-telegram.sh
+echo "[3/4] Creating upload-to-telegram.sh helper script..."
+cat << 'UPLOAD_HELPER_EOF' > "$AGENT_DIR/upload-to-telegram.sh"
+#!/bin/bash
+TARGET_PATH="$1"
+SAVE_VAULT="\${2:-true}"
+TARGET_USER_ID="TARGET_USER_ID_PLACEHOLDER"
+SERVER_URL="SERVER_URL_PLACEHOLDER"
+SECRET="SECRET_PLACEHOLDER"
+
+if [ -z "$TARGET_PATH" ]; then
+    echo "Usage: upload-to-telegram.sh <file_path> [save_to_cloud_vault]"
+    exit 1
+fi
+
+# Resolve relative path or ~
+if [[ "$TARGET_PATH" == ~* ]]; then
+    TARGET_PATH="\${TARGET_PATH/#\\~/\$HOME}"
+elif [[ "$TARGET_PATH" != /* ]]; then
+    if [ -f "/sdcard/Download/$TARGET_PATH" ]; then
+        TARGET_PATH="/sdcard/Download/$TARGET_PATH"
+    elif [ -f "\$HOME/storage/downloads/$TARGET_PATH" ]; then
+        TARGET_PATH="\$HOME/storage/downloads/$TARGET_PATH"
+    else
+        TARGET_PATH="\$(pwd)/\$TARGET_PATH"
+    fi
+fi
+
+if [ ! -f "$TARGET_PATH" ]; then
+    echo "Error: File not found: $TARGET_PATH"
+    exit 1
+fi
+
+FILE_SIZE=\$(wc -c < "$TARGET_PATH" | tr -d ' ')
+MAX_SINGLE=\$((49 * 1024 * 1024))
+UPLOAD_URL="\$SERVER_URL/api/agent/upload/\$TARGET_USER_ID?secret=\$SECRET&vault=\$SAVE_VAULT"
+
+if [ "\$FILE_SIZE" -le "\$MAX_SINGLE" ]; then
+    echo "Uploading \$(basename "\$TARGET_PATH") (\$FILE_SIZE bytes)..."
+    curl -sS -X POST -F "file=@\\"\$TARGET_PATH\\"" "\$UPLOAD_URL"
+    echo ""
+else
+    echo "File size (\$FILE_SIZE bytes) exceeds 49 MB. Splitting into 45 MB parts..."
+    PART_PREFIX="\${TARGET_PATH}.part"
+    split -b 45M -d "\$TARGET_PATH" "\$PART_PREFIX"
+    for PART_FILE in "\${TARGET_PATH}.part"*; do
+        if [ -f "\$PART_FILE" ]; then
+            echo "Uploading part: \$(basename "\$PART_FILE")..."
+            curl -sS -X POST -F "file=@\\"\$PART_FILE\\"" "\$UPLOAD_URL"
+            echo ""
+            rm -f -- "\$PART_FILE"
+        fi
+    done
+    echo "All parts uploaded and temporary files cleaned up."
+fi
+UPLOAD_HELPER_EOF
+
+sed -i "s/TARGET_USER_ID_PLACEHOLDER/$TARGET_USER_ID/g" "$AGENT_DIR/upload-to-telegram.sh"
+sed -i "s|SERVER_URL_PLACEHOLDER|$SERVER_URL|g" "$AGENT_DIR/upload-to-telegram.sh"
+sed -i "s/SECRET_PLACEHOLDER/$SECRET/g" "$AGENT_DIR/upload-to-telegram.sh"
+chmod +x "$AGENT_DIR/upload-to-telegram.sh"
+
+# e. Create helper script: delete-file.sh
+cat << 'DELETE_HELPER_EOF' > "$AGENT_DIR/delete-file.sh"
+#!/bin/bash
+TARGET_PATH="$1"
+if [ -z "$TARGET_PATH" ]; then
+    echo "Usage: delete-file.sh <file_path>"
+    exit 1
+fi
+
+if [[ "$TARGET_PATH" == ~* ]]; then
+    TARGET_PATH="\${TARGET_PATH/#\\~/\$HOME}"
+elif [[ "$TARGET_PATH" != /* ]]; then
+    if [ -e "/sdcard/Download/$TARGET_PATH" ]; then
+        TARGET_PATH="/sdcard/Download/$TARGET_PATH"
+    elif [ -e "\$HOME/storage/downloads/$TARGET_PATH" ]; then
+        TARGET_PATH="\$HOME/storage/downloads/$TARGET_PATH"
+    else
+        TARGET_PATH="\$(pwd)/\$TARGET_PATH"
+    fi
+fi
+
+if [ ! -e "$TARGET_PATH" ]; then
+    echo "File not found: $TARGET_PATH"
+    exit 1
+fi
+
+rm -rf -- "$TARGET_PATH"
+echo "Deleted: $TARGET_PATH"
+DELETE_HELPER_EOF
+chmod +x "$AGENT_DIR/delete-file.sh"
+
+# f. Create start-phone.sh launcher script and start node laptop-runner.js
+echo "[4/4] Creating start-phone.sh launcher script..."
 cat << 'LAUNCHER_EOF' > "$AGENT_DIR/start-phone.sh"
 #!/bin/bash
 cd "$HOME/telegram-ai-agent"
 if command -v termux-wake-lock >/dev/null 2>&1; then
     termux-wake-lock
 fi
-node laptop-runner.js --user TARGET_USER_ID_PLACEHOLDER --server SERVER_URL_PLACEHOLDER --secret SECRET_PLACEHOLDER --type phone --name "Android-Phone"
+node laptop-runner.js --user TARGET_USER_ID_PLACEHOLDER --server SERVER_URL_PLACEHOLDER --secret SECRET_PLACEHOLDER --type phone --name "Android-Phone" --dir "/sdcard/Download"
 LAUNCHER_EOF
 
 sed -i "s/TARGET_USER_ID_PLACEHOLDER/$TARGET_USER_ID/g" "$AGENT_DIR/start-phone.sh"
@@ -342,7 +442,7 @@ chmod +x "$AGENT_DIR/start-phone.sh"
 echo ""
 echo "✅ Setup complete! Launching phone agent..."
 echo "💡 Tip: To restart anytime later, run: ~/telegram-ai-agent/start-phone.sh"
-node "$AGENT_DIR/laptop-runner.js" --user "$TARGET_USER_ID" --server "$SERVER_URL" --secret "$SECRET" --type phone --name "Android-Phone"
+node "$AGENT_DIR/laptop-runner.js" --user "$TARGET_USER_ID" --server "$SERVER_URL" --secret "$SECRET" --type phone --name "Android-Phone" --dir "/sdcard/Download"
 `;
 
       res.writeHead(200, {
@@ -350,6 +450,120 @@ node "$AGENT_DIR/laptop-runner.js" --user "$TARGET_USER_ID" --server "$SERVER_UR
         'Cache-Control': 'no-cache',
       });
       return res.end(shContent);
+    }
+
+    // 3c. Autonomous Device File Upload: POST /api/agent/upload/:userId or /api/agent/upload
+    const uploadMatch = pathname.match(/^\/api\/agent\/upload(?:\/(-?\d+))?$/i);
+    if (uploadMatch && req.method === 'POST') {
+      (async () => {
+        try {
+          const secret = (url.searchParams.get('secret') || req.headers['x-runner-secret'] || '').trim();
+          const expectedSecret = (getExpectedSecret() || '').trim();
+          if (expectedSecret && secret !== expectedSecret) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Unauthorized: invalid secret' }));
+          }
+
+          const rawUid = uploadMatch[1] || url.searchParams.get('userId') || allowedUserId || '';
+          const targetUserId = parseInt(rawUid, 10);
+          if (!targetUserId || isNaN(targetUserId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Missing or invalid target user ID' }));
+          }
+
+          if (allowedUserIds && allowedUserIds.size > 0 && !allowedUserIds.has(targetUserId)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Forbidden: unauthorized user ID' }));
+          }
+
+          const webReq = new Request(url.toString(), {
+            method: 'POST',
+            headers: req.headers,
+            body: Readable.toWeb(req),
+            duplex: 'half',
+          });
+
+          const formData = await webReq.formData();
+          const file = formData.get('file');
+          if (!file || typeof file === 'string') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'No file provided in form-data field "file"' }));
+          }
+
+          const fileName = file.name || 'uploaded_file';
+          const fileBuffer = Buffer.from(await file.arrayBuffer());
+          const fileSize = fileBuffer.length;
+          const saveToVault = url.searchParams.get('vault') !== 'false';
+
+          console.log(`[Agent Upload] 📥 Received file "${fileName}" (${formatBytes(fileSize)}) for user ${targetUserId}`);
+
+          // a) Send document directly to user's Telegram chat
+          let sentMsg = null;
+          try {
+            sentMsg = await bot.api.sendDocument(
+              targetUserId,
+              new InputFile(fileBuffer, fileName),
+              {
+                caption: `📥 *File from connected device*\n• Name: \`${fileName}\`\n• Size: \`${formatBytes(fileSize)}\``,
+                parse_mode: 'Markdown',
+              }
+            );
+          } catch (sendErr) {
+            console.warn(`[Agent Upload] Error sending markdown caption, trying plain:`, sendErr.message);
+            try {
+              sentMsg = await bot.api.sendDocument(
+                targetUserId,
+                new InputFile(fileBuffer, fileName),
+                { caption: `📥 File from connected device: ${fileName} (${formatBytes(fileSize)})` }
+              );
+            } catch (fallbackErr) {
+              console.error(`[Agent Upload] Failed to send document to Telegram:`, fallbackErr.message);
+            }
+          }
+
+          // Write to local temp_downloads for local workspace availability
+          try {
+            const tempDir = path.resolve(process.cwd(), 'temp_downloads');
+            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+            await fsp.writeFile(path.join(tempDir, fileName), fileBuffer);
+          } catch (writeErr) {
+            console.warn('[Agent Upload] Warning writing local cache:', writeErr.message);
+          }
+
+          // b) Automatically register/index in Telegram Cloud Vault (/storage)
+          if (saveToVault) {
+            try {
+              const ext = fileName.split('.').pop()?.toLowerCase() || 'bin';
+              const cat = getFileCategory(ext).id;
+              await saveCloudVaultEntry({
+                name: fileName,
+                file_id: sentMsg?.document?.file_id || '',
+                ext,
+                category: cat,
+                size: fileSize,
+                date: Date.now(),
+              });
+              console.log(`[Agent Upload] ☁️ Successfully registered "${fileName}" in Telegram Cloud Vault Index.`);
+            } catch (vaultErr) {
+              console.warn('[Agent Upload] Warning registering in vault:', vaultErr.message);
+            }
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            success: true,
+            uploaded: true,
+            name: fileName,
+            size: fileSize,
+            message: `Successfully uploaded ${fileName} (${formatBytes(fileSize)}) to Telegram${saveToVault ? ' and registered in Cloud Vault' : ''}.`,
+          }));
+        } catch (uploadErr) {
+          console.error('[Agent Upload] Error processing upload:', uploadErr);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: `Upload error: ${uploadErr.message}` }));
+        }
+      })();
+      return;
     }
 
     // 4. Remote /restart or /reboot endpoint to self-heal or restart container on demand

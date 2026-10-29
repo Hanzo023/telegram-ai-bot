@@ -495,6 +495,13 @@ export async function deleteLaptopFile(userId, filePath, targetDevice = null) {
 }
 
 /**
+ * Upload a file from the user's active device to the cloud server and Telegram Cloud Vault
+ */
+export async function uploadLaptopFileToServer(userId, filePath, saveToCloudVault = true, targetDevice = null) {
+  return await sendLaptopTask(userId, 'upload_to_server', { filePath, saveToCloudVault }, 360000, null, targetDevice);
+}
+
+/**
  * Rename/move a file on the user's active device
  */
 export async function renameLaptopFile(userId, oldPath, newPath, targetDevice = null) {

@@ -1242,51 +1242,186 @@ async function handleTask(action, payload) {
 
 
     case 'delete_file': {
-
       const { filePath } = payload;
-
       if (!filePath) return { success: false, error: 'No filePath provided.' };
 
       try {
+        let targetPath = filePath.trim();
+        if (targetPath.startsWith('~/') || targetPath.startsWith('~\\')) {
+          targetPath = path.join(os.homedir(), targetPath.slice(2));
+        } else if (targetPath === '~') {
+          targetPath = os.homedir();
+        }
 
-        const resolvedPath = path.resolve(filePath);
+        let resolvedPath = path.resolve(targetPath);
+        if (isAndroid && !fs.existsSync(resolvedPath)) {
+          const sdFallback = path.join('/sdcard/Download', path.basename(targetPath));
+          if (fs.existsSync(sdFallback)) {
+            resolvedPath = sdFallback;
+          }
+        }
 
         if (isRestrictedSystemPath(resolvedPath)) {
-
           return {
-
             success: false,
-
             error: 'Access denied: Deleting in protected operating system directories is blocked.',
-
           };
-
         }
 
         if (!fs.existsSync(resolvedPath)) {
-
           return { success: false, error: `File not found: ${resolvedPath}` };
-
         }
 
-        await fsp.unlink(resolvedPath);
-
+        await fsp.rm(resolvedPath, { recursive: true, force: true });
+        log(`[Runner] 🗑️ Deleted: "${resolvedPath}"`);
         return {
-
           success: true,
-
+          deleted: true,
           filePath: resolvedPath,
-
-          message: `Successfully deleted ${path.basename(resolvedPath)}`,
-
+          message: `Deleted: ${resolvedPath}`,
         };
-
       } catch (err) {
-
+        if (os.platform() !== 'win32') {
+          try {
+            const safeCmd = `rm -rf -- "${filePath.replace(/"/g, '\\"')}"`;
+            await new Promise((res, rej) => {
+              exec(safeCmd, (execErr) => (execErr ? rej(execErr) : res()));
+            });
+            return {
+              success: true,
+              deleted: true,
+              filePath,
+              message: `Deleted: ${filePath}`,
+            };
+          } catch {}
+        }
         return { success: false, error: `Delete file error: ${err.message}` };
-
       }
+    }
 
+    case 'upload_to_server': {
+      const { filePath, saveToCloudVault = true } = payload;
+      if (!filePath) return { success: false, error: 'No filePath provided.' };
+
+      try {
+        let targetPath = filePath.trim();
+        if (targetPath.startsWith('~/') || targetPath.startsWith('~\\')) {
+          targetPath = path.join(os.homedir(), targetPath.slice(2));
+        } else if (targetPath === '~') {
+          targetPath = os.homedir();
+        }
+
+        let resolvedPath = path.resolve(targetPath);
+        if (isAndroid && !fs.existsSync(resolvedPath)) {
+          const sdFallback = path.join('/sdcard/Download', path.basename(targetPath));
+          if (fs.existsSync(sdFallback)) {
+            resolvedPath = sdFallback;
+          }
+        }
+
+        if (!fs.existsSync(resolvedPath)) {
+          return { success: false, error: `File not found on device: ${resolvedPath}` };
+        }
+
+        const stat = await fsp.stat(resolvedPath);
+        if (stat.isDirectory()) {
+          return { success: false, error: `Target "${resolvedPath}" is a directory. Please specify a file or archive it first.` };
+        }
+
+        const fileSize = stat.size;
+        const baseServer = SERVER_URL.replace(/\/+$/, '').replace(/\/(ws\/)?laptop-agent\/?$/i, '');
+        const httpBase = baseServer.replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://');
+        const uploadUrl = `${httpBase}/api/agent/upload/${TELEGRAM_USER_ID}?secret=${encodeURIComponent(RUNNER_SECRET)}&vault=${saveToCloudVault}`;
+
+        const MAX_SINGLE_SIZE = 49 * 1024 * 1024; // 49 MB
+
+        // If file is <= 49 MB, upload directly in one request
+        if (fileSize <= MAX_SINGLE_SIZE) {
+          log(`[Runner] 📤 Uploading "${resolvedPath}" (${fileSize} bytes) to ${uploadUrl}...`);
+          const uploadCmd = `curl -sS -X POST -F "file=@\\"${resolvedPath}\\"" "${uploadUrl}"`;
+
+          const result = await new Promise((res) => {
+            exec(uploadCmd, { timeout: 300000 }, (err, stdout, stderr) => {
+              if (err) {
+                return res({ success: false, error: `curl upload error: ${stderr || err.message}` });
+              }
+              try {
+                const parsed = JSON.parse(stdout);
+                res(parsed);
+              } catch {
+                res({ success: true, message: stdout || 'File uploaded successfully' });
+              }
+            });
+          });
+
+          return result;
+        }
+
+        // If file exceeds 49 MB, split into 45 MB parts and upload sequentially
+        log(`[Runner] 📦 File "${resolvedPath}" is ${fileSize} bytes (> 49 MB). Splitting into 45 MB parts...`);
+        const partPrefix = `${resolvedPath}.part`;
+        const tempParts = [];
+
+        if (os.platform() !== 'win32' || isAndroid) {
+          const splitCmd = `split -b 45M -d "${resolvedPath}" "${partPrefix}"`;
+          await new Promise((res, rej) => {
+            exec(splitCmd, (err) => (err ? rej(err) : res()));
+          });
+
+          const dir = path.dirname(resolvedPath);
+          const basePrefix = path.basename(partPrefix);
+          const allDirFiles = await fsp.readdir(dir);
+          const partFiles = allDirFiles
+            .filter((f) => f.startsWith(basePrefix))
+            .sort()
+            .map((f) => path.join(dir, f));
+
+          tempParts.push(...partFiles);
+        } else {
+          // Pure Node.js chunking on Windows
+          const CHUNK_SIZE = 45 * 1024 * 1024;
+          const fd = await fsp.open(resolvedPath, 'r');
+          let partIdx = 0;
+          let offset = 0;
+
+          try {
+            while (offset < fileSize) {
+              const currentChunkSize = Math.min(CHUNK_SIZE, fileSize - offset);
+              const chunkBuf = Buffer.alloc(currentChunkSize);
+              await fd.read(chunkBuf, 0, currentChunkSize, offset);
+              const partPath = `${partPrefix}${String(partIdx).padStart(2, '0')}`;
+              await fsp.writeFile(partPath, chunkBuf);
+              tempParts.push(partPath);
+              offset += currentChunkSize;
+              partIdx++;
+            }
+          } finally {
+            await fd.close();
+          }
+        }
+
+        log(`[Runner] 📤 Generated ${tempParts.length} parts. Uploading sequentially...`);
+        for (const partFile of tempParts) {
+          log(`[Runner] 📤 Uploading part: ${path.basename(partFile)}...`);
+          const partCmd = `curl -sS -X POST -F "file=@\\"${partFile}\\"" "${uploadUrl}"`;
+          await new Promise((res) => {
+            exec(partCmd, { timeout: 300000 }, () => res());
+          });
+          try {
+            await fsp.unlink(partFile);
+          } catch {}
+        }
+
+        log(`[Runner] 🧹 Cleaned up temporary .part files.`);
+        return {
+          success: true,
+          uploaded: true,
+          parts: tempParts.length,
+          message: `Split large file (${fileSize} bytes) into ${tempParts.length} parts of 45 MB and uploaded all parts to Telegram.`,
+        };
+      } catch (err) {
+        return { success: false, error: `Upload to Telegram failed: ${err.message}` };
+      }
     }
 
 

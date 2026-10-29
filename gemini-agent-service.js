@@ -9,6 +9,8 @@ import {
   runLaptopCommand,
   readLaptopFile,
   writeLaptopFile,
+  deleteLaptopFile,
+  uploadLaptopFileToServer,
   listLaptopDirectory,
   getLaptopStatus,
   requestLaptopApproval,
@@ -20,6 +22,7 @@ import {
   joinLaptopPath,
   isPathAbsolute,
   getBotApi,
+  getExpectedSecret,
   saveCloudVaultEntry,
   getCloudVault,
   loadCloudDocumentContent,
@@ -32,7 +35,8 @@ const PRIMARY_MODEL = process.env.GEMINI_AGENT_MODEL || 'gemini-3.5-flash-lite';
 const FALLBACK_MODEL = 'gemini-3.8-flash';
 
 /**
- * Normalize device paths, handling Android Termux download/document directories
+ * Normalize device paths, handling Android Termux download/document directories,
+ * expanding tildes (~), preserving paths with spaces,
  * and stripping Windows drive letters when operating on Android.
  *
  * @param {string} rawPath
@@ -47,18 +51,52 @@ export function normalizeDevicePath(rawPath, devInfo, fallbackDir = '') {
 
   if (isAndroid) {
     const androidBase = (typeof devInfo === 'object' && devInfo?.storageDir) || '/sdcard/Download';
-    const trimmed = typeof rawPath === 'string' ? rawPath.trim() : '';
-    if (!trimmed || /^(?:\.?[\/\\])?downloads?$/i.test(trimmed) || /^[\/\\]?sdcard[\/\\]download/i.test(trimmed)) {
+    let trimmed = typeof rawPath === 'string' ? rawPath.trim() : '';
+
+    if (!trimmed) {
       return androidBase;
     }
-    if (/^(?:\.?[\/\\])?documents?$/i.test(trimmed)) {
+
+    // Expand ~ and Termux storage symlinks
+    if (trimmed === '~' || trimmed === '~/') {
+      return androidBase;
+    }
+    if (/^~\/storage\/downloads(?:\/|$)/i.test(trimmed)) {
+      trimmed = trimmed.replace(/^~\/storage\/downloads\/?/i, '');
+      return trimmed ? `${androidBase}/${trimmed}` : androidBase;
+    }
+    if (/^~\/storage\/shared\/download(?:\/|$)/i.test(trimmed)) {
+      trimmed = trimmed.replace(/^~\/storage\/shared\/download\/?/i, '');
+      return trimmed ? `${androidBase}/${trimmed}` : androidBase;
+    }
+    if (/^~\/storage\/shared(?:\/|$)/i.test(trimmed)) {
+      trimmed = trimmed.replace(/^~\/storage\/shared\/?/i, '');
+      return trimmed ? `/sdcard/${trimmed}` : '/sdcard';
+    }
+
+    // Exact download directory references (must match entire path so we don't truncate /sdcard/Download/file.apk)
+    if (/^(?:\.?[\/\\])?downloads?[\/\\]?$/i.test(trimmed) || /^[\/\\]?sdcard[\/\\]download[\/\\]?$/i.test(trimmed)) {
+      return androidBase;
+    }
+    if (/^(?:\.?[\/\\])?documents?[\/\\]?$/i.test(trimmed) || /^[\/\\]?sdcard[\/\\]documents?[\/\\]?$/i.test(trimmed)) {
       return '/sdcard/Documents';
     }
+
+    // Already an absolute Android path
+    if (/^[\/\\]?(?:sdcard|storage\/emulated\/0)[\/\\]/i.test(trimmed)) {
+      return '/' + trimmed.replace(/^[\/\\]+/, '').replace(/\\/g, '/');
+    }
+
+    // Windows drive letter on Android -> strip drive and put in androidBase
     if (/^[a-zA-Z]:[\/\\]/i.test(trimmed)) {
       return `${androidBase}/${path.win32.basename(trimmed)}`;
     }
+
+    // Strip leading downloads/ if prepended relatively
+    trimmed = trimmed.replace(/^(?:\.?[\/\\])?downloads?[\/\\]/i, '');
     return joinLaptopPath(androidBase, trimmed);
   }
+
   return joinLaptopPath(fallbackDir, rawPath);
 }
 
@@ -181,6 +219,50 @@ export const AGENT_TOOLS = [
           description: 'Target device to execute on. Default is laptop, or phone/tablet if the user mentions their phone, mobile, Android, or tablet.',
         },
       },
+    },
+  },
+  {
+    type: 'function',
+    name: 'delete_laptop_file',
+    description: 'Delete a file or directory directly on the user\'s physical laptop, phone, or tablet filesystem. You have direct tool access to delete files on the connected physical device(s), including Android smartphones/tablets (/sdcard/Download) and laptops. Use this when the user asks to delete, remove, clean up, or purge a file or APK on their device.',
+    parameters: {
+      type: 'object',
+      properties: {
+        file_path: {
+          type: 'string',
+          description: 'Full or relative path to the file or directory to delete (e.g. "/sdcard/Download/Telegram9.7.1-Old-Version Fix Login.apk" or "D:\\temp\\old_file.zip").',
+        },
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to execute on. Default is laptop, or phone/tablet if the user mentions their phone or Android device.',
+        },
+      },
+      required: ['file_path'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'upload_device_file_to_telegram',
+    description: 'Upload a file from the user\'s connected physical device (phone or laptop) directly to their Telegram chat and register it inside their Telegram Cloud Vault (/storage). You ARE the user\'s Telegram bot and have direct tool access to upload files to their chat. Always use this tool when the user asks to send, transfer, or upload a file from their phone/laptop to Telegram. Parameters: file_path (e.g. "/sdcard/Download/app.apk" or "D:\\data\\file.zip") and optional save_to_cloud_vault (boolean, default true).',
+    parameters: {
+      type: 'object',
+      properties: {
+        file_path: {
+          type: 'string',
+          description: 'Full or relative path to the file on the connected device to upload (e.g. "/sdcard/Download/app.apk" or "file.pdf")',
+        },
+        save_to_cloud_vault: {
+          type: 'boolean',
+          description: 'Whether to register and index the file in the user\'s Telegram Cloud Vault (/storage). Defaults to true.',
+        },
+        target_device: {
+          type: 'string',
+          enum: ['laptop', 'phone', 'tablet'],
+          description: 'Target device to upload from. Default is laptop, or phone/tablet if the user mentions their phone or Android device.',
+        },
+      },
+      required: ['file_path'],
     },
   },
   {
@@ -783,6 +865,107 @@ export async function executeTool(name, args = {}, context = {}) {
     }
   }
 
+  // 4b. Delete file / directory on device (with common LLM aliases)
+  if (
+    [
+      'delete_laptop_file',
+      'delete_file',
+      'remove_file',
+      'rm_file',
+      'deletelaptopfile',
+      'delete',
+      'unlink',
+    ].includes(norm)
+  ) {
+    const rawPath = args.file_path || args.filePath || args.path || args.filename || args.file;
+    if (!rawPath) {
+      return JSON.stringify({ error: 'No file_path provided to delete.' });
+    }
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+    const devInfo = getActiveDevicePlatform(context.userId, targetDevice);
+    const fallbackDir = context.detectedWorkingDir || context.userDirectory || '';
+    const normalizedPath = normalizeDevicePath(rawPath, devInfo, fallbackDir);
+
+    if (!isLaptopConnected(context.userId, targetDevice)) {
+      return JSON.stringify({
+        success: false,
+        error: `Target device is offline. Cannot delete file "${rawPath}". Please ensure your device runner is connected.`,
+      });
+    }
+
+    try {
+      const res = await deleteLaptopFile(context.userId, normalizedPath, targetDevice);
+      if (res && res.success) {
+        return JSON.stringify({
+          success: true,
+          deleted: true,
+          filePath: res.filePath || normalizedPath,
+          message: `Deleted: ${res.filePath || normalizedPath}`,
+        });
+      }
+      return JSON.stringify(res || { success: false, error: 'Unknown file deletion error.' });
+    } catch (err) {
+      return JSON.stringify({ success: false, error: err.message });
+    }
+  }
+
+  // 4c. Upload device file directly to Telegram & Cloud Vault
+  if (
+    [
+      'upload_device_file_to_telegram',
+      'upload_file_to_telegram',
+      'send_file_to_telegram',
+      'upload_laptop_file_to_telegram',
+      'upload_to_telegram',
+      'upload_to_storage',
+      'upload_to_cloud_vault',
+      'uploaddevicefiletotelegram',
+    ].includes(norm)
+  ) {
+    const rawPath = args.file_path || args.filePath || args.path || args.filename || args.file;
+    if (!rawPath) {
+      return JSON.stringify({ error: 'No file_path provided to upload.' });
+    }
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+    const saveToCloudVault = args.save_to_cloud_vault !== false && args.saveToCloudVault !== false;
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+    const devInfo = getActiveDevicePlatform(context.userId, targetDevice);
+    const fallbackDir = context.detectedWorkingDir || context.userDirectory || '';
+    const normalizedPath = normalizeDevicePath(rawPath, devInfo, fallbackDir);
+
+    if (!isLaptopConnected(context.userId, targetDevice)) {
+      return JSON.stringify({
+        success: false,
+        error: `Target device is offline. Cannot upload "${rawPath}". Please ensure your device agent is connected.`,
+      });
+    }
+
+    context.onStatusUpdate?.(`📤 *Uploading file to Telegram:* \`${path.basename(normalizedPath)}\`...`);
+
+    try {
+      const res = await uploadLaptopFileToServer(context.userId, normalizedPath, saveToCloudVault, targetDevice);
+      return JSON.stringify(res);
+    } catch (err) {
+      // Fallback: If upload_to_server RPC failed, attempt running curl command directly on device
+      try {
+        const secret = getExpectedSecret();
+        const serverUrl = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
+        const httpBase = serverUrl.replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://');
+        const uploadUrl = `${httpBase}/api/agent/upload/${context.userId}?secret=${encodeURIComponent(secret)}&vault=${saveToCloudVault}`;
+        const curlCmd = `curl -sS -X POST -F "file=@\\"${normalizedPath}\\"" "${uploadUrl}"`;
+        const cmdRes = await runLaptopCommand(context.userId, curlCmd, undefined, undefined, targetDevice);
+        return JSON.stringify(cmdRes);
+      } catch (fallbackErr) {
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    }
+  }
+
   // 5. Laptop hardware status / specs (with common LLM aliases)
   if (
     [
@@ -1175,44 +1358,51 @@ export async function runGeminiAgent({
         system_instruction:
           offlineDirective +
           'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical devices (laptop, Android phone via Termux, tablet).\n' +
-          'You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to check files, download files, or run commands on their phone, ALWAYS use `list_laptop_files`, `read_laptop_file`, `write_laptop_file`, and `run_laptop_terminal` targeting `/sdcard/Download`.\n\n' +
+          'You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to check files, download files, delete files, upload files, or run commands on their phone, ALWAYS use the official device tools (`list_laptop_files`, `delete_laptop_file`, `upload_device_file_to_telegram`, `read_laptop_file`, `write_laptop_file`, `run_laptop_terminal`).\n\n' +
           devicesStatusSection +
           defaultDeviceDirective +
           connectionModeInstruction +
           `User\'s target folder on their laptop: "${effectiveTargetDir}".\n` +
           `User\'s storage directory on Android phone/tablet (Termux): "/sdcard/Download".\n\n` +
           'CRITICAL EXECUTION AND MULTI-DEVICE RULES:\n' +
-          '1. MULTI-DEVICE CONTROL & ROUTING:\n' +
+          '1. TELEGRAM BOT IDENTITY & DIRECT CLOUD ACCESS:\n' +
+          '   • You ARE the user\'s Telegram bot and have direct access to the user\'s Telegram chat and `/storage` Telegram Cloud Vault Index via the `upload_device_file_to_telegram` tool.\n' +
+          '   • You must NEVER attempt to find a local Telegram CLI, python script, or bot token inside the remote device\'s terminal to upload files; you must always call `upload_device_file_to_telegram(file_path, save_to_cloud_vault, target_device)`.\n' +
+          '   • Tools prefixed with `laptop_` or `device_` (`list_laptop_files`, `delete_laptop_file`, `upload_device_file_to_telegram`, `run_laptop_terminal`, `read_laptop_file`, `write_laptop_file`) execute on whichever remote device is currently connected (including `Type: phone` / Android Termux) and have full permission to delete, move, inspect, and upload files when requested by the user.\n' +
+          '   • When the user asks to delete, clean up, or purge a file or APK, ALWAYS call `delete_laptop_file(file_path, target_device)`. Do NOT claim you lack the tool to delete files.\n' +
+          '2. MULTI-DEVICE CONTROL & ROUTING:\n' +
           '   • You can control the user\'s Windows laptop, Android phone (via Termux), and tablet simultaneously!\n' +
-          '   • When the user mentions their "phone", "mobile", "Android", or "tablet", specify `target_device: "phone"` or `target_device: "tablet"` in your tool calls (`run_laptop_terminal`, `read_laptop_file`, `write_laptop_file`, `list_laptop_files`, `get_laptop_status`).\n' +
+          '   • When the user mentions their "phone", "mobile", "Android", or "tablet", specify `target_device: "phone"` or `target_device: "tablet"` in your tool calls (`run_laptop_terminal`, `delete_laptop_file`, `upload_device_file_to_telegram`, `read_laptop_file`, `write_laptop_file`, `list_laptop_files`, `get_laptop_status`).\n' +
           `   • Default \`target_device\` is "${primaryOnlineDevice?.deviceType || 'laptop'}" if not specified by the user.\n` +
           '   • On Android / Termux:\n' +
           '     - User storage and downloads are located in `/sdcard/Download`.\n' +
           '     - You can install CLI packages via `pkg install -y <package>`, `pip install <package>`, or `npm install <package>`.\n' +
           '     - You can trigger native Android APK installs or open files via `run_laptop_terminal(command="termux-open <file.apk>", target_device="phone")`. Android will immediately pop up the native package installer prompt on the phone screen.\n' +
-          '2. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s devices. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content, target_device)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
-          '3. OFFICIAL TOOL NAMES:\n' +
-          '   • run_laptop_terminal: Execute shell commands on device (command, cwd, target_device)\n' +
+          '3. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s devices. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content, target_device)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
+          '4. OFFICIAL TOOL NAMES:\n' +
+          '   • upload_device_file_to_telegram: Upload a file from the user\'s connected device (phone or laptop) directly to their Telegram chat and register it inside their Telegram Cloud Vault (/storage). Parameters: file_path, save_to_cloud_vault, target_device.\n' +
+          '   • delete_laptop_file: Delete a file or directory on device (file_path, target_device). Returns confirmation of deletion.\n' +
+          '   • list_laptop_files: List files in a directory on device (dir_path, target_device)\n' +
           '   • read_laptop_file: Read files on device (file_path, max_lines, target_device)\n' +
           '   • write_laptop_file: Write or overwrite files on device (file_path, content, target_device)\n' +
-          '   • list_laptop_files: List files in a directory on device (dir_path, target_device)\n' +
+          '   • run_laptop_terminal: Execute shell commands on device (command, cwd, target_device)\n' +
           '   • get_laptop_status: Inspect device hardware specs (target_device)\n' +
           '   • list_open_windows: Enumerate open application and browser windows on user\'s laptop\n' +
           '   • take_screenshot: Capture laptop screen or app window and deliver photo directly to user on Telegram (window_title, caption). ALWAYS use this when the user asks for a screenshot, screen capture, or to see their desktop/screen.\n' +
           '   • search_web: Search Google for documentation or solutions\n' +
           '   • request_laptop_approval: Request user approval when installer or confirmation dialog is displayed\n' +
-          '4. SCREENSHOT RULE: To take a screenshot, NEVER attempt to run custom PowerShell or Python screenshot scripts in run_laptop_terminal. Always call `take_screenshot`.\n' +
-          '5. FULL MULTI-STEP WORKFLOWS: When requested to edit a file and push to Git:\n' +
+          '5. SCREENSHOT RULE: To take a screenshot, NEVER attempt to run custom PowerShell or Python screenshot scripts in run_laptop_terminal. Always call `take_screenshot`.\n' +
+          '6. FULL MULTI-STEP WORKFLOWS: When requested to edit a file and push to Git:\n' +
           '   a. Read or verify target file via `read_laptop_file`\n' +
           '   b. Write the complete updated content via `write_laptop_file`\n' +
           '   c. Execute git operations via `run_laptop_terminal(command="git add . && git commit -m ... && git push", cwd="' + effectiveTargetDir + '")`\n' +
           '   d. Report the outcome with commit details in your final answer.\n' +
-          '6. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
-          '7. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
-          '8. DISCONNECTED STATE: If a tool reports a device is disconnected, explain clearly and inform the user how to connect it.\n' +
-          '9. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
-          '10. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.\n\n' +
-          '11. APP INSTALLATION & SCREENSHOT WORKFLOWS:\n' +
+          '7. TARGET PATH RESOLUTION: If the user provides a path (e.g. "' + effectiveTargetDir + '"), ALWAYS use that directory path for commands and file operations.\n' +
+          '8. ZERO FAKE TOOLS: NEVER simulate tool execution in markdown text. Always call actual tools.\n' +
+          '9. DISCONNECTED STATE: If a tool reports a device is disconnected, explain clearly and inform the user how to connect it.\n' +
+          '10. TELEGRAM FORMATTING & DIRECTNESS: Do NOT use raw markdown headers (###) or horizontal divider lines (---). If you need headings, use *Bold text* on its own line. Use clean bullet points (•). Be direct, concise, and avoid repetitive padding.\n' +
+          '11. TEMPORAL REALITY (2026): The current year is 2026. Models Gemini 3.8 Flash, 3.5 Flash, 3.5 Flash-Lite are official Google models released in 2025–2026.\n\n' +
+          '12. APP INSTALLATION & SCREENSHOT WORKFLOWS:\n' +
           '    When the user asks to install, launch, or screenshot an application (e.g. "install yazi, open it and take a screenshot", or "open roblox and screenshot it"):\n' +
           '    a. Install: Always use silent non-interactive flags so terminal commands never hang waiting on user stdin:\n' +
           '       • winget (Windows): `winget install <id> -e --silent --accept-package-agreements --accept-source-agreements`\n' +
