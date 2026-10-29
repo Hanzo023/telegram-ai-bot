@@ -1,7 +1,7 @@
 {
   "name": "telegram-ai-bot",
   "version": "1.0.0",
-  "description": "Personal Telegram AI assistant powered by Google Gemini (with optional Claude hybrid mode)",
+  "description": "Personal Telegram AI assistant powered 100% natively by Google Gemini",
   "type": "module",
   "main": "bot.js",
   "scripts": {
@@ -22,13 +22,11 @@
     "telegram",
     "bot",
     "ai",
-    "gemini",
-    "claude"
+    "gemini"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.32.1",
     "@google/genai": "^2.28.0",
     "dotenv": "^16.4.7",
     "grammy": "^1.32.0",

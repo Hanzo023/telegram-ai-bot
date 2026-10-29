@@ -195,7 +195,8 @@ We chose **grammY** over legacy frameworks (`node-telegram-bot-api` or `telegraf
 #### Step 1: Install Dependencies
 If starting fresh or adding new dependencies, run:
 ```bash
-npm install grammy @anthropic-ai/sdk @google/genai dotenv ws pdf-parse
+npm install grammy @google/genai dotenv ws pdf-parse
+# (Optional) If you plan to use Hybrid Dual-Brain mode: npm install @anthropic-ai/sdk
 ```
 
 #### Step 2: Configure `package.json`
@@ -436,7 +437,7 @@ async function transcribeAudioWithGemini(buffer, mimeType = 'audio/ogg') {
 ### 2.4 Natural Spoken Audio Responses (`/live` Mode)
 
 Users can type `/live` in Telegram to toggle spoken replies. When `/live` is active:
-1. Claude or Gemini generates the conversational reply text.
+1. Gemini generates the conversational reply text.
 2. The bot synthesizes realistic speech using the Gemini TTS API.
 3. The generated audio buffer is transmitted back to Telegram via `ctx.replyWithVoice`:
 

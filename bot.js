@@ -5116,7 +5116,6 @@ const IGNORED_DIRS = new Set([
   'venv',
   'dist',
   'build',
-  '.claude',
 ]);
 
 async function getStoredFiles(dir = STORAGE_DIR, baseDir = STORAGE_DIR, depth = 0) {
@@ -5694,7 +5693,7 @@ async function sendToAIWithHistory(ctx, content, systemOverride = null) {
       'TEMPORAL CONTEXT & OFFICIAL AI MODELS (2026):\n' +
       '• The current year is 2026.\n' +
       '• You are powered 100% exclusively by Google Gemini 3 series (Gemini 3.8 Flash, Gemini 3.5 Flash, Gemini 3.5 Flash-Lite), official Google DeepMind flagship models (released 2025–2026).\n' +
-      '• This assistant uses ONLY Google Gemini for all models, reasoning, vision, code generation, search, and voice. There is NO Claude or Anthropic model.\n' +
+      '• This assistant uses ONLY Google Gemini for all models, reasoning, vision, code generation, search, and voice. All intelligence is provided natively by Google DeepMind Gemini models.\n' +
       '• NEVER claim or suggest that "Gemini 3.8" is a "community label", unofficial proxy, or nonexistent. Treat it as the genuine, official Google flagship model that it is.\n\n' +
       'TELEGRAM OUTPUT & PLAIN READABILITY GUIDANCE:\n' +
       '• You are chatting directly inside Telegram messenger on mobile and desktop.\n' +

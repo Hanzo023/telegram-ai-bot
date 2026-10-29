@@ -273,7 +273,7 @@ Render free containers have a strict 512 MB RAM limit. Loading a massive multi-p
 #### 🛠️ Fix
 In [`gemini-agent-service.js`](./gemini-agent-service.js) and [`bot.js`](./bot.js):
 1. Enforce a **5 MB size guard** before running in-memory text parsing.
-2. Truncate extracted document text to the first 100–300 lines before forwarding to Claude or Gemini:
+2. Truncate extracted document text to the first 100–300 lines before forwarding to Gemini:
    ```javascript
    const lines = textContent.split('\n').slice(0, 300).join('\n');
    ```

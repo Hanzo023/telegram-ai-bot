@@ -41,7 +41,7 @@ Verify before committing:
 git status
 ```
 > [!CAUTION]
-> Never commit `.env` or any file containing API keys (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`) to Git.
+> Never commit `.env` or any file containing API keys (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`) to Git.
 
 ---
 

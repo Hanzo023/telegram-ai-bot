@@ -1,6 +1,6 @@
 # 📱 Telegram AI Bot: Product Overview & Feature Tour
 
-> **The elevator pitch**: Imagine having a genius private AI companion in your pocket that not only chats with Claude and Gemini, but can also inspect your laptop hardware, run terminal commands, and fetch files while you're away from home — with zero open firewall ports.
+> **The elevator pitch**: Imagine having a genius private AI companion in your pocket that not only chats with Google Gemini, but can also inspect your laptop hardware, run terminal commands, and fetch files while you're away from home — with zero open firewall ports.
 
 ---
 
