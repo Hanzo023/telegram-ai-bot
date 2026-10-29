@@ -498,6 +498,35 @@ function startIpcServer() {
 
  */
 
+async function getLatestGalleryScreenshot(sinceTimestamp = 0) {
+  const dirs = [
+    '/sdcard/Pictures/Screenshots',
+    '/sdcard/DCIM/Screenshots',
+    path.join(os.homedir(), 'storage', 'pictures', 'Screenshots'),
+    path.join(os.homedir(), 'storage', 'dcim', 'Screenshots'),
+  ];
+  let newest = null;
+  let maxMtime = sinceTimestamp;
+  for (const dir of dirs) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      const files = await fsp.readdir(dir);
+      for (const f of files) {
+        if (!/\.(png|jpg|jpeg|webp)$/i.test(f)) continue;
+        const full = path.join(dir, f);
+        try {
+          const st = await fsp.stat(full);
+          if (st.isFile() && st.mtimeMs > maxMtime) {
+            maxMtime = st.mtimeMs;
+            newest = { path: full, mtimeMs: st.mtimeMs, size: st.size, name: f };
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  return newest;
+}
+
 function runApprovalTool(args = [], timeoutMs = 25000) {
 
   return new Promise((resolve) => {
@@ -1823,7 +1852,7 @@ async function handleTask(action, payload) {
               resolve(null);
             });
           });
-          if (adbBuffer) return adbBuffer;
+          if (adbBuffer) return { buffer: adbBuffer, source: 'live' };
 
           // 2. Try root su -c "/system/bin/screencap -p"
           const suBuffer = await new Promise((resolve) => {
@@ -1834,34 +1863,51 @@ async function handleTask(action, payload) {
               resolve(null);
             });
           });
-          if (suBuffer) return suBuffer;
+          if (suBuffer) return { buffer: suBuffer, source: 'live' };
 
-          // 3. Try standard screencap file fallback in /data/local/tmp or Download
-          const tempScreenPath = '/sdcard/Download/.agent_screen.png';
-          const fileBuffer = await new Promise((resolve) => {
-            exec(`/system/bin/screencap -p "${tempScreenPath}" 2>/dev/null`, { timeout: 1500 }, async (err) => {
-              if (!err && fs.existsSync(tempScreenPath)) {
-                try {
-                  const data = await fsp.readFile(tempScreenPath);
-                  await fsp.unlink(tempScreenPath).catch(() => {});
-                  if (data && data.length > 8) return resolve(data);
-                } catch {}
+          // 3. Smart Gallery Fallback (ZERO ADB / ZERO ROOT required)
+          const t0 = Date.now();
+          // Check for any screenshot taken in the last 5 minutes
+          let shot = await getLatestGalleryScreenshot(t0 - 5 * 60 * 1000);
+
+          // If no recent screenshot was taken in the last 5 minutes, wait up to 5 seconds for the user to press Power+VolDown
+          if (!shot) {
+            log('[Runner] 📱 Waiting up to 5s for phone screenshot (Power + Volume Down)...');
+            const deadline = Date.now() + 5000;
+            while (Date.now() < deadline && !shot) {
+              await new Promise((r) => setTimeout(r, 500));
+              shot = await getLatestGalleryScreenshot(t0);
+            }
+          }
+
+          // If still no fresh screenshot, fallback to whatever newest screenshot exists in gallery
+          if (!shot) {
+            shot = await getLatestGalleryScreenshot(0);
+          }
+
+          if (shot && shot.path && fs.existsSync(shot.path)) {
+            try {
+              const fileData = await fsp.readFile(shot.path);
+              if (fileData && fileData.length > 8) {
+                return { buffer: fileData, source: 'gallery', filename: shot.name };
               }
-              resolve(null);
-            });
-          });
-          if (fileBuffer) return fileBuffer;
+            } catch {}
+          }
 
           return null;
         };
 
-        const imgData = await tryCaptureAndroid();
-        if (imgData) {
+        const captureRes = await tryCaptureAndroid();
+        if (captureRes && captureRes.buffer) {
+          const isGallery = captureRes.source === 'gallery';
+          const title = isGallery
+            ? `${DEVICE_TYPE === 'tablet' ? 'Tablet' : 'Phone'} Screenshot (${captureRes.filename || 'Gallery'})`
+            : `${DEVICE_TYPE === 'tablet' ? 'Android Tablet' : 'Android Phone'} Screen`;
           return {
             success: true,
-            windowTitle: windowTitle || `${DEVICE_TYPE === 'tablet' ? 'Android Tablet' : 'Android Phone'} Screen`,
+            windowTitle: windowTitle || title,
             isDesktopFallback: true,
-            image: imgData.toString('base64'),
+            image: captureRes.buffer.toString('base64'),
             timestamp: Date.now(),
           };
         }
@@ -1869,10 +1915,8 @@ async function handleTask(action, payload) {
         return {
           success: false,
           error:
-            `Android OS blocks background screen capture without ADB or Root permissions.\n` +
-            `👉 To enable instant screenshots on your ${DEVICE_TYPE === 'tablet' ? 'tablet' : 'phone'}:\n` +
-            `1. In Android Settings -> Developer Options -> Turn on 'Wireless Debugging'.\n` +
-            `2. In Termux, pair and connect: adb connect localhost:<port>`,
+            `📸 No screenshot found on your ${DEVICE_TYPE === 'tablet' ? 'tablet' : 'phone'}.\n` +
+            `👉 Take a screenshot on your device (Power + Volume Down), then run /screenshot again!`,
         };
       }
 
