@@ -1938,27 +1938,35 @@ async function handleConcurrentScreenshot(userId, ctx, rawText = '') {
   let statusMsg = null;
   try {
     const activeSession = activeAgentSessions.get(userId);
+
+    let targetDevice = null;
+    if (/\b(phone|mobile|android)\b/i.test(rawText)) targetDevice = 'phone';
+    else if (/\b(tablet|pad)\b/i.test(rawText)) targetDevice = 'tablet';
+    else if (/\b(laptop|pc|desktop|windows)\b/i.test(rawText)) targetDevice = 'laptop';
+
+    const devLabel = targetDevice ? (targetDevice.charAt(0).toUpperCase() + targetDevice.slice(1)) : 'device';
+
     const statusText = activeSession
-      ? '📸 *Capturing live screenshot while task is running...*'
-      : '📸 *Capturing live screenshot...*';
+      ? `📸 *Capturing live screenshot from ${devLabel} while task is running...*`
+      : `📸 *Capturing live screenshot from ${devLabel}...*`;
     statusMsg = await ctx.reply(statusText, { parse_mode: 'Markdown' }).catch(() => null);
 
     let windowTitle = null;
     const windowMatch = rawText.match(/(?:screenshot|screen|window|capture)\s+(?:of\s+)?([a-zA-Z0-9_-]+)/i);
-    if (windowMatch && !['of', 'the', 'a', 'progress', 'task', 'laptop', 'desktop'].includes(windowMatch[1].toLowerCase())) {
+    if (windowMatch && !['of', 'the', 'a', 'progress', 'task', 'laptop', 'desktop', 'phone', 'mobile', 'android', 'tablet'].includes(windowMatch[1].toLowerCase())) {
       windowTitle = windowMatch[1];
     }
 
     const caption = windowTitle
-      ? (activeSession ? `📸 Live capture of "${windowTitle}" during active task` : `📸 Live capture of "${windowTitle}"`)
-      : (activeSession ? '📸 Live desktop capture during active task' : '📸 Live desktop capture');
+      ? (activeSession ? `📸 Live capture of "${windowTitle}" on ${devLabel}` : `📸 Live capture of "${windowTitle}" on ${devLabel}`)
+      : (activeSession ? `📸 Live screen capture on ${devLabel}` : `📸 Live screen capture on ${devLabel}`);
 
-    const res = await captureLaptopScreenshot(userId, { windowTitle, caption }, 25000);
+    const res = await captureLaptopScreenshot(userId, { windowTitle, caption, targetDevice }, 25000);
     if (statusMsg) {
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
     }
     if (!res || !res.success) {
-      await ctx.reply(`⚠️ Could not capture live screen: ${res?.error || 'Laptop busy or unresponsive'}`);
+      await ctx.reply(`⚠️ Could not capture live screen: ${res?.error || 'Device busy or unresponsive'}`);
     }
   } catch (err) {
     if (statusMsg) {
@@ -2212,7 +2220,12 @@ async function processUserBatch(userId, items, ctx) {
       .join('\n\n');
 
     if (combinedText) {
-      if (isUserLiveModeEnabled(userId)) {
+      const pureScreenshotRegex = /^(?:(?:can\s+you\s+)?(?:please\s+)?(?:take|get|capture|show|grab)?\s*(?:a\s+)?(?:screen|screenshot|desktop|snapshot)(?:\s+(?:of\s+)?(?:my\s+)?(phone|mobile|android|tablet|pad|laptop|pc|desktop))?[\.\?!]?)$/i;
+      const isPureScreenshot = pureScreenshotRegex.test(combinedText.trim()) && !/\b(?:analyze|explain|inspect|read|write|run|code|search|why|how)\b/i.test(combinedText);
+
+      if (isPureScreenshot && isLaptopConnected(userId)) {
+        await handleConcurrentScreenshot(userId, ctx, combinedText);
+      } else if (isUserLiveModeEnabled(userId)) {
         await handleLiveVoiceReply(ctx, combinedText);
       } else if (userAgentMode.get(userId)) {
         await handleAgentCommand(ctx, combinedText);
@@ -4709,25 +4722,51 @@ bot.command(['screenshot', 'screen', 'snap'], async (ctx) => {
 
   if (!isLaptopConnected(userId)) {
     await ctx.reply(
-      '⚠️ *Laptop Disconnected*\n\n' +
-      'No active laptop runner is currently connected to your account.\n' +
-      'Please run `start-agent.bat` or `npm run laptop` on your computer first.',
+      '⚠️ *No Devices Connected*\n\n' +
+      'No active runner (laptop, phone, or tablet) is currently connected to your account.\n' +
+      'Please ensure `node laptop-runner.js` is running on your phone or computer first.',
       { parse_mode: 'Markdown' }
     );
     return;
   }
 
-  // 1. FAST PATH: If target window was explicitly provided in command (e.g. /screenshot Brave, /screenshot Roblox)
-  if (rawArg) {
-    const statusMsg = await ctx.reply(`📸 *Capturing "${rawArg}" from your laptop...*`, {
+  // Parse target device & window from argument (e.g. "/screenshot phone", "/screenshot tablet", "/screenshot Brave", "/screenshot phone chrome")
+  let targetDevice = null;
+  let windowTarget = rawArg;
+
+  const firstWordMatch = rawArg.match(/^([a-zA-Z0-9_-]+)(?:\s+(.*))?$/);
+  if (firstWordMatch) {
+    const firstWord = firstWordMatch[1].toLowerCase();
+    if (['phone', 'mobile', 'android'].includes(firstWord)) {
+      targetDevice = 'phone';
+      windowTarget = (firstWordMatch[2] || '').trim();
+    } else if (['tablet', 'pad'].includes(firstWord)) {
+      targetDevice = 'tablet';
+      windowTarget = (firstWordMatch[2] || '').trim();
+    } else if (['laptop', 'pc', 'desktop', 'windows'].includes(firstWord)) {
+      targetDevice = 'laptop';
+      windowTarget = (firstWordMatch[2] || '').trim();
+    }
+  }
+
+  const isMenuReq = windowTarget && ['menu', 'windows', 'apps', 'list'].includes(windowTarget.toLowerCase());
+
+  // If user requested the window selection menu explicitly:
+  if (!isMenuReq) {
+    // FAST PATH: Capture live screen directly and instantly (under 1 second)!
+    const isDesktopReq = !windowTarget || ['full', 'desktop', 'screen', 'primary'].includes(windowTarget.toLowerCase());
+    const devLabel = targetDevice ? (targetDevice.charAt(0).toUpperCase() + targetDevice.slice(1)) : 'device';
+    const targetLabel = isDesktopReq ? devLabel : `"${windowTarget}" on ${devLabel}`;
+
+    const statusMsg = await ctx.reply(`📸 *Capturing ${targetLabel}...*`, {
       parse_mode: 'Markdown',
     });
 
     try {
-      const isDesktopReq = ['full', 'desktop', 'screen'].includes(rawArg.toLowerCase());
       const res = await captureLaptopScreenshot(userId, {
-        windowTitle: isDesktopReq ? 'desktop' : rawArg,
+        windowTitle: isDesktopReq ? 'desktop' : windowTarget,
         sendDirect: true,
+        targetDevice,
       });
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
@@ -4745,8 +4784,8 @@ bot.command(['screenshot', 'screen', 'snap'], async (ctx) => {
     return;
   }
 
-  // 2. INTERACTIVE MENU PATH: Enumerate open windows and ask user what to capture
-  const statusMsg = await ctx.reply('🔍 *Scanning open windows on your laptop...*', {
+  // 2. INTERACTIVE MENU PATH (when user explicitly requests /screenshot menu or /screenshot windows)
+  const statusMsg = await ctx.reply('🔍 *Scanning open windows on your device...*', {
     parse_mode: 'Markdown',
   });
 

@@ -80,7 +80,7 @@ export function getDeviceSessions(userId) {
   const uid = Number(userId);
   let userSess = deviceSessions.get(uid);
   if (!userSess) {
-    userSess = { phone: null, laptop: null };
+    userSess = { phone: null, tablet: null, laptop: null };
     deviceSessions.set(uid, userSess);
   }
   return userSess;
@@ -151,10 +151,12 @@ export function selectOnlineDevice(userId, targetDevice = null, action = null) {
   const userSess = getDeviceSessions(uid);
 
   const phoneDev = userSess.phone && isDeviceOnline(userSess.phone) ? userSess.phone : null;
+  const tabletDev = userSess.tablet && isDeviceOnline(userSess.tablet) ? userSess.tablet : null;
   const laptopDev = userSess.laptop && isDeviceOnline(userSess.laptop) ? userSess.laptop : null;
 
   const onlineDevices = [];
   if (phoneDev) onlineDevices.push(phoneDev);
+  if (tabletDev) onlineDevices.push(tabletDev);
   if (laptopDev) onlineDevices.push(laptopDev);
 
   // Also include any other device from connectedLaptops Map if online
@@ -174,11 +176,12 @@ export function selectOnlineDevice(userId, targetDevice = null, action = null) {
     return onlineDevices[0];
   }
 
-  // Rule a: If target_device was explicitly specified ("phone" or "laptop"), match that device
+  // Rule a: If target_device was explicitly specified ("phone", "tablet", or "laptop"), match that device
   if (targetDevice && typeof targetDevice === 'string') {
     const norm = targetDevice.toLowerCase().trim();
-    if (norm === 'phone' && phoneDev) return phoneDev;
-    if (norm === 'laptop' && laptopDev) return laptopDev;
+    if ((norm === 'phone' || norm === 'mobile' || norm === 'android') && phoneDev) return phoneDev;
+    if ((norm === 'tablet' || norm === 'pad') && tabletDev) return tabletDev;
+    if ((norm === 'laptop' || norm === 'pc' || norm === 'desktop' || norm === 'windows') && laptopDev) return laptopDev;
     const matched = onlineDevices.find((d) => matchFilter(d, norm));
     if (matched) return matched;
   }
@@ -190,15 +193,16 @@ export function selectOnlineDevice(userId, targetDevice = null, action = null) {
     if (matchedPref) return matchedPref;
   }
 
-  // For desktop-specific GUI tasks, prefer laptop if online
-  const isDesktopAction = action && ['list_windows', 'take_screenshot', 'request_approval', 'approve_step'].includes(action);
-  if (isDesktopAction && laptopDev) {
+  // For desktop-specific GUI window enumeration or approval tools, prefer laptop if online and no specific device requested
+  const isDesktopAction = action && ['list_windows', 'request_approval', 'approve_step'].includes(action);
+  if (isDesktopAction && laptopDev && !targetDevice) {
     return laptopDev;
   }
 
-  // Rule c: If BOTH phone and laptop are ONLINE and no target was specified, route to defaultDevice[userId]
+  // Rule c: If BOTH phone/tablet and laptop are ONLINE and no target was specified, route to defaultDevice[userId]
   const def = getDefaultDevice(uid);
-  if (def === 'phone' && phoneDev) return phoneDev;
+  if ((def === 'phone' || def === 'mobile') && phoneDev) return phoneDev;
+  if (def === 'tablet' && tabletDev) return tabletDev;
   if (def === 'laptop' && laptopDev) return laptopDev;
 
   return onlineDevices[0];
@@ -582,8 +586,8 @@ export function registerOrUpdateDeviceSession(userId, data = {}) {
   const uid = Number(userId);
   const userSess = getDeviceSessions(uid);
   const rawType = (data.device_type || data.deviceType || '').toLowerCase().trim();
-  const isAndroid = (data.platform || '').toLowerCase().includes('android') || rawType === 'phone';
-  const deviceType = ['phone', 'laptop'].includes(rawType) ? rawType : (isAndroid ? 'phone' : 'laptop');
+  const isAndroid = (data.platform || '').toLowerCase().includes('android') || rawType === 'phone' || rawType === 'tablet';
+  const deviceType = ['phone', 'tablet', 'laptop'].includes(rawType) ? rawType : (isAndroid ? 'phone' : 'laptop');
 
   const existing = userSess[deviceType];
   const now = Date.now();
@@ -947,15 +951,13 @@ export async function captureLaptopScreenshot(userId, options = {}, timeoutMs = 
 
       const safeTitle = (res.windowTitle || 'Desktop').replace(/[`*_\[\]()]/g, ' ');
 
+      const isMobile = (res.windowTitle && /android|phone|tablet/i.test(res.windowTitle)) || (targetDevice && /phone|tablet|android/i.test(targetDevice));
+      const devName = targetDevice ? (targetDevice.charAt(0).toUpperCase() + targetDevice.slice(1)) : (isMobile ? 'Device' : 'Laptop');
       const photoCaption =
-
         caption ||
-
-        `📸 *Laptop Screenshot*\n` +
-
+        `📸 *${devName} Screenshot*\n` +
         `• *Target:* \`${safeTitle}\`` +
-
-        (res.isDesktopFallback ? ' _(Full Desktop Display)_' : '');
+        (res.isDesktopFallback ? ' _(Full Display)_' : '');
 
 
 

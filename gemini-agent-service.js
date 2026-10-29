@@ -1474,7 +1474,7 @@ export async function runGeminiAgent({
           '   • run_laptop_terminal: Execute shell commands on device (command, cwd, target_device)\n' +
           '   • get_laptop_status: Inspect device hardware specs (target_device)\n' +
           '   • list_open_windows: Enumerate open application and browser windows on user\'s laptop\n' +
-          '   • take_screenshot: Capture laptop screen or app window and deliver photo directly to user on Telegram (window_title, caption). ALWAYS use this when the user asks for a screenshot, screen capture, or to see their desktop/screen.\n' +
+          '   • take_screenshot: Capture device screen (laptop, phone, or tablet) or app window and deliver photo directly to user on Telegram (window_title, caption, target_device). ALWAYS use this when the user asks for a screenshot, screen capture, or to see their screen. Pass target_device="phone" or "tablet" if the user mentions their phone, tablet, or mobile device.\n' +
           '   • search_web: Search Google for documentation or solutions\n' +
           '   • request_laptop_approval: Request user approval when installer or confirmation dialog is displayed\n' +
           '5. SCREENSHOT RULE: To take a screenshot, NEVER attempt to run custom PowerShell or Python screenshot scripts in run_laptop_terminal. Always call `take_screenshot`.\n' +

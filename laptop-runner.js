@@ -1813,39 +1813,66 @@ async function handleTask(action, payload) {
       log(`[Runner] 📸 Capturing live screenshot (target: "${windowTitle || (hwnd ? `HWND:${hwnd}` : 'primary display')}")`);
 
       if (isAndroid) {
-        const screenPath = '/sdcard/Download/screen.png';
-        const tryScreencap = () =>
-          new Promise((resolve) => {
-            exec(`screencap -p "${screenPath}"`, { timeout: 10000 }, (err) => {
-              if (!err && fs.existsSync(screenPath)) return resolve(true);
-              exec(`adb shell screencap -p "${screenPath}"`, { timeout: 10000 }, (adbErr) => {
-                if (!adbErr && fs.existsSync(screenPath)) return resolve(true);
-                resolve(false);
-              });
+        const tryCaptureAndroid = async () => {
+          // 1. Fast direct ADB stream (exec-out streams raw PNG directly into memory in <300ms)
+          const adbBuffer = await new Promise((resolve) => {
+            execFile('adb', ['exec-out', 'screencap', '-p'], { encoding: 'buffer', maxBuffer: 20 * 1024 * 1024, timeout: 2500 }, (err, stdout) => {
+              if (!err && stdout && stdout.length > 8 && stdout[0] === 0x89 && stdout[1] === 0x50 && stdout[2] === 0x4e && stdout[3] === 0x47) {
+                return resolve(stdout);
+              }
+              resolve(null);
             });
           });
+          if (adbBuffer) return adbBuffer;
 
-        try {
-          const ok = await tryScreencap();
-          if (ok && fs.existsSync(screenPath)) {
-            const imgData = await fsp.readFile(screenPath);
-            try { await fsp.unlink(screenPath); } catch {}
-            return {
-              success: true,
-              windowTitle: windowTitle || 'Android Screen',
-              isDesktopFallback: true,
-              image: imgData.toString('base64'),
-              timestamp: Date.now(),
-            };
-          }
-        } catch (captureErr) {
-          log(`[Runner] Android screencap error: ${captureErr.message}`);
+          // 2. Try root su -c "/system/bin/screencap -p"
+          const suBuffer = await new Promise((resolve) => {
+            exec('su -c "/system/bin/screencap -p"', { encoding: 'buffer', maxBuffer: 20 * 1024 * 1024, timeout: 2000 }, (err, stdout) => {
+              if (!err && stdout && stdout.length > 8 && stdout[0] === 0x89 && stdout[1] === 0x50 && stdout[2] === 0x4e && stdout[3] === 0x47) {
+                return resolve(stdout);
+              }
+              resolve(null);
+            });
+          });
+          if (suBuffer) return suBuffer;
+
+          // 3. Try standard screencap file fallback in /data/local/tmp or Download
+          const tempScreenPath = '/sdcard/Download/.agent_screen.png';
+          const fileBuffer = await new Promise((resolve) => {
+            exec(`/system/bin/screencap -p "${tempScreenPath}" 2>/dev/null`, { timeout: 1500 }, async (err) => {
+              if (!err && fs.existsSync(tempScreenPath)) {
+                try {
+                  const data = await fsp.readFile(tempScreenPath);
+                  await fsp.unlink(tempScreenPath).catch(() => {});
+                  if (data && data.length > 8) return resolve(data);
+                } catch {}
+              }
+              resolve(null);
+            });
+          });
+          if (fileBuffer) return fileBuffer;
+
+          return null;
+        };
+
+        const imgData = await tryCaptureAndroid();
+        if (imgData) {
+          return {
+            success: true,
+            windowTitle: windowTitle || `${DEVICE_TYPE === 'tablet' ? 'Android Tablet' : 'Android Phone'} Screen`,
+            isDesktopFallback: true,
+            image: imgData.toString('base64'),
+            timestamp: Date.now(),
+          };
         }
 
         return {
           success: false,
           error:
-            'Android OS blocks background screen capture without root or ADB permissions. All file, terminal, and download tools work normally on this device.',
+            `Android OS blocks background screen capture without ADB or Root permissions.\n` +
+            `👉 To enable instant screenshots on your ${DEVICE_TYPE === 'tablet' ? 'tablet' : 'phone'}:\n` +
+            `1. In Android Settings -> Developer Options -> Turn on 'Wireless Debugging'.\n` +
+            `2. In Termux, pair and connect: adb connect localhost:<port>`,
         };
       }
 

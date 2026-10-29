@@ -368,12 +368,12 @@ def capture_snapshot(target_title=None, target_hwnd=None, force_desktop=False, q
     if img.mode != 'RGB':
         img = img.convert('RGB')
 
-    # Enforce 1280x720 viewport constraint for low-memory 512MB environments
+    # Fast 1280x720 viewport constraint for low-latency delivery
     if img.width > 1280 or img.height > 720:
-        img.thumbnail((1280, 720), Image.Resampling.LANCZOS)
+        img.thumbnail((1280, 720), Image.Resampling.BILINEAR)
 
     buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=quality, optimize=True)
+    img.save(buf, format='JPEG', quality=quality, optimize=False)
     encode_ms = round((time.perf_counter() - t_encode_start) * 1000, 2)
     sys.stderr.write(f"[PROFILER] Step: Screenshot JPEG encoding (1280x720, quality={quality}) took {encode_ms} ms (size: {len(buf.getvalue())} bytes)\n")
     b64_str = base64.b64encode(buf.getvalue()).decode('utf-8')

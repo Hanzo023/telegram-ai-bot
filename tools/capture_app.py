@@ -252,8 +252,8 @@ def capture_window(target_query=None):
             if screenshot.mode != 'RGB':
                 screenshot = screenshot.convert('RGB')
             if screenshot.width > 1280 or screenshot.height > 720:
-                screenshot.thumbnail((1280, 720), Image.Resampling.LANCZOS)
-            screenshot.save(output_path, "JPEG", quality=70, optimize=True)
+                screenshot.thumbnail((1280, 720), Image.Resampling.BILINEAR)
+            screenshot.save(output_path, "JPEG", quality=70, optimize=False)
             encode_ms = round((time.perf_counter() - t_encode_start) * 1000, 2)
             sys.stderr.write(f"[PROFILER] Step: Screenshot JPEG encoding (1280x720, quality=70) took {encode_ms} ms\n")
             file_size = os.path.getsize(output_path)
@@ -279,8 +279,8 @@ def capture_window(target_query=None):
     if screenshot.mode != 'RGB':
         screenshot = screenshot.convert('RGB')
     if screenshot.width > 1280 or screenshot.height > 720:
-        screenshot.thumbnail((1280, 720), Image.Resampling.LANCZOS)
-    screenshot.save(output_path, "JPEG", quality=70, optimize=True)
+        screenshot.thumbnail((1280, 720), Image.Resampling.BILINEAR)
+    screenshot.save(output_path, "JPEG", quality=70, optimize=False)
     encode_ms = round((time.perf_counter() - t_encode_start) * 1000, 2)
     sys.stderr.write(f"[PROFILER] Step: Screenshot JPEG encoding (1280x720, quality=70) took {encode_ms} ms\n")
 
