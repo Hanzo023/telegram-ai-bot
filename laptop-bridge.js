@@ -1,24 +1,38 @@
 import { WebSocketServer, WebSocket } from 'ws';
-
 import crypto from 'crypto';
-
 import os from 'os';
-
+import path from 'path';
 import { InputFile } from 'grammy';
 
-
+/**
+ * Multi-device Session Registry:
+ * Map<userId, {
+ *   phone?: object,
+ *   laptop?: object,
+ * }>
+ */
+const deviceSessions = new Map();
 
 /**
-
- * Registry of connected laptops
-
- * Map<userId, Map<deviceId, { ws, deviceName, hostname, os, connectedAt, lastPing }>>
-
+ * Command Queues per device type:
+ * Map<userId, {
+ *   phone: Array<object>,
+ *   laptop: Array<object>,
+ * }>
  */
+const deviceCommandQueues = new Map();
 
+/**
+ * Default active device per user ('phone' | 'laptop'):
+ * Defaults to the most recently connected device.
+ */
+const defaultDevice = new Map();
+
+/**
+ * Registry of connected laptops (kept for backward-compatibility)
+ * Map<userId, Map<deviceId, { ws, deviceName, hostname, os, connectedAt, lastPing, lastSeen }>>
+ */
 const connectedLaptops = new Map();
-
-
 
 /**
  * Track last connection notification per device to prevent notification spam on quick reconnects
@@ -43,6 +57,65 @@ export function getUserPreferredDevice(userId) {
 export const setPreferredDevice = setUserPreferredDevice;
 export const getPreferredDevice = getUserPreferredDevice;
 
+export function setDefaultDevice(userId, target) {
+  const norm = (target || '').toLowerCase().trim();
+  if (norm === 'phone' || norm === 'laptop') {
+    defaultDevice.set(Number(userId), norm);
+    userPreferredDevice.set(Number(userId), norm);
+  } else if (norm === 'auto') {
+    userPreferredDevice.set(Number(userId), 'auto');
+  }
+}
+
+export function getDefaultDevice(userId) {
+  const uid = Number(userId);
+  const explicitPref = userPreferredDevice.get(uid);
+  if (explicitPref && explicitPref !== 'auto' && (explicitPref === 'phone' || explicitPref === 'laptop')) {
+    return explicitPref;
+  }
+  return defaultDevice.get(uid) || 'laptop';
+}
+
+export function getDeviceSessions(userId) {
+  const uid = Number(userId);
+  let userSess = deviceSessions.get(uid);
+  if (!userSess) {
+    userSess = { phone: null, laptop: null };
+    deviceSessions.set(uid, userSess);
+  }
+  return userSess;
+}
+
+export function getDeviceCommandQueue(userId, deviceType) {
+  const uid = Number(userId);
+  let userQueues = deviceCommandQueues.get(uid);
+  if (!userQueues) {
+    userQueues = { phone: [], laptop: [] };
+    deviceCommandQueues.set(uid, userQueues);
+  }
+  const typeKey = (deviceType || '').toLowerCase().trim() === 'phone' ? 'phone' : 'laptop';
+  if (!userQueues[typeKey]) {
+    userQueues[typeKey] = [];
+  }
+  return userQueues[typeKey];
+}
+
+/**
+ * A device is marked ONLINE if its WebSocket is OPEN or its heartbeat (lastSeen) is within 45s.
+ * @param {object} deviceRecord
+ * @returns {boolean}
+ */
+export function isDeviceOnline(deviceRecord) {
+  if (!deviceRecord) return false;
+  if (deviceRecord.ws && deviceRecord.ws.readyState === WebSocket.OPEN) {
+    return true;
+  }
+  if (deviceRecord.lastSeen && (Date.now() - deviceRecord.lastSeen < 45000)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Check if a device matches a target/filter string
  * @param {object} dev
@@ -62,51 +135,73 @@ export function matchFilter(dev, filterStr) {
 }
 
 /**
- * Single unified helper to select an online device for a user
+ * Single unified helper to select an online device for a user.
+ * Routing logic:
+ * a) If the user specifies a device (e.g., "phone", "laptop"), pass that target_device.
+ * b) If only ONE device is currently ONLINE, automatically route to that online device regardless of what was guessed.
+ * c) If BOTH phone and laptop are ONLINE and no device was specified, route to defaultDevice[userId].
+ *
  * @param {number|string} userId
  * @param {string|null} [targetDevice]
  * @param {string|null} [action]
  * @returns {object|null}
  */
 export function selectOnlineDevice(userId, targetDevice = null, action = null) {
-  const userDevices = connectedLaptops.get(Number(userId));
-  if (!userDevices || userDevices.size === 0) return null;
+  const uid = Number(userId);
+  const userSess = getDeviceSessions(uid);
+
+  const phoneDev = userSess.phone && isDeviceOnline(userSess.phone) ? userSess.phone : null;
+  const laptopDev = userSess.laptop && isDeviceOnline(userSess.laptop) ? userSess.laptop : null;
 
   const onlineDevices = [];
-  for (const dev of userDevices.values()) {
-    if (dev.ws && dev.ws.readyState === WebSocket.OPEN) {
-      onlineDevices.push(dev);
+  if (phoneDev) onlineDevices.push(phoneDev);
+  if (laptopDev) onlineDevices.push(laptopDev);
+
+  // Also include any other device from connectedLaptops Map if online
+  const userDevices = connectedLaptops.get(uid);
+  if (userDevices) {
+    for (const dev of userDevices.values()) {
+      if (isDeviceOnline(dev) && !onlineDevices.some((d) => d.deviceId === dev.deviceId)) {
+        onlineDevices.push(dev);
+      }
     }
   }
 
   if (onlineDevices.length === 0) return null;
 
-  // b. If onlineDevices.length === 1, ALWAYS return onlineDevices[0]
+  // Rule b: If only ONE device is currently ONLINE, automatically route to that online device
   if (onlineDevices.length === 1) {
     return onlineDevices[0];
   }
 
-  // d. Priority 1: If targetDevice is explicitly passed, find a match using matchFilter
+  // Rule a: If target_device was explicitly specified ("phone" or "laptop"), match that device
   if (targetDevice && typeof targetDevice === 'string') {
-    const matched = onlineDevices.find((d) => matchFilter(d, targetDevice));
+    const norm = targetDevice.toLowerCase().trim();
+    if (norm === 'phone' && phoneDev) return phoneDev;
+    if (norm === 'laptop' && laptopDev) return laptopDev;
+    const matched = onlineDevices.find((d) => matchFilter(d, norm));
     if (matched) return matched;
   }
 
-  // e. Priority 2: Check getUserPreferredDevice(userId). If pref !== 'auto', find a match
-  const pref = getUserPreferredDevice(userId);
+  // Check user preferred device if explicitly configured
+  const pref = getUserPreferredDevice(uid);
   if (pref && pref !== 'auto') {
     const matchedPref = onlineDevices.find((d) => matchFilter(d, pref));
     if (matchedPref) return matchedPref;
   }
 
-  // f. Priority 3 (Auto mode when 2+ devices are online): For desktop GUI actions, prefer win32 or laptop
+  // For desktop-specific GUI tasks, prefer laptop if online
   const isDesktopAction = action && ['list_windows', 'take_screenshot', 'request_approval', 'approve_step'].includes(action);
-  if (isDesktopAction) {
-    const desktopDev = onlineDevices.find((d) => d.platform === 'win32' || d.deviceType === 'laptop');
-    if (desktopDev) return desktopDev;
+  if (isDesktopAction && laptopDev) {
+    return laptopDev;
   }
 
-  return onlineDevices.find((d) => d.deviceType === 'laptop') || onlineDevices[0];
+  // Rule c: If BOTH phone and laptop are ONLINE and no target was specified, route to defaultDevice[userId]
+  const def = getDefaultDevice(uid);
+  if (def === 'phone' && phoneDev) return phoneDev;
+  if (def === 'laptop' && laptopDev) return laptopDev;
+
+  return onlineDevices[0];
 }
 
 
@@ -252,49 +347,58 @@ export function getExpectedSecret() {
  * Check if a user has any active connected laptops or devices
  */
 export function isLaptopConnected(userId, targetDevice = null) {
-  const userDevices = connectedLaptops.get(Number(userId));
-  if (!userDevices || userDevices.size === 0) return false;
-
-  const onlineDevices = [];
-  for (const device of userDevices.values()) {
-    if (device.ws && device.ws.readyState === WebSocket.OPEN) {
-      onlineDevices.push(device);
-    }
-  }
-
-  if (onlineDevices.length === 0) return false;
-  if (!targetDevice || onlineDevices.length === 1) return true;
-
-  const targetNorm = String(targetDevice).toLowerCase().trim();
-  return onlineDevices.some((device) =>
-    (device.deviceType && device.deviceType.toLowerCase() === targetNorm) ||
-    (device.deviceName && device.deviceName.toLowerCase().includes(targetNorm)) ||
-    (device.hostname && device.hostname.toLowerCase().includes(targetNorm)) ||
-    (device.deviceId && device.deviceId.toLowerCase().includes(targetNorm))
-  );
+  const selected = selectOnlineDevice(userId, targetDevice);
+  return Boolean(selected);
 }
 
 /**
- * Get active device info for a user
+ * Get active device info list for a user
  */
 export function getConnectedLaptopsList(userId) {
-  const userDevices = connectedLaptops.get(Number(userId));
-  if (!userDevices) return [];
-
+  const uid = Number(userId);
+  const userSess = getDeviceSessions(uid);
   const list = [];
-  for (const [deviceId, dev] of userDevices.entries()) {
-    list.push({
-      deviceId,
-      deviceName: dev.deviceName || dev.hostname || 'Device',
-      deviceType: dev.deviceType || (dev.platform === 'android' ? 'phone' : 'laptop'),
-      hostname: dev.hostname,
-      platform: dev.platform,
-      username: dev.username || '',
-      osVersion: dev.osVersion || '',
-      isOnline: dev.ws && dev.ws.readyState === WebSocket.OPEN,
-      connectedAt: dev.connectedAt,
-    });
+  for (const type of ['phone', 'laptop']) {
+    const dev = userSess[type];
+    if (dev) {
+      list.push({
+        deviceId: dev.deviceId || `${type}_${uid}`,
+        deviceName: dev.deviceName || (type === 'phone' ? 'Android Phone' : 'Laptop'),
+        deviceType: type,
+        hostname: dev.hostname || (type === 'phone' ? 'Android-Device' : 'Laptop-Host'),
+        platform: dev.platform || (type === 'phone' ? 'android' : 'win32'),
+        username: dev.username || '',
+        osVersion: dev.osVersion || '',
+        isOnline: isDeviceOnline(dev),
+        lastSeen: dev.lastSeen,
+        connectedAt: dev.connectedAt,
+        storageDir: dev.storageDir || (type === 'phone' ? '/sdcard/Download' : ''),
+      });
+    }
   }
+
+  // Also include any connectedLaptops Map records if not already represented
+  const userDevices = connectedLaptops.get(uid);
+  if (userDevices) {
+    for (const [deviceId, dev] of userDevices.entries()) {
+      if (!list.some((d) => d.deviceId === deviceId || d.deviceType === dev.deviceType)) {
+        list.push({
+          deviceId,
+          deviceName: dev.deviceName || dev.hostname || 'Device',
+          deviceType: dev.deviceType || (dev.platform === 'android' ? 'phone' : 'laptop'),
+          hostname: dev.hostname || 'unknown',
+          platform: dev.platform || 'unknown',
+          username: dev.username || '',
+          osVersion: dev.osVersion || '',
+          isOnline: isDeviceOnline(dev),
+          lastSeen: dev.lastSeen || dev.lastPing,
+          connectedAt: dev.connectedAt,
+          storageDir: dev.storageDir || '',
+        });
+      }
+    }
+  }
+
   return list;
 }
 
@@ -304,27 +408,10 @@ export function getConnectedLaptopsList(userId) {
  */
 export function getAllConnectedLaptops(allowedUserIds) {
   const result = [];
-  const uids = allowedUserIds && allowedUserIds.size > 0 ? Array.from(allowedUserIds) : Array.from(connectedLaptops.keys());
+  const uids = allowedUserIds && allowedUserIds.size > 0 ? Array.from(allowedUserIds) : Array.from(deviceSessions.keys());
 
   for (const uid of uids) {
-    const userDevices = connectedLaptops.get(Number(uid));
-    const devicesList = [];
-    if (userDevices) {
-      for (const [deviceId, dev] of userDevices.entries()) {
-        const isOnline = dev.ws && dev.ws.readyState === WebSocket.OPEN;
-        devicesList.push({
-          deviceId,
-          deviceName: dev.deviceName || dev.hostname || 'Device',
-          deviceType: dev.deviceType || (dev.platform === 'android' ? 'phone' : 'laptop'),
-          hostname: dev.hostname || 'unknown',
-          platform: dev.platform || 'unknown',
-          username: dev.username || '',
-          osVersion: dev.osVersion || '',
-          isOnline,
-          connectedAt: dev.connectedAt,
-        });
-      }
-    }
+    const devicesList = getConnectedLaptopsList(uid);
     result.push({
       userId: Number(uid),
       devices: devicesList,
@@ -370,14 +457,14 @@ export function getActiveDevicePlatform(userId, targetDevice = null) {
 export function sendLaptopTask(userId, action, payload = {}, timeoutMs = 60000, onProgress = null, targetDevice = null) {
   const selectedDevice = selectOnlineDevice(userId, targetDevice, action);
   if (!selectedDevice) {
-    const userDevices = connectedLaptops.get(Number(userId));
-    if (!userDevices || userDevices.size === 0) {
+    const userSess = getDeviceSessions(Number(userId));
+    if (!userSess.phone && !userSess.laptop) {
       throw new Error(
-        `No active device (laptop, phone, or tablet) connected for your account. Please start the agent runner on your device.`
+        `No active device (laptop or phone) connected for your account. Please run setup on your device.`
       );
     }
     throw new Error(
-      `Your device is currently disconnected or asleep. Please ensure the agent runner is running on your machine or phone.`
+      `Your device is currently OFFLINE. Please ensure the agent runner is active on your device.`
     );
   }
 
@@ -399,14 +486,216 @@ export function sendLaptopTask(userId, action, payload = {}, timeoutMs = 60000, 
       device: selectedDevice,
     });
 
-    selectedDevice.ws.send(
-      JSON.stringify({
+    if (selectedDevice.ws && selectedDevice.ws.readyState === WebSocket.OPEN) {
+      selectedDevice.ws.send(
+        JSON.stringify({
+          id: requestId,
+          command_id: requestId,
+          action,
+          ...payload,
+        })
+      );
+    } else {
+      // Enqueue to dedicated per-device-type queue
+      const q = getDeviceCommandQueue(userId, selectedDevice.deviceType);
+      q.push({
         id: requestId,
+        command_id: requestId,
         action,
         ...payload,
-      })
-    );
+      });
+      console.log(`[Laptop Bridge] Enqueued task "${action}" (ID: ${requestId}) to queue[${userId}][${selectedDevice.deviceType}]`);
+    }
   });
+}
+
+/**
+ * Handle command result POSTed back from runner or bash client
+ * @param {string} commandId
+ * @param {object} result
+ * @returns {boolean}
+ */
+export function handleDeviceResult(commandId, result = {}) {
+  if (!commandId) return false;
+  const pending = pendingRequests.get(commandId);
+  if (!pending) return false;
+
+  clearTimeout(pending.timer);
+  pendingRequests.delete(commandId);
+
+  if (result.error && !result.success) {
+    pending.resolve({ success: false, error: result.error, stderr: result.stderr || '' });
+  } else {
+    pending.resolve({
+      success: result.success !== false,
+      stdout: result.stdout || result.output || '',
+      stderr: result.stderr || '',
+      exitCode: result.exitCode ?? (result.success === false ? 1 : 0),
+      ...result,
+    });
+  }
+  return true;
+}
+
+/**
+ * Send notification to Telegram when device connects (transitions from OFFLINE to ONLINE)
+ */
+export function sendDeviceConnectedNotification(userId, deviceRecord) {
+  if (!botApiRef) return;
+  const { deviceName, deviceType, hostname, platform, osVersion, username } = deviceRecord;
+  const friendlyPlatform =
+    platform === 'win32'
+      ? 'Windows'
+      : platform === 'darwin'
+      ? 'macOS'
+      : platform === 'linux'
+      ? 'Linux'
+      : platform === 'android'
+      ? 'Android'
+      : (platform || 'unknown');
+  const osLabel = osVersion ? `${friendlyPlatform} (${osVersion})` : friendlyPlatform;
+  const userLabel = username ? `\n• **Account:** \`${username}\`` : '';
+  const icon = deviceType === 'phone' ? '📱' : '💻';
+  const typeLabel = deviceType === 'phone' ? 'Phone' : 'Laptop';
+
+  botApiRef
+    .sendMessage(
+      userId,
+      `${icon} *${typeLabel} Connected: ${deviceName || hostname}*\n` +
+      `• **Host:** \`${hostname}\` (${osLabel})${userLabel}\n` +
+      `• **Type:** \`${deviceType}\`\n` +
+      `• **Status:** Active & listening for remote commands.\n\n` +
+      `You can now ask the agent to run terminal commands, open apps/websites, inspect files, or upload files while away!`,
+      { parse_mode: 'Markdown' }
+    )
+    .catch((err) => {
+      console.warn('[Laptop Bridge] Could not send connect notification:', err.message);
+    });
+}
+
+/**
+ * Register or update device session (for both WebSocket and HTTP polling)
+ * Heartbeat (lastSeen) is updated on every call.
+ * Connection notification is sent ONLY when transitioning from OFFLINE to ONLINE.
+ */
+export function registerOrUpdateDeviceSession(userId, data = {}) {
+  const uid = Number(userId);
+  const userSess = getDeviceSessions(uid);
+  const rawType = (data.device_type || data.deviceType || '').toLowerCase().trim();
+  const isAndroid = (data.platform || '').toLowerCase().includes('android') || rawType === 'phone';
+  const deviceType = ['phone', 'laptop'].includes(rawType) ? rawType : (isAndroid ? 'phone' : 'laptop');
+
+  const existing = userSess[deviceType];
+  const now = Date.now();
+  const wasOnline = existing ? isDeviceOnline(existing) : false;
+
+  const deviceName = data.deviceName || existing?.deviceName || (deviceType === 'phone' ? 'Android-Phone' : 'My-Laptop');
+  const hostname = data.hostname || existing?.hostname || (deviceType === 'phone' ? 'Android-Device' : 'Laptop-Host');
+  const platform = data.platform || existing?.platform || (deviceType === 'phone' ? 'android' : 'win32');
+  const username = data.username !== undefined ? data.username : (existing?.username || '');
+  const osVersion = data.osVersion !== undefined ? data.osVersion : (existing?.osVersion || '');
+  const storageDir = data.storageDir || existing?.storageDir || (deviceType === 'phone' ? '/sdcard/Download' : '');
+  const customDeviceId = data.deviceId || existing?.deviceId;
+  const deviceId = customDeviceId || `${deviceName}_${hostname}_${username || 'user'}_${platform}`;
+
+  const deviceRecord = {
+    ...(existing || {}),
+    ...data,
+    deviceId,
+    deviceName,
+    deviceType,
+    hostname,
+    platform,
+    username,
+    osVersion,
+    storageDir,
+    lastSeen: now,
+    connectedAt: existing?.connectedAt || new Date().toISOString(),
+  };
+
+  userSess[deviceType] = deviceRecord;
+  defaultDevice.set(uid, deviceType);
+
+  // Maintain connectedLaptops Map for backward compatibility
+  if (!connectedLaptops.has(uid)) {
+    connectedLaptops.set(uid, new Map());
+  }
+  connectedLaptops.get(uid).set(deviceId, deviceRecord);
+
+  // Send notification ONLY when transitioning from OFFLINE to ONLINE
+  if (!wasOnline) {
+    console.log(`[Laptop Bridge] 🟢 Device transitioned OFFLINE -> ONLINE: [${deviceType.toUpperCase()}] "${deviceName}" (${hostname}) for User ${uid}`);
+    sendDeviceConnectedNotification(uid, deviceRecord);
+  }
+
+  return deviceRecord;
+}
+
+/**
+ * Resolve target string (app alias or URL) to a full URL
+ */
+export function resolveAppOrWebUrl(target) {
+  if (!target || typeof target !== 'string') return 'https://gemini.google.com';
+  const clean = target.trim();
+  const lower = clean.toLowerCase();
+
+  const APP_URL_MAP = {
+    gemini: 'https://gemini.google.com',
+    youtube: 'https://youtube.com',
+    google: 'https://google.com',
+    github: 'https://github.com',
+    x: 'https://x.com',
+    twitter: 'https://x.com',
+    chatgpt: 'https://chatgpt.com',
+    claude: 'https://claude.ai',
+    reddit: 'https://reddit.com',
+    telegram: 'https://web.telegram.org',
+    gmail: 'https://mail.google.com',
+    maps: 'https://maps.google.com',
+    spotify: 'https://open.spotify.com',
+    netflix: 'https://netflix.com',
+    instagram: 'https://instagram.com',
+    facebook: 'https://facebook.com',
+    tiktok: 'https://tiktok.com',
+    discord: 'https://discord.com',
+  };
+
+  if (APP_URL_MAP[lower]) return APP_URL_MAP[lower];
+  if (/^https?:\/\//i.test(clean)) return clean;
+  if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\/.*)?$/i.test(clean)) return `https://${clean}`;
+  return `https://${clean}.com`;
+}
+
+/**
+ * Open URL or app directly on the user's physical device
+ */
+export async function openOnDevice(userId, target, targetDevice = null) {
+  const url = resolveAppOrWebUrl(target);
+  const selected = selectOnlineDevice(userId, targetDevice, 'open_on_device');
+  if (!selected) {
+    throw new Error('No active device (phone or laptop) is connected to open the target.');
+  }
+
+  const platform = (selected.platform || (selected.deviceType === 'phone' ? 'android' : 'win32')).toLowerCase();
+  let cmd;
+  if (platform === 'android' || selected.deviceType === 'phone') {
+    cmd = `am start -a android.intent.action.VIEW -d "${url}" >/dev/null 2>&1 || termux-open-url "${url}"`;
+  } else if (platform === 'win32') {
+    cmd = `start "" "${url}"`;
+  } else if (platform === 'darwin') {
+    cmd = `open "${url}"`;
+  } else {
+    cmd = `xdg-open "${url}" >/dev/null 2>&1 || sensible-browser "${url}" >/dev/null 2>&1 || python3 -m webbrowser "${url}"`;
+  }
+
+  return await sendLaptopTask(
+    userId,
+    'open_on_device',
+    { target, url, command: cmd },
+    20000,
+    null,
+    targetDevice || selected.deviceType
+  );
 }
 
 
@@ -807,7 +1096,7 @@ export function setupLaptopBridge(server, allowedUserIds) {
         } catch {}
       }
 
-      const deviceRecord = {
+      const deviceRecord = registerOrUpdateDeviceSession(userId, {
         ws,
         deviceId,
         deviceName,
@@ -817,13 +1106,10 @@ export function setupLaptopBridge(server, allowedUserIds) {
         username,
         osVersion,
         storageDir: storageDir || (platform === 'android' ? '/sdcard/Download' : ''),
-        connectedAt: new Date().toISOString(),
-        lastPing: Date.now(),
         lastStatus: previousStatus,
-      };
+      });
 
-      userDevices.set(deviceId, deviceRecord);
-      console.log(`[Laptop Bridge] 💻 Device registered: "${deviceName}" [${deviceType.toUpperCase()}] (${hostname} / ${platform} / ${osVersion}) for User ${userId}`);
+      console.log(`[Laptop Bridge] 💻 Device registered via WebSocket: "${deviceName}" [${deviceType.toUpperCase()}] (${hostname} / ${platform} / ${osVersion}) for User ${userId}`);
 
       ws.send(
         JSON.stringify({
@@ -835,49 +1121,12 @@ export function setupLaptopBridge(server, allowedUserIds) {
         })
       );
 
-      // Notify user via Telegram (rate-limited per device so reconnect blips don't spam messages)
-      const now = Date.now();
-      const notifyKey = `${userId}_${deviceId}`;
-      const lastNotified = lastUserConnectNotification.get(notifyKey);
-      const isRecent = lastNotified && (now - lastNotified.time < 60000);
-
-      if (botApiRef && !isRecent) {
-        lastUserConnectNotification.set(notifyKey, { time: now, deviceName });
-        const friendlyPlatform =
-          platform === 'win32'
-            ? 'Windows'
-            : platform === 'darwin'
-            ? 'macOS'
-            : platform === 'linux'
-            ? 'Linux'
-            : platform === 'android'
-            ? 'Android'
-            : platform;
-        const osLabel = osVersion ? `${friendlyPlatform} (${osVersion})` : friendlyPlatform;
-        const userLabel = username ? `\n• **Account:** \`${username}\`` : '';
-        const icon = deviceType === 'phone' ? '📱' : deviceType === 'tablet' ? '📟' : '💻';
-        const typeLabel = deviceType === 'phone' ? 'Phone' : deviceType === 'tablet' ? 'Tablet' : 'Laptop';
-
-        botApiRef
-          .sendMessage(
-            userId,
-            `${icon} *${typeLabel} Connected: ${deviceName}*\n` +
-            `• **Host:** \`${hostname}\` (${osLabel})${userLabel}\n` +
-            `• **Type:** \`${deviceType}\`\n` +
-            `• **Status:** Active & listening for remote commands.\n\n` +
-            `You can now ask the agent to run terminal commands, inspect files, or install packages while you are away!`,
-            { parse_mode: 'Markdown' }
-          )
-          .catch(() => {});
-      } else if (isRecent) {
-        console.log(`[Laptop Bridge] ℹ️ Suppressed redundant Telegram connect notification for User ${userId}, device "${deviceName}" [${deviceId}] (reconnected within cooldown).`);
-      }
-
       // Heartbeat tracking to detect dropped/silent connections
       let isAlive = true;
       ws.on('pong', () => {
         isAlive = true;
         deviceRecord.lastPing = Date.now();
+        deviceRecord.lastSeen = Date.now();
       });
 
       // Keepalive ping timer (every 15s to keep reverse proxy tunnel alive)
@@ -902,6 +1151,7 @@ export function setupLaptopBridge(server, allowedUserIds) {
 
       ws.on('message', (data) => {
         isAlive = true;
+        deviceRecord.lastSeen = Date.now();
 
         try {
 
@@ -1015,23 +1265,14 @@ export function setupLaptopBridge(server, allowedUserIds) {
 
 
       ws.on('close', () => {
-
         clearInterval(pingInterval);
-
         const currentDev = userDevices.get(deviceId);
-
         if (currentDev && currentDev.ws === ws) {
-
-          userDevices.delete(deviceId);
-
-          console.log(`[Laptop Bridge] 💻 Device disconnected: "${deviceName}" [${deviceType.toUpperCase()}] for User ${userId}`);
-
+          currentDev.ws = null;
+          console.log(`[Laptop Bridge] 💻 Device WebSocket closed: "${deviceName}" [${deviceType.toUpperCase()}] for User ${userId}`);
         } else {
-
           console.log(`[Laptop Bridge] 🔄 Stale socket closed for "${deviceName}" (newer socket active).`);
-
         }
-
       });
 
 

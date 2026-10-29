@@ -28,6 +28,10 @@ import {
   loadCloudDocumentContent,
   getUserPreferredDevice,
   getPreferredDevice,
+  getDeviceSessions,
+  isDeviceOnline,
+  getDefaultDevice,
+  openOnDevice,
 } from './laptop-bridge.js';
 
 const STORAGE_DIR = process.env.STORAGE_DIR || process.cwd();
@@ -134,6 +138,26 @@ export const AGENT_TOOLS = [
           description: 'Target device to capture screenshot from. Default is laptop, or phone/tablet if the user mentions their phone or Android device.',
         },
       },
+    },
+  },
+  {
+    type: 'function',
+    name: 'open_on_device',
+    description: 'Open a website, URL, or application directly on the user\'s physical device (phone or laptop screen). Use this when the user asks to "open gemini", "open youtube", "open https://...", or launch an app on their device. Do NOT use open_and_capture_webpage unless the user specifically asks for a webpage screenshot.',
+    parameters: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          description: 'The URL or application name to open (e.g. "gemini", "youtube", "https://google.com", "https://github.com", "calculator").',
+        },
+        target_device: {
+          type: 'string',
+          enum: ['phone', 'laptop'],
+          description: 'Optional target device: "phone" or "laptop". Default routes automatically.',
+        },
+      },
+      required: ['target'],
     },
   },
   {
@@ -465,6 +489,44 @@ export async function executeTool(name, args = {}, context = {}) {
         }
       }
       return JSON.stringify({ error: err.message });
+    }
+  }
+
+  // 0a. Open on physical device (open_on_device)
+  if (
+    [
+      'open_on_device',
+      'open_device',
+      'open_url',
+      'open_app',
+      'launch_app',
+      'open_website',
+      'open_application',
+    ].includes(norm)
+  ) {
+    const target = args.target || args.url || args.app || args.name || args.application || args.website;
+    if (!target) {
+      return JSON.stringify({ error: 'No target URL or application specified to open.' });
+    }
+    if (!context.userId) {
+      return JSON.stringify({ error: 'No Telegram User ID associated with this request.' });
+    }
+
+    const targetDevice = args.target_device || args.targetDevice || args.device || context.inferredTargetDevice;
+
+    if (!isLaptopConnected(context.userId, targetDevice)) {
+      return JSON.stringify({
+        success: false,
+        error: `Target device is currently offline. Cannot open "${target}" on device. Ensure your device runner is connected.`,
+      });
+    }
+
+    context.onStatusUpdate?.(`🌐 *Opening on device:* \`${target}\`...`);
+    try {
+      const res = await openOnDevice(context.userId, target, targetDevice);
+      return JSON.stringify(res);
+    } catch (err) {
+      return JSON.stringify({ success: false, error: err.message });
     }
   }
 
@@ -1334,6 +1396,27 @@ export async function runGeminiAgent({
 
   const effectiveTargetDir = detectedWorkingDir || resolvedUserDir || 'default working directory';
 
+  const userSess = getDeviceSessions ? getDeviceSessions(userId) : { phone: null, laptop: null };
+  const phoneDev = userSess.phone;
+  const laptopDev = userSess.laptop;
+
+  const phoneOnline = phoneDev && isDeviceOnline ? isDeviceOnline(phoneDev) : false;
+  const laptopOnline = laptopDev && isDeviceOnline ? isDeviceOnline(laptopDev) : false;
+
+  const phoneHost = phoneDev?.hostname || 'unknown';
+  const phoneUser = phoneDev?.username || 'user';
+  const laptopHost = laptopDev?.hostname || 'unknown';
+  const laptopUser = laptopDev?.username || 'user';
+
+  const activeDef = getDefaultDevice ? getDefaultDevice(userId) : (primaryOnlineDevice?.deviceType || 'laptop');
+
+  const liveDeviceStatusBlock =
+    `CURRENTLY CONNECTED USER DEVICES:\n` +
+    `- phone: [${phoneOnline ? 'ONLINE' : 'OFFLINE'}] (Host: ${phoneHost}, Account: ${phoneUser})\n` +
+    `- laptop: [${laptopOnline ? 'ONLINE' : 'OFFLINE'}] (Host: ${laptopHost}, Account: ${laptopUser})\n` +
+    `- Active Default Device: ${activeDef}\n\n` +
+    `You have direct remote execution access to the user's ONLINE devices listed above. NEVER say 'I cannot directly open applications or websites for you, as I am an AI text model.' When the user asks to open a website/app, inspect files, delete files, or run commands, always execute the action on the target ONLINE device (using \`open_on_device\`, \`run_laptop_command\`, \`list_laptop_files\`, or \`delete_laptop_file\`) rather than \`open_and_capture_webpage\` unless the user specifically asks for a webpage screenshot.\n\n`;
+
   // Models to attempt: user requested (if any) -> primary (gemini-3.5-flash-lite) -> gemini-3.5-flash -> fallback (gemini-3.8-flash)
   const candidateModels = [
     model,
@@ -1356,9 +1439,10 @@ export async function runGeminiAgent({
         input: inputPrompt,
         tools: AGENT_TOOLS,
         system_instruction:
+          liveDeviceStatusBlock +
           offlineDirective +
           'You are an autonomous AI Agent in Telegram with direct tool access to the user\'s physical devices (laptop, Android phone via Termux, tablet).\n' +
-          'You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to check files, download files, delete files, upload files, or run commands on their phone, ALWAYS use the official device tools (`list_laptop_files`, `delete_laptop_file`, `upload_device_file_to_telegram`, `read_laptop_file`, `write_laptop_file`, `run_laptop_terminal`).\n\n' +
+          'You have direct tool access to the user\'s connected physical device(s), including their Windows Laptop AND their Android Smartphone/Tablet (running Termux at `/sdcard/Download`). When the user asks to check files, download files, delete files, upload files, or run commands on their phone, ALWAYS use the official device tools (`open_on_device`, `list_laptop_files`, `delete_laptop_file`, `upload_device_file_to_telegram`, `read_laptop_file`, `write_laptop_file`, `run_laptop_terminal`).\n\n' +
           devicesStatusSection +
           defaultDeviceDirective +
           connectionModeInstruction +
@@ -1368,18 +1452,20 @@ export async function runGeminiAgent({
           '1. TELEGRAM BOT IDENTITY & DIRECT CLOUD ACCESS:\n' +
           '   • You ARE the user\'s Telegram bot and have direct access to the user\'s Telegram chat and `/storage` Telegram Cloud Vault Index via the `upload_device_file_to_telegram` tool.\n' +
           '   • You must NEVER attempt to find a local Telegram CLI, python script, or bot token inside the remote device\'s terminal to upload files; you must always call `upload_device_file_to_telegram(file_path, save_to_cloud_vault, target_device)`.\n' +
-          '   • Tools prefixed with `laptop_` or `device_` (`list_laptop_files`, `delete_laptop_file`, `upload_device_file_to_telegram`, `run_laptop_terminal`, `read_laptop_file`, `write_laptop_file`) execute on whichever remote device is currently connected (including `Type: phone` / Android Termux) and have full permission to delete, move, inspect, and upload files when requested by the user.\n' +
+          '   • Tools prefixed with `laptop_` or `device_` (`open_on_device`, `list_laptop_files`, `delete_laptop_file`, `upload_device_file_to_telegram`, `run_laptop_terminal`, `read_laptop_file`, `write_laptop_file`) execute on whichever remote device is currently connected (including `Type: phone` / Android Termux) and have full permission to open apps, delete, move, inspect, and upload files when requested by the user.\n' +
           '   • When the user asks to delete, clean up, or purge a file or APK, ALWAYS call `delete_laptop_file(file_path, target_device)`. Do NOT claim you lack the tool to delete files.\n' +
           '2. MULTI-DEVICE CONTROL & ROUTING:\n' +
           '   • You can control the user\'s Windows laptop, Android phone (via Termux), and tablet simultaneously!\n' +
-          '   • When the user mentions their "phone", "mobile", "Android", or "tablet", specify `target_device: "phone"` or `target_device: "tablet"` in your tool calls (`run_laptop_terminal`, `delete_laptop_file`, `upload_device_file_to_telegram`, `read_laptop_file`, `write_laptop_file`, `list_laptop_files`, `get_laptop_status`).\n' +
+          '   • When the user mentions their "phone", "mobile", "Android", or "tablet", specify `target_device: "phone"` in your tool calls (`open_on_device`, `run_laptop_terminal`, `delete_laptop_file`, `upload_device_file_to_telegram`, `read_laptop_file`, `write_laptop_file`, `list_laptop_files`, `get_laptop_status`).\n' +
           `   • Default \`target_device\` is "${primaryOnlineDevice?.deviceType || 'laptop'}" if not specified by the user.\n` +
           '   • On Android / Termux:\n' +
           '     - User storage and downloads are located in `/sdcard/Download`.\n' +
           '     - You can install CLI packages via `pkg install -y <package>`, `pip install <package>`, or `npm install <package>`.\n' +
+          '     - You can open URLs, websites, or apps via `open_on_device(target="<url_or_app>", target_device="phone")`.\n' +
           '     - You can trigger native Android APK installs or open files via `run_laptop_terminal(command="termux-open <file.apk>", target_device="phone")`. Android will immediately pop up the native package installer prompt on the phone screen.\n' +
           '3. PHYSICAL FILESYSTEM REALITY: Text output in chat CANNOT create or save files on the user\'s devices. The ONLY way to save or create a file is by executing the `write_laptop_file(file_path, content, target_device)` tool. If the user asks to save, create, or write a file, you MUST call `write_laptop_file`.\n' +
           '4. OFFICIAL TOOL NAMES:\n' +
+          '   • open_on_device: Open a website, URL, or application directly on the user\'s physical device (target, target_device). ALWAYS use this when the user asks to open gemini, youtube, or an app/URL.\n' +
           '   • upload_device_file_to_telegram: Upload a file from the user\'s connected device (phone or laptop) directly to their Telegram chat and register it inside their Telegram Cloud Vault (/storage). Parameters: file_path, save_to_cloud_vault, target_device.\n' +
           '   • delete_laptop_file: Delete a file or directory on device (file_path, target_device). Returns confirmation of deletion.\n' +
           '   • list_laptop_files: List files in a directory on device (dir_path, target_device)\n' +

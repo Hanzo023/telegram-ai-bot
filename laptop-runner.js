@@ -162,6 +162,7 @@ function buildWsUrl() {
   url.searchParams.set('userId', TELEGRAM_USER_ID);
   url.searchParams.set('deviceName', DEVICE_NAME);
   url.searchParams.set('deviceType', DEVICE_TYPE);
+  url.searchParams.set('device_type', DEVICE_TYPE);
   url.searchParams.set('hostname', rawHostname);
   url.searchParams.set('platform', isAndroid ? 'android' : os.platform());
   url.searchParams.set('username', cleanUsername);
@@ -1726,6 +1727,47 @@ async function handleTask(action, payload) {
 
 
     
+
+    case 'open_on_device':
+    case 'open_url':
+    case 'launch_app': {
+      const url = payload.url || payload.target;
+      const cmd = payload.command;
+      if (!url && !cmd) return { success: false, error: 'No URL or command provided to open.' };
+
+      let execCmd = cmd;
+      if (!execCmd) {
+        if (isAndroid) {
+          execCmd = `am start -a android.intent.action.VIEW -d "${url}" >/dev/null 2>&1 || termux-open-url "${url}"`;
+        } else if (os.platform() === 'win32') {
+          execCmd = `start "" "${url}"`;
+        } else if (os.platform() === 'darwin') {
+          execCmd = `open "${url}"`;
+        } else {
+          execCmd = `xdg-open "${url}"`;
+        }
+      }
+
+      log(`[Runner] 🌐 Opening on device: "${url || execCmd}"`);
+      return new Promise((resolve) => {
+        exec(execCmd, { timeout: 15000 }, (err, stdout, stderr) => {
+          if (err) {
+            return resolve({
+              success: false,
+              exitCode: err.code || 1,
+              stdout: stdout || '',
+              stderr: `Failed to open: ${err.message}`,
+            });
+          }
+          resolve({
+            success: true,
+            exitCode: 0,
+            stdout: `Successfully opened "${url || execCmd}" on ${DEVICE_NAME}.`,
+            stderr: '',
+          });
+        });
+      });
+    }
 
     case 'install_apk':
     case 'open_file': {

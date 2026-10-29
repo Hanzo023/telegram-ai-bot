@@ -81,6 +81,14 @@ import {
   getUserPreferredDevice,
   setPreferredDevice,
   getPreferredDevice,
+  setDefaultDevice,
+  getDefaultDevice,
+  getDeviceSessions,
+  getDeviceCommandQueue,
+  registerOrUpdateDeviceSession,
+  handleDeviceResult,
+  isDeviceOnline,
+  openOnDevice,
   joinLaptopPath,
   isPathAbsolute,
   setCloudVaultBridge,
@@ -192,6 +200,27 @@ if %errorlevel% neq 0 (
 `;
 }
 
+async function parseJsonBody(req) {
+  return new Promise((resolve) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > 10 * 1024 * 1024) {
+        req.destroy();
+        resolve({});
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(data || '{}'));
+      } catch {
+        resolve({});
+      }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
 const server = http.createServer((req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -278,7 +307,7 @@ node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $ser
       return res.end(ps1Content);
     }
 
-    // 3b. Bash / Termux One-Line Setup Script: /setup/:userId.sh or /setup.sh?userId=...
+    // 3b. Multi-Device Bash / Termux Setup Script: /setup/:userId.sh or /setup.sh?userId=...
     const setupShMatch = pathname.match(/^\/setup(?:\/(-?\d+))?\.sh$/i);
     if (setupShMatch || pathname === '/setup.sh') {
       const uid = (setupShMatch && setupShMatch[1]) || url.searchParams.get('userId') || allowedUserId || '';
@@ -286,7 +315,7 @@ node (Join-Path $agentDir "laptop-runner.js") --user $targetUserId --server $ser
       const secret = getExpectedSecret();
       const shContent =
 `#!/bin/bash
-# Telegram AI Agent Setup for Android / Termux
+# Telegram AI Multi-Device Remote Agent Client
 set -e
 
 TARGET_USER_ID="${uid}"
@@ -294,20 +323,67 @@ SERVER_URL="${serverUrl}"
 SECRET="${secret}"
 AGENT_DIR="$HOME/telegram-ai-agent"
 
+# 1. Parse arguments and flags
+DEVICE_TYPE_OVERRIDE=""
+FORCE_BASH_RUNNER=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --type|-t)
+            DEVICE_TYPE_OVERRIDE="$2"
+            shift 2
+            ;;
+        --device_type)
+            DEVICE_TYPE_OVERRIDE="$2"
+            shift 2
+            ;;
+        --bash)
+            FORCE_BASH_RUNNER=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# 2. Auto-detect device type at startup
+if [ -n "$DEVICE_TYPE_OVERRIDE" ]; then
+    DEVICE_TYPE="$DEVICE_TYPE_OVERRIDE"
+elif [ -d "/system/bin" ] || [ -f "/system/build.prop" ] || [[ "$(uname -o 2>/dev/null)" =~ [Aa]ndroid ]] || [ -n "$TERMUX_VERSION" ]; then
+    DEVICE_TYPE="phone"
+else
+    DEVICE_TYPE="laptop"
+fi
+
+if [ "$DEVICE_TYPE" = "phone" ]; then
+    DEVICE_LABEL="📱 Phone"
+    DEFAULT_STORAGE_DIR="/sdcard/Download"
+    DEFAULT_NAME="Android-Phone"
+else
+    DEVICE_LABEL="💻 Laptop"
+    DEFAULT_STORAGE_DIR="$HOME"
+    DEFAULT_NAME="Linux-Laptop"
+fi
+
 echo "========================================================"
-echo " 📱 Setting Up Telegram AI Phone Agent (User: $TARGET_USER_ID)"
+echo " $DEVICE_LABEL Setting Up Telegram AI Remote Agent"
+echo " • User ID:     $TARGET_USER_ID"
+echo " • Device Type: $DEVICE_TYPE"
+echo " • Target Host: $SERVER_URL"
 echo "========================================================"
 
-# Check and install prerequisites (nodejs, curl, coreutils for split)
-if ! command -v node >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v split >/dev/null 2>&1; then
-    echo "📦 Installing prerequisites (nodejs, curl, coreutils) via pkg..."
-    pkg update -y && pkg install -y nodejs curl coreutils
+# Check and install prerequisites
+if command -v pkg >/dev/null 2>&1; then
+    echo "📦 Checking Termux packages (nodejs, curl, coreutils)..."
+    pkg update -y 2>/dev/null || true
+    pkg install -y nodejs curl coreutils 2>/dev/null || true
 fi
 
 # Acquire wake lock if running in Termux so daemon stays alive in background
 if command -v termux-wake-lock >/dev/null 2>&1; then
     echo "🔒 Enabling Termux wake lock to prevent background suspension..."
-    termux-wake-lock
+    termux-wake-lock || true
 fi
 
 # Request storage access if in Termux and ~/storage does not exist yet
@@ -316,21 +392,21 @@ if command -v termux-setup-storage >/dev/null 2>&1 && [ ! -d "$HOME/storage" ]; 
     termux-setup-storage || true
 fi
 
-# a. Create ~/telegram-ai-agent and cd into it
+# Create ~/telegram-ai-agent and cd into it
 mkdir -p "$AGENT_DIR"
 cd "$AGENT_DIR"
 
-# b. Download laptop-runner.js from $SERVER_URL/download/laptop-runner.js
+# Download laptop-runner.js from $SERVER_URL/download/laptop-runner.js
 echo "[1/4] Downloading latest laptop-runner.js..."
 curl -sSL "$SERVER_URL/download/laptop-runner.js" -o "$AGENT_DIR/laptop-runner.js"
 
-# c. Run npm install ws dotenv --no-audit --no-fund if node_modules/ws is missing
-if [ ! -d "$AGENT_DIR/node_modules/ws" ]; then
+# Install npm dependencies if node is present
+if command -v node >/dev/null 2>&1 && [ ! -d "$AGENT_DIR/node_modules/ws" ]; then
     echo "[2/4] Installing dependencies (ws, dotenv)..."
-    npm install ws dotenv --no-audit --no-fund
+    npm install ws dotenv --no-audit --no-fund 2>/dev/null || true
 fi
 
-# d. Create helper script: upload-to-telegram.sh
+# Helper script: upload-to-telegram.sh
 echo "[3/4] Creating upload-to-telegram.sh helper script..."
 cat << 'UPLOAD_HELPER_EOF' > "$AGENT_DIR/upload-to-telegram.sh"
 #!/bin/bash
@@ -392,7 +468,7 @@ sed -i "s|SERVER_URL_PLACEHOLDER|$SERVER_URL|g" "$AGENT_DIR/upload-to-telegram.s
 sed -i "s/SECRET_PLACEHOLDER/$SECRET/g" "$AGENT_DIR/upload-to-telegram.sh"
 chmod +x "$AGENT_DIR/upload-to-telegram.sh"
 
-# e. Create helper script: delete-file.sh
+# Helper script: delete-file.sh
 cat << 'DELETE_HELPER_EOF' > "$AGENT_DIR/delete-file.sh"
 #!/bin/bash
 TARGET_PATH="$1"
@@ -423,26 +499,122 @@ echo "Deleted: $TARGET_PATH"
 DELETE_HELPER_EOF
 chmod +x "$AGENT_DIR/delete-file.sh"
 
-# f. Create start-phone.sh launcher script and start node laptop-runner.js
-echo "[4/4] Creating start-phone.sh launcher script..."
-cat << 'LAUNCHER_EOF' > "$AGENT_DIR/start-phone.sh"
+# Pure Bash Poller: bash-poller.sh
+cat << 'POLLER_EOF' > "$AGENT_DIR/bash-poller.sh"
+#!/bin/bash
+TARGET_USER_ID="TARGET_USER_ID_PLACEHOLDER"
+SERVER_URL="SERVER_URL_PLACEHOLDER"
+SECRET="SECRET_PLACEHOLDER"
+DEVICE_TYPE="DEVICE_TYPE_PLACEHOLDER"
+
+DEV_NAME=$(hostname 2>/dev/null || echo "${DEVICE_TYPE}-device")
+echo "🚀 Starting Telegram AI bash agent poller for [$DEVICE_TYPE] (User $TARGET_USER_ID)..."
+
+# Initial registration
+curl -s -X POST "$SERVER_URL/api/agent/register" \
+    -H "Content-Type: application/json" \
+    -d "{\"userId\":$TARGET_USER_ID,\"secret\":\"$SECRET\",\"device_type\":\"$DEVICE_TYPE\",\"hostname\":\"$(hostname 2>/dev/null || echo 'host')\",\"deviceName\":\"$DEV_NAME\"}" >/dev/null 2>&1 || true
+
+while true; do
+    # Poll only this device type's dedicated queue
+    RESPONSE=$(curl -s "$SERVER_URL/api/agent/poll?userId=$TARGET_USER_ID&secret=$SECRET&device_type=$DEVICE_TYPE" 2>/dev/null || echo "")
+    
+    if [[ "$RESPONSE" == *'"has_command":true'* ]]; then
+        CMD_ID=$(echo "$RESPONSE" | grep -o '"command_id":"[^"]*' | cut -d'"' -f4)
+        [ -z "$CMD_ID" ] && CMD_ID=$(echo "$RESPONSE" | grep -o '"id":"[^"]*' | cut -d'"' -f4)
+        ACTION=$(echo "$RESPONSE" | grep -o '"action":"[^"]*' | cut -d'"' -f4)
+
+        if [ -n "$CMD_ID" ]; then
+            echo "[Agent] Received $ACTION (command_id: $CMD_ID)"
+            OUTPUT=""
+            SUCCESS=true
+            
+            case "$ACTION" in
+                run_command|run_laptop_terminal)
+                    CMD_TO_RUN=$(echo "$RESPONSE" | grep -o '"command":"[^"]*' | cut -d'"' -f4)
+                    OUTPUT=$(eval "$CMD_TO_RUN" 2>&1) || SUCCESS=false
+                    ;;
+                open_on_device)
+                    TARGET_URL=$(echo "$RESPONSE" | grep -o '"url":"[^"]*' | cut -d'"' -f4)
+                    [ -z "$TARGET_URL" ] && TARGET_URL=$(echo "$RESPONSE" | grep -o '"target":"[^"]*' | cut -d'"' -f4)
+                    if [ "$DEVICE_TYPE" = "phone" ]; then
+                        am start -a android.intent.action.VIEW -d "$TARGET_URL" >/dev/null 2>&1 || termux-open-url "$TARGET_URL" >/dev/null 2>&1 || true
+                    else
+                        xdg-open "$TARGET_URL" >/dev/null 2>&1 || open "$TARGET_URL" >/dev/null 2>&1 || true
+                    fi
+                    OUTPUT="Opened on $DEVICE_TYPE: $TARGET_URL"
+                    ;;
+                delete_file|delete_laptop_file)
+                    TARGET_FILE=$(echo "$RESPONSE" | grep -o '"filePath":"[^"]*' | cut -d'"' -f4)
+                    [ -z "$TARGET_FILE" ] && TARGET_FILE=$(echo "$RESPONSE" | grep -o '"file_path":"[^"]*' | cut -d'"' -f4)
+                    rm -rf -- "$TARGET_FILE" 2>&1 || SUCCESS=false
+                    OUTPUT="Deleted: $TARGET_FILE"
+                    ;;
+                list_dir|list_laptop_files)
+                    TARGET_DIR=$(echo "$RESPONSE" | grep -o '"dirPath":"[^"]*' | cut -d'"' -f4)
+                    [ -z "$TARGET_DIR" ] && TARGET_DIR="."
+                    OUTPUT=$(ls -la "$TARGET_DIR" 2>&1) || SUCCESS=false
+                    ;;
+                *)
+                    OUTPUT="Action $ACTION executed"
+                    ;;
+            esac
+
+            CLEAN_OUT=$(echo "$OUTPUT" | head -c 4000 | tr '\n' ' ' | tr '"' "'")
+            curl -s -X POST "$SERVER_URL/api/agent/result" \
+                -H "Content-Type: application/json" \
+                -d "{\"userId\":$TARGET_USER_ID,\"secret\":\"$SECRET\",\"device_type\":\"$DEVICE_TYPE\",\"command_id\":\"$CMD_ID\",\"success\":$SUCCESS,\"stdout\":\"$CLEAN_OUT\"}" >/dev/null 2>&1 || true
+        fi
+    fi
+    sleep 2
+done
+POLLER_EOF
+
+sed -i "s/TARGET_USER_ID_PLACEHOLDER/$TARGET_USER_ID/g" "$AGENT_DIR/bash-poller.sh"
+sed -i "s|SERVER_URL_PLACEHOLDER|$SERVER_URL|g" "$AGENT_DIR/bash-poller.sh"
+sed -i "s/SECRET_PLACEHOLDER/$SECRET/g" "$AGENT_DIR/bash-poller.sh"
+sed -i "s/DEVICE_TYPE_PLACEHOLDER/$DEVICE_TYPE/g" "$AGENT_DIR/bash-poller.sh"
+chmod +x "$AGENT_DIR/bash-poller.sh"
+
+# Launcher scripts
+echo "[4/4] Creating launcher scripts..."
+cat << 'LAUNCHER_EOF' > "$AGENT_DIR/start-agent.sh"
 #!/bin/bash
 cd "$HOME/telegram-ai-agent"
 if command -v termux-wake-lock >/dev/null 2>&1; then
-    termux-wake-lock
+    termux-wake-lock || true
 fi
-node laptop-runner.js --user TARGET_USER_ID_PLACEHOLDER --server SERVER_URL_PLACEHOLDER --secret SECRET_PLACEHOLDER --type phone --name "Android-Phone" --dir "/sdcard/Download"
+
+if [ "$1" = "--bash" ] || ! command -v node >/dev/null 2>&1; then
+    echo "Starting background bash poller..."
+    bash "$HOME/telegram-ai-agent/bash-poller.sh"
+else
+    node laptop-runner.js --user TARGET_USER_ID_PLACEHOLDER --server SERVER_URL_PLACEHOLDER --secret SECRET_PLACEHOLDER --type DEVICE_TYPE_PLACEHOLDER --name "DEFAULT_NAME_PLACEHOLDER" --dir "DEFAULT_STORAGE_DIR_PLACEHOLDER"
+fi
 LAUNCHER_EOF
 
-sed -i "s/TARGET_USER_ID_PLACEHOLDER/$TARGET_USER_ID/g" "$AGENT_DIR/start-phone.sh"
-sed -i "s|SERVER_URL_PLACEHOLDER|$SERVER_URL|g" "$AGENT_DIR/start-phone.sh"
-sed -i "s/SECRET_PLACEHOLDER/$SECRET/g" "$AGENT_DIR/start-phone.sh"
-chmod +x "$AGENT_DIR/start-phone.sh"
+sed -i "s/TARGET_USER_ID_PLACEHOLDER/$TARGET_USER_ID/g" "$AGENT_DIR/start-agent.sh"
+sed -i "s|SERVER_URL_PLACEHOLDER|$SERVER_URL|g" "$AGENT_DIR/start-agent.sh"
+sed -i "s/SECRET_PLACEHOLDER/$SECRET/g" "$AGENT_DIR/start-agent.sh"
+sed -i "s/DEVICE_TYPE_PLACEHOLDER/$DEVICE_TYPE/g" "$AGENT_DIR/start-agent.sh"
+sed -i "s/DEFAULT_NAME_PLACEHOLDER/$DEFAULT_NAME/g" "$AGENT_DIR/start-agent.sh"
+sed -i "s|DEFAULT_STORAGE_DIR_PLACEHOLDER|$DEFAULT_STORAGE_DIR|g" "$AGENT_DIR/start-agent.sh"
+chmod +x "$AGENT_DIR/start-agent.sh"
+
+# Create phone and laptop aliases
+cp "$AGENT_DIR/start-agent.sh" "$AGENT_DIR/start-phone.sh" 2>/dev/null || true
+cp "$AGENT_DIR/start-agent.sh" "$AGENT_DIR/start-laptop.sh" 2>/dev/null || true
 
 echo ""
-echo "✅ Setup complete! Launching phone agent..."
-echo "💡 Tip: To restart anytime later, run: ~/telegram-ai-agent/start-phone.sh"
-node "$AGENT_DIR/laptop-runner.js" --user "$TARGET_USER_ID" --server "$SERVER_URL" --secret "$SECRET" --type phone --name "Android-Phone" --dir "/sdcard/Download"
+echo "✅ Setup complete! Launching $DEVICE_LABEL agent..."
+echo "💡 Tip: To restart anytime later, run: ~/telegram-ai-agent/start-agent.sh"
+
+if command -v node >/dev/null 2>&1 && [ "$FORCE_BASH_RUNNER" != "true" ]; then
+    node "$AGENT_DIR/laptop-runner.js" --user "$TARGET_USER_ID" --server "$SERVER_URL" --secret "$SECRET" --type "$DEVICE_TYPE" --name "$DEFAULT_NAME" --dir "$DEFAULT_STORAGE_DIR"
+else
+    echo "Running pure bash agent poller..."
+    bash "$AGENT_DIR/bash-poller.sh"
+fi
 `;
 
       res.writeHead(200, {
@@ -561,6 +733,169 @@ node "$AGENT_DIR/laptop-runner.js" --user "$TARGET_USER_ID" --server "$SERVER_UR
           console.error('[Agent Upload] Error processing upload:', uploadErr);
           res.writeHead(500, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: `Upload error: ${uploadErr.message}` }));
+        }
+      })();
+      return;
+    }
+
+    // 3d. Agent Registration / Heartbeat: POST /api/agent/register or /setup/register
+    const isRegister = pathname === '/api/agent/register' || pathname === '/setup/register';
+    if (isRegister && (req.method === 'POST' || req.method === 'GET')) {
+      (async () => {
+        try {
+          const body = req.method === 'POST' ? await parseJsonBody(req) : {};
+          const secret = body.secret || url.searchParams.get('secret') || req.headers['x-secret'] || '';
+          const expectedSecret = (getExpectedSecret() || '').trim();
+          if (expectedSecret && secret !== expectedSecret) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Unauthorized: Invalid secret' }));
+          }
+
+          const rawUid = body.userId || body.user_id || url.searchParams.get('userId') || allowedUserId || '';
+          const uid = parseInt(rawUid, 10);
+          if (!uid || isNaN(uid)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Missing or invalid userId' }));
+          }
+
+          if (allowedUserIds && allowedUserIds.size > 0 && !allowedUserIds.has(uid)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Unauthorized: Telegram User ID not authorized' }));
+          }
+
+          const rawType = (body.device_type || body.deviceType || url.searchParams.get('device_type') || url.searchParams.get('deviceType') || '').toLowerCase().trim();
+          const deviceType = rawType === 'phone' ? 'phone' : 'laptop';
+          const platform = body.platform || url.searchParams.get('platform') || (deviceType === 'phone' ? 'android' : 'linux');
+          const hostname = body.hostname || url.searchParams.get('hostname') || '';
+          const username = body.username || url.searchParams.get('username') || '';
+          const deviceName = body.deviceName || body.device_name || url.searchParams.get('deviceName') || (deviceType === 'phone' ? 'Android Phone' : 'Laptop');
+
+          const dev = registerOrUpdateDeviceSession(uid, {
+            deviceType,
+            platform,
+            hostname,
+            username,
+            deviceName,
+            bot,
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            ok: true,
+            status: 'registered',
+            deviceType: dev.deviceType,
+            deviceName: dev.deviceName,
+            online: true,
+          }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    // 3e. Multi-Device Agent Command Poller: GET or POST /api/agent/poll
+    if (pathname === '/api/agent/poll' && (req.method === 'GET' || req.method === 'POST')) {
+      (async () => {
+        try {
+          const body = req.method === 'POST' ? await parseJsonBody(req) : {};
+          const secret = body.secret || url.searchParams.get('secret') || req.headers['x-secret'] || '';
+          const expectedSecret = (getExpectedSecret() || '').trim();
+          if (expectedSecret && secret !== expectedSecret) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Unauthorized: Invalid secret' }));
+          }
+
+          const rawUid = body.userId || body.user_id || url.searchParams.get('userId') || allowedUserId || '';
+          const uid = parseInt(rawUid, 10);
+          if (!uid || isNaN(uid)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Missing or invalid userId' }));
+          }
+
+          if (allowedUserIds && allowedUserIds.size > 0 && !allowedUserIds.has(uid)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Unauthorized: Telegram User ID not authorized' }));
+          }
+
+          const rawType = (body.device_type || body.deviceType || url.searchParams.get('device_type') || url.searchParams.get('deviceType') || '').toLowerCase().trim();
+          const deviceType = rawType === 'phone' ? 'phone' : 'laptop';
+
+          // Refresh heartbeat timestamp
+          registerOrUpdateDeviceSession(uid, {
+            deviceType,
+            bot,
+          });
+
+          const q = getDeviceCommandQueue(uid, deviceType);
+          if (q && q.length > 0) {
+            const task = q.shift();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({
+              ok: true,
+              has_command: true,
+              command_id: task.command_id || task.id,
+              id: task.id || task.command_id,
+              action: task.action,
+              ...task,
+            }));
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            ok: true,
+            has_command: false,
+            device_type: deviceType,
+            timestamp: Date.now(),
+          }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    // 3f. Multi-Device Agent Command Result: POST /api/agent/result or /api/agent/command-result
+    const isResult = pathname === '/api/agent/result' || pathname === '/api/agent/command-result';
+    if (isResult && (req.method === 'POST' || req.method === 'PUT')) {
+      (async () => {
+        try {
+          const body = await parseJsonBody(req);
+          const secret = body.secret || url.searchParams.get('secret') || req.headers['x-secret'] || '';
+          const expectedSecret = (getExpectedSecret() || '').trim();
+          if (expectedSecret && secret !== expectedSecret) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Unauthorized: Invalid secret' }));
+          }
+
+          const rawUid = body.userId || body.user_id || url.searchParams.get('userId') || allowedUserId || '';
+          const uid = parseInt(rawUid, 10);
+          const rawType = (body.device_type || body.deviceType || url.searchParams.get('device_type') || url.searchParams.get('deviceType') || '').toLowerCase().trim();
+          const deviceType = rawType === 'phone' ? 'phone' : 'laptop';
+
+          if (uid) {
+            registerOrUpdateDeviceSession(uid, { deviceType, bot });
+          }
+
+          const cmdId = body.command_id || body.commandId || body.id || url.searchParams.get('command_id') || url.searchParams.get('id');
+          if (!cmdId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Missing command_id' }));
+          }
+
+          const handled = handleDeviceResult(cmdId, body);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            ok: true,
+            received: true,
+            handled,
+            command_id: cmdId,
+          }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
         }
       })();
       return;
@@ -3116,11 +3451,13 @@ function buildDevicesMessageAndKeyboard(userId) {
   const list = getConnectedLaptopsList(uid);
   const allLaptops = getAllConnectedLaptops(allowedUserIds);
   const currentPref = getUserPreferredDevice(uid);
+  const activeDefault = getDefaultDevice(uid);
 
   let text = `💻 *Device Fleet & Connection Status*\n\n`;
 
   // Active Target Mode Display
-  text += `🎯 *Active Target Mode:* \`${(currentPref || 'auto').toUpperCase()}\`\n\n`;
+  const targetLabel = (currentPref === 'auto' ? `AUTO (Routing to ${activeDefault.toUpperCase()})` : currentPref.toUpperCase());
+  text += `🎯 *Active Target Device:* \`${targetLabel}\`\n\n`;
 
   // 1. Caller's own devices
   text += `👤 *Your Devices (${uid}):*\n`;
@@ -3199,6 +3536,15 @@ function buildDevicesMessageAndKeyboard(userId) {
 }
 
 bot.command(['devices', 'laptops', 'device'], async (ctx) => {
+  const uid = ctx.from.id;
+  const match = (ctx.match || '').trim().toLowerCase();
+  if (match === 'phone' || match === 'laptop' || match === 'auto') {
+    setDefaultDevice(uid, match);
+    setUserPreferredDevice(uid, match);
+    const targetLabel = match === 'auto' ? 'Auto (Automatic Device Routing)' : match === 'phone' ? '📱 Phone' : '💻 Laptop';
+    await ctx.reply(`🎯 Active default device set to: *${targetLabel}*\n\nAgent commands without an explicit device will now target this device.`, { parse_mode: 'Markdown' });
+    return;
+  }
   const { text, keyboard } = buildDevicesMessageAndKeyboard(ctx.from.id);
   await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
 });
@@ -3317,6 +3663,7 @@ bot.callbackQuery(/^dl_bat_(\d+)$/, async (ctx) => {
 bot.callbackQuery(/^set_target:(.+)$/, async (ctx) => {
   const target = (ctx.match[1] || 'auto').toLowerCase().trim();
   setUserPreferredDevice(ctx.from.id, target);
+  setDefaultDevice(ctx.from.id, target);
   await ctx.answerCallbackQuery({ text: `🎯 Target set to: ${target.toUpperCase()}` }).catch(() => {});
   const { text, keyboard } = buildDevicesMessageAndKeyboard(ctx.from.id);
   await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(async () => {
@@ -3329,6 +3676,7 @@ bot.callbackQuery(/^set_pref_dev_(\d+)_([a-zA-Z0-9_-]+)$/, async (ctx) => {
   const devType = ctx.match[2];
   if (ctx.from.id !== targetUid) return ctx.answerCallbackQuery({ text: 'Unauthorized', show_alert: true });
   setUserPreferredDevice(targetUid, devType);
+  setDefaultDevice(targetUid, devType);
   await ctx.answerCallbackQuery({ text: `⭐ Default target device set to: ${devType.toUpperCase()}` }).catch(() => {});
   const { text, keyboard } = buildDevicesMessageAndKeyboard(targetUid);
   await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(async () => {
@@ -3354,6 +3702,7 @@ bot.command(['target', 'use', 'prefer', 'target_device'], async (ctx) => {
   }
   const target = rawArg === 'reset' ? 'auto' : rawArg;
   setUserPreferredDevice(userId, target);
+  setDefaultDevice(userId, target);
   const { text, keyboard } = buildDevicesMessageAndKeyboard(userId);
   await ctx.reply(
     `🎯 *Active Target Mode set to:* \`${target.toUpperCase()}\`\n\n` +
