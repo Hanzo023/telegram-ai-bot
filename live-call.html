@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Gemini 3.8 Live Voice Agent</title>
+  <title>Gemini 3.8 Live Vision & Voice Agent</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     * {
@@ -22,14 +22,15 @@
       overflow: hidden;
       justify-content: space-between;
       align-items: center;
-      padding: 24px 16px;
+      padding: 16px 14px;
     }
     .header {
       text-align: center;
-      margin-top: 12px;
+      margin-top: 4px;
+      flex-shrink: 0;
     }
     .header h1 {
-      font-size: 1.35rem;
+      font-size: 1.3rem;
       font-weight: 700;
       background: linear-gradient(135deg, #38bdf8, #818cf8, #c084fc);
       -webkit-background-clip: text;
@@ -38,9 +39,9 @@
     }
     .badge {
       display: inline-block;
-      margin-top: 6px;
-      padding: 3px 10px;
-      font-size: 0.75rem;
+      margin-top: 4px;
+      padding: 2px 10px;
+      font-size: 0.72rem;
       font-weight: 600;
       border-radius: 9999px;
       background: rgba(56, 189, 248, 0.12);
@@ -53,12 +54,15 @@
       align-items: center;
       justify-content: center;
       width: 100%;
+      max-width: 480px;
       flex: 1;
       position: relative;
+      min-height: 0;
+      margin: 8px 0;
     }
     .orb {
-      width: 140px;
-      height: 140px;
+      width: 120px;
+      height: 120px;
       border-radius: 50%;
       background: radial-gradient(circle, rgba(99, 102, 241, 0.4) 0%, rgba(14, 165, 233, 0.15) 70%, transparent 100%);
       display: flex;
@@ -77,6 +81,14 @@
       box-shadow: 0 0 90px rgba(192, 132, 252, 0.6);
       background: radial-gradient(circle, rgba(192, 132, 252, 0.5) 0%, rgba(99, 102, 241, 0.25) 70%, transparent 100%);
     }
+    .orb.sharing {
+      width: 70px;
+      height: 70px;
+      margin-top: 6px;
+    }
+    .orb.sharing .mic-icon {
+      font-size: 26px;
+    }
     @keyframes pulse {
       0%, 100% { transform: scale(1); opacity: 0.85; }
       50% { transform: scale(1.08); opacity: 1; }
@@ -86,52 +98,172 @@
       50% { transform: scale(1.2); }
     }
     .mic-icon {
-      font-size: 48px;
+      font-size: 42px;
       user-select: none;
     }
     .status-text {
-      margin-top: 24px;
-      font-size: 0.95rem;
+      margin-top: 10px;
+      font-size: 0.88rem;
       font-weight: 500;
       color: #94a3b8;
       text-align: center;
-      min-height: 24px;
+      min-height: 20px;
     }
+
+    /* Screen Preview Card */
+    .screen-preview-card {
+      width: 100%;
+      max-height: 200px;
+      background: #0f172a;
+      border: 2px solid rgba(56, 189, 248, 0.4);
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+      animation: fadeIn 0.3s ease;
+      margin-bottom: 8px;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .screen-header {
+      background: rgba(15, 23, 42, 0.95);
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 0.75rem;
+    }
+    .screen-status-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #38bdf8;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ef4444;
+      animation: blink 1s infinite alternate;
+    }
+    @keyframes blink {
+      from { opacity: 0.3; }
+      to { opacity: 1; }
+    }
+    .screen-header-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .btn-header-action {
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #e2e8f0;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .btn-header-action:hover {
+      background: rgba(56, 189, 248, 0.2);
+    }
+    #screenVideo {
+      width: 100%;
+      max-height: 160px;
+      object-fit: contain;
+      background: #000;
+      display: block;
+    }
+
+    /* Transcript Box */
     .transcript-box {
       width: 100%;
       max-width: 480px;
-      height: 140px;
-      background: rgba(30, 41, 59, 0.5);
+      height: 130px;
+      background: rgba(30, 41, 59, 0.55);
       border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 16px;
-      padding: 14px 16px;
+      border-radius: 14px;
+      padding: 10px 14px;
       overflow-y: auto;
-      font-size: 0.88rem;
-      line-height: 1.45;
+      font-size: 0.85rem;
+      line-height: 1.4;
       color: #cbd5e1;
       backdrop-filter: blur(8px);
-      margin-bottom: 20px;
+      margin-bottom: 10px;
+      flex-shrink: 0;
     }
     .transcript-entry {
       margin-bottom: 8px;
+      word-break: break-word;
+    }
+    .transcript-entry.agent {
+      color: #cbd5e1;
     }
     .transcript-entry.user {
       color: #38bdf8;
     }
-    .transcript-entry.agent {
-      color: #e2e8f0;
+    .transcript-entry.tool {
+      background: rgba(245, 158, 11, 0.12);
+      border-left: 3px solid #f59e0b;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      color: #fbbf24;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .agent-label {
+      color: #c084fc;
+      font-weight: 600;
+    }
+    .user-label {
+      color: #38bdf8;
+      font-weight: 600;
+    }
+    .tool-label {
+      color: #f59e0b;
+      font-weight: 700;
+    }
+    .thumb-img {
+      max-width: 110px;
+      max-height: 80px;
+      border-radius: 8px;
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      margin-top: 4px;
+      display: block;
+    }
+
+    /* Controls Container */
+    .controls-wrapper {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      width: 100%;
+      max-width: 480px;
+      flex-shrink: 0;
+    }
+    .vision-bar {
+      display: flex;
+      gap: 8px;
+      width: 100%;
     }
     .controls {
       display: flex;
-      gap: 12px;
+      gap: 8px;
       width: 100%;
-      max-width: 480px;
-      margin-bottom: 12px;
     }
     .btn {
-      padding: 12px 16px;
+      padding: 10px 14px;
       border-radius: 12px;
-      font-size: 0.9rem;
+      font-size: 0.85rem;
       font-weight: 600;
       border: none;
       cursor: pointer;
@@ -141,6 +273,23 @@
       gap: 6px;
       transition: all 0.2s ease;
       user-select: none;
+    }
+    .btn-vision {
+      flex: 1;
+      background: rgba(30, 41, 59, 0.9);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      font-size: 0.8rem;
+      padding: 9px 8px;
+      white-space: nowrap;
+    }
+    .btn-vision:hover {
+      background: rgba(56, 189, 248, 0.15);
+    }
+    .btn-vision.active {
+      background: rgba(239, 68, 68, 0.15);
+      color: #ef4444;
+      border-color: rgba(239, 68, 68, 0.4);
     }
     .btn-primary {
       flex: 1.5;
@@ -169,62 +318,69 @@
       color: #ffffff;
     }
     .voice-select {
-      background: rgba(30, 41, 59, 0.8);
+      background: rgba(30, 41, 59, 0.85);
       color: #cbd5e1;
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 12px;
       padding: 0 10px;
       font-size: 0.8rem;
       outline: none;
-    }
-    .transcript-entry {
-      margin-bottom: 8px;
-      line-height: 1.45;
-      word-break: break-word;
-    }
-    .transcript-entry.agent {
-      color: #cbd5e1;
-    }
-    .transcript-entry.user {
-      color: #38bdf8;
-    }
-    .agent-label {
-      color: #c084fc;
-      font-weight: 600;
-    }
-    .user-label {
-      color: #38bdf8;
-      font-weight: 600;
+      flex: 1;
     }
   </style>
 </head>
 <body>
   <div class="header">
-    <h1>Gemini 3.8 Live Voice</h1>
-    <div class="badge">Real-Time Duplex Agent</div>
+    <h1>Gemini 3.8 Live Vision & Voice</h1>
+    <div class="badge">Real-Time Duplex Multimodal Agent</div>
   </div>
 
   <div class="visualizer-container">
+    <!-- Live Screen Share Preview Card (visible when screen sharing) -->
+    <div class="screen-preview-card" id="screenPreviewCard" style="display: none;">
+      <div class="screen-header">
+        <span class="screen-status-badge"><span class="pulse-dot"></span> LIVE SCREEN STREAM (1 FPS)</span>
+        <div class="screen-header-actions">
+          <button class="btn-header-action" id="snapFrameBtn" title="Take full snapshot & ask Gemini to fix">📸 Snap & Fix</button>
+          <button class="btn-header-action" id="stopScreenTopBtn" title="Stop Screen Share">✖ Stop</button>
+        </div>
+      </div>
+      <video id="screenVideo" autoplay playsinline muted></video>
+    </div>
+
+    <!-- Central Pulsing Audio Orb -->
     <div class="orb" id="orb">
       <div class="mic-icon" id="micIcon">🎙️</div>
     </div>
     <div class="status-text" id="statusText">Tap "Start Call" to begin speaking</div>
   </div>
 
+  <!-- Real-Time Subtitles & Tool Execution Stream -->
   <div class="transcript-box" id="transcriptBox">
-    <div class="transcript-entry agent">✨ Real-time voice agent ready. Talk naturally in English or your preferred language.</div>
+    <div class="transcript-entry agent">✨ Real-time voice & vision agent ready. Start call to stream screen, photos, and voice.</div>
   </div>
 
-  <div class="controls">
-    <select id="voiceSelect" class="voice-select">
-      <option value="Puck">Voice: Puck</option>
-      <option value="Aoede">Voice: Aoede</option>
-      <option value="Charon">Voice: Charon</option>
-      <option value="Fenrir">Voice: Fenrir</option>
-      <option value="Kore">Voice: Kore</option>
-    </select>
-    <button class="btn btn-secondary" id="echoGuardBtn" title="Echo Guard ON: Prevents speaker audio from echoing into the mic. Tap to switch to Headset mode.">🛡️ Guard: ON</button>
-    <button class="btn btn-primary" id="callBtn">📞 Start Call</button>
+  <!-- Controls Container -->
+  <div class="controls-wrapper">
+    <!-- Vision & Media Controls -->
+    <div class="vision-bar">
+      <button class="btn btn-vision" id="shareScreenBtn" title="Stream your screen live so Gemini can see the problem and fix it">🖥️ Share Screen</button>
+      <button class="btn btn-vision" id="sendPhotoBtn" title="Send a photo or camera snapshot for analysis">📸 Send Photo</button>
+      <button class="btn btn-secondary" id="echoGuardBtn" title="Echo Guard ON: Prevents speaker audio from echoing into the mic. Tap to switch to Headset mode.">🛡️ Guard: ON</button>
+      <input type="file" id="photoInput" accept="image/*" capture="environment" style="display: none;">
+    </div>
+
+    <!-- Call Session & Voice Persona Controls -->
+    <div class="controls">
+      <select id="voiceSelect" class="voice-select">
+        <option value="Puck">Voice: Puck</option>
+        <option value="Aoede">Voice: Aoede</option>
+        <option value="Charon">Voice: Charon</option>
+        <option value="Fenrir">Voice: Fenrir</option>
+        <option value="Kore">Voice: Kore</option>
+      </select>
+      <button class="btn btn-primary" id="callBtn">📞 Start Call</button>
+    </div>
   </div>
 
   <script>
@@ -241,9 +397,20 @@
     const voiceSelect = document.getElementById('voiceSelect');
     const echoGuardBtn = document.getElementById('echoGuardBtn');
 
+    // Vision UI Elements
+    const shareScreenBtn = document.getElementById('shareScreenBtn');
+    const sendPhotoBtn = document.getElementById('sendPhotoBtn');
+    const photoInput = document.getElementById('photoInput');
+    const screenPreviewCard = document.getElementById('screenPreviewCard');
+    const screenVideo = document.getElementById('screenVideo');
+    const snapFrameBtn = document.getElementById('snapFrameBtn');
+    const stopScreenTopBtn = document.getElementById('stopScreenTopBtn');
+
     let ws = null;
     let audioContext = null;
     let micStream = null;
+    let screenStream = null;
+    let screenCaptureInterval = null;
     let isCalling = false;
     let isAgentSpeaking = false;
     let echoGuardEnabled = true;
@@ -252,6 +419,10 @@
     let activeSources = [];
     let hasSpokenRecently = false;
     let lastVoiceTime = 0;
+
+    // Read userId from URL if provided by /call command
+    const urlParams = new URLSearchParams(window.location.search);
+    const userIdParam = urlParams.get('userId') || '';
 
     echoGuardBtn.addEventListener('click', () => {
       echoGuardEnabled = !echoGuardEnabled;
@@ -268,7 +439,7 @@
 
     function escapeHtml(text) {
       const div = document.createElement('div');
-      div.textContent = text;
+      div.textContent = text || '';
       return div.innerHTML;
     }
 
@@ -293,15 +464,39 @@
       transcriptBox.scrollTop = transcriptBox.scrollHeight;
     }
 
+    function appendUserPhotoNotice(dataUrl) {
+      currentAgentBubble = null;
+      const entry = document.createElement('div');
+      entry.className = 'transcript-entry user';
+      entry.innerHTML = `<span class="user-label">👤 You: </span><span>📸 Sent photo for analysis</span><br><img class="thumb-img" src="${dataUrl}" alt="Photo sent" />`;
+      transcriptBox.appendChild(entry);
+      transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
+    function appendToolNotice(name, text, isResult = false) {
+      currentAgentBubble = null;
+      const entry = document.createElement('div');
+      entry.className = 'transcript-entry tool';
+      entry.innerHTML = `<span class="tool-label">${isResult ? '✅ Result' : '🔧 Fixing'} (${escapeHtml(name)}): </span><span>${escapeHtml(text)}</span>`;
+      transcriptBox.appendChild(entry);
+      transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
     function finishTurn() {
       currentAgentBubble = null;
     }
 
+    /* ----------------------------------------------------
+       Call Connection & WebSocket Setup
+    ---------------------------------------------------- */
     async function startCall() {
       try {
-        statusText.textContent = 'Connecting to Gemini Live...';
+        statusText.textContent = 'Connecting to Gemini 3.8 Live...';
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/live-call?voice=${encodeURIComponent(voiceSelect.value)}`;
+        let wsUrl = `${protocol}//${window.location.host}/ws/live-call?voice=${encodeURIComponent(voiceSelect.value)}`;
+        if (userIdParam) {
+          wsUrl += `&userId=${encodeURIComponent(userIdParam)}`;
+        }
 
         ws = new WebSocket(wsUrl);
         ws.binaryType = 'arraybuffer';
@@ -313,7 +508,7 @@
           callBtn.textContent = '❌ End Call';
           callBtn.className = 'btn btn-danger';
           orb.className = 'orb active';
-          statusText.textContent = 'Connected! Speak freely into your mic.';
+          statusText.textContent = 'Connected! Speak, share screen, or send photos.';
         };
 
         ws.onmessage = async (event) => {
@@ -324,6 +519,10 @@
                 appendAgentTranscript(data.text);
               } else if (data.type === 'user_transcript') {
                 appendUserTranscript(data.text);
+              } else if (data.type === 'tool_call') {
+                appendToolNotice(data.name, data.text || 'Running command...', false);
+              } else if (data.type === 'tool_result') {
+                appendToolNotice(data.name, data.result, true);
               } else if (data.type === 'turn_complete') {
                 finishTurn();
               } else if (data.type === 'interrupted') {
@@ -388,7 +587,7 @@
         outputData.fill(0); // Silence loopback to prevent mic feedback into speakers
         if (!isCalling || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-        // Echo Guard: when Gemini is speaking on speaker, mute mic to prevent self-interruption!
+        // Echo Guard: when Gemini is speaking on speaker, mute mic to prevent self-interruption
         if (echoGuardEnabled && isAgentSpeaking) {
           return;
         }
@@ -462,11 +661,228 @@
         if (activeSources.length === 0 && (!audioContext || audioContext.currentTime >= scheduledTime - 0.05)) {
           isAgentSpeaking = false;
           orb.className = 'orb active';
-          statusText.textContent = 'Listening... Speak into your mic.';
+          statusText.textContent = 'Listening... Speak or share your screen.';
         }
       };
     }
 
+    /* ----------------------------------------------------
+       Live Screen Sharing Feature (1 FPS Video to Gemini)
+    ---------------------------------------------------- */
+    async function startScreenShare() {
+      if (!isCalling || !ws || ws.readyState !== WebSocket.OPEN) {
+        alert("Please tap '📞 Start Call' first so Gemini is connected to talk and inspect your screen!");
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        alert("Screen sharing is not supported by your current browser environment. You can use '📸 Send Photo' to take and send photos instead!");
+        return;
+      }
+
+      try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            cursor: "always",
+            frameRate: { max: 5 },
+          },
+          audio: false,
+        });
+
+        const track = screenStream.getVideoTracks()[0];
+        track.onended = () => {
+          stopScreenShare();
+        };
+
+        screenVideo.srcObject = screenStream;
+        screenPreviewCard.style.display = 'flex';
+        orb.classList.add('sharing');
+        shareScreenBtn.textContent = '🛑 Stop Screen';
+        shareScreenBtn.classList.add('active');
+
+        // Notify Gemini in conversation turn
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'text',
+            text: '[User started sharing their screen. You are now receiving real-time video frames. Look for any errors, code bugs, or problem symptoms and explain how to fix them.]',
+          }));
+        }
+
+        // Start capture loop at 1 FPS (1000ms)
+        if (screenCaptureInterval) clearInterval(screenCaptureInterval);
+        screenCaptureInterval = setInterval(() => {
+          if (!screenStream || !isCalling || !ws || ws.readyState !== WebSocket.OPEN) return;
+          captureAndSendFrame(screenVideo, 'screen');
+        }, 1000);
+
+        statusText.textContent = '🔴 Screen sharing active: streaming to Gemini';
+      } catch (err) {
+        console.warn('Screen share error or cancelled:', err);
+        if (err.name !== 'NotAllowedError') {
+          statusText.textContent = 'Screen share cancelled: ' + err.message;
+        }
+      }
+    }
+
+    function stopScreenShare() {
+      if (screenCaptureInterval) {
+        clearInterval(screenCaptureInterval);
+        screenCaptureInterval = null;
+      }
+      if (screenStream) {
+        screenStream.getTracks().forEach((track) => track.stop());
+        screenStream = null;
+      }
+      screenVideo.srcObject = null;
+      screenPreviewCard.style.display = 'none';
+      orb.classList.remove('sharing');
+      shareScreenBtn.textContent = '🖥️ Share Screen';
+      shareScreenBtn.classList.remove('active');
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'text',
+          text: '[User stopped sharing their screen.]',
+        }));
+      }
+      if (isCalling) {
+        statusText.textContent = 'Screen share stopped. Listening...';
+      }
+    }
+
+    function captureAndSendFrame(videoEl, source = 'screen', isSnapshot = false) {
+      if (!videoEl || !videoEl.videoWidth) return null;
+      const canvas = document.createElement('canvas');
+      const maxDim = 1024;
+      let w = videoEl.videoWidth;
+      let h = videoEl.videoHeight;
+      if (w > maxDim || h > maxDim) {
+        if (w > h) {
+          h = Math.round((h * maxDim) / w);
+          w = maxDim;
+        } else {
+          w = Math.round((w * maxDim) / h);
+          h = maxDim;
+        }
+      }
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(videoEl, 0, 0, w, h);
+
+      const quality = isSnapshot ? 0.8 : 0.65;
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      const base64 = dataUrl.split(',')[1];
+
+      if (base64 && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'image_frame',
+          data: base64,
+          mimeType: 'image/jpeg',
+          source,
+        }));
+      }
+      return dataUrl;
+    }
+
+    /* ----------------------------------------------------
+       Send Photo & Snapshot Feature
+    ---------------------------------------------------- */
+    async function handlePhotoUpload(file) {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const rawDataUrl = e.target.result;
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const maxDim = 1280;
+          let w = img.width;
+          let h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            } else {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+
+          const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          const base64 = optimizedDataUrl.split(',')[1];
+
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'image_frame',
+              data: base64,
+              mimeType: 'image/jpeg',
+              source: 'photo',
+            }));
+
+            ws.send(JSON.stringify({
+              type: 'text',
+              text: '[User sent a photo for analysis. Inspect the image closely, explain any problem or error shown, and offer or apply a fix.]',
+            }));
+
+            appendUserPhotoNotice(optimizedDataUrl);
+            statusText.textContent = '📸 Photo sent! Gemini is analyzing...';
+          }
+        };
+        img.src = rawDataUrl;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    sendPhotoBtn.addEventListener('click', () => {
+      if (!isCalling) {
+        alert("Please tap '📞 Start Call' first so Gemini is connected to talk and analyze your photo!");
+        return;
+      }
+      photoInput.click();
+    });
+
+    photoInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (file) {
+        handlePhotoUpload(file);
+        photoInput.value = '';
+      }
+    });
+
+    snapFrameBtn.addEventListener('click', () => {
+      if (!screenStream || !screenVideo.videoWidth) return;
+      const dataUrl = captureAndSendFrame(screenVideo, 'snapshot', true);
+      if (dataUrl) {
+        appendUserPhotoNotice(dataUrl);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'text',
+            text: '[User captured a snapshot of their screen. Look closely at this freeze-frame and tell them what problem you see and how to fix it.]',
+          }));
+        }
+        statusText.textContent = '📸 Screen snapshot sent for analysis!';
+      }
+    });
+
+    stopScreenTopBtn.addEventListener('click', () => {
+      stopScreenShare();
+    });
+
+    shareScreenBtn.addEventListener('click', () => {
+      if (screenStream) {
+        stopScreenShare();
+      } else {
+        startScreenShare();
+      }
+    });
+
+    /* ----------------------------------------------------
+       End Call & Cleanup
+    ---------------------------------------------------- */
     function endCall() {
       isCalling = false;
       isAgentSpeaking = false;
@@ -476,6 +892,8 @@
         try { s.stop(); } catch {}
       }
       activeSources = [];
+      stopScreenShare();
+
       callBtn.textContent = '📞 Start Call';
       callBtn.className = 'btn btn-primary';
       orb.className = 'orb';

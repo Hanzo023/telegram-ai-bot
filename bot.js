@@ -2892,16 +2892,16 @@ bot.command(['call', 'live_call'], async (ctx) => {
   const userVoice = getUserVoice(userId);
   const publicBase = getPublicBaseUrl();
   const callUrl = publicBase
-    ? `${publicBase}/live-call?voice=${encodeURIComponent(userVoice)}`
-    : `http://localhost:${PORT}/live-call?voice=${encodeURIComponent(userVoice)}`;
+    ? `${publicBase}/live-call?voice=${encodeURIComponent(userVoice)}&userId=${encodeURIComponent(userId)}`
+    : `http://localhost:${PORT}/live-call?voice=${encodeURIComponent(userVoice)}&userId=${encodeURIComponent(userId)}`;
 
   const kb = new InlineKeyboard();
   if (callUrl.startsWith('https://')) {
-    kb.webApp('📞 Start Live Voice Call (In-App)', callUrl)
+    kb.webApp('📞 Start Live Call (Vision + Voice)', callUrl)
       .row()
       .url('🌐 Open in Browser', callUrl);
   } else {
-    kb.url('📞 Open Voice Call WebApp', callUrl);
+    kb.url('📞 Open Live Call WebApp', callUrl);
   }
 
   const notice = !publicBase
@@ -2909,11 +2909,12 @@ bot.command(['call', 'live_call'], async (ctx) => {
     : '';
 
   await ctx.reply(
-    `🎙️ *Gemini 3.8 Live Voice Call*\n\n` +
-    `Experience real-time, bidirectional voice conversations with Gemini 3.8 Live over WebSockets.\n\n` +
+    `🎙️ *Gemini 3.8 Live Call (Voice & Vision)*\n\n` +
+    `Real-time bidirectional voice call with multimodal vision and autonomous fixing tools!\n\n` +
     `• **Active Voice:** \`${userVoice}\`\n` +
-    `• **Latency:** Ultra-low, sub-second speech streaming\n` +
-    `• **Audio Engine:** 16kHz duplex mic ↔ 24kHz Gemini Live${notice}\n\n` +
+    `• **🖥️ Live Screen Sharing:** Stream your screen so Gemini can see code errors, bugs, or app issues in real time\n` +
+    `• **📸 Photo Analysis:** Send camera snapshots or code photos for instant diagnosis\n` +
+    `• **🔧 Autonomous Problem Fixing:** Gemini can run commands and edit code directly on your connected device${notice}\n\n` +
     `Tap below to open the WebApp and start talking:`,
     {
       parse_mode: 'Markdown',
