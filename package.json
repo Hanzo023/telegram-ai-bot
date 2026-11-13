@@ -1,0 +1,37 @@
+{
+  "name": "telegram-ai-bot",
+  "version": "1.0.0",
+  "description": "Personal Telegram AI assistant powered 100% natively by Google Gemini",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node watchdog.js",
+    "bot": "node bot.js",
+    "watchdog": "node watchdog.js",
+    "laptop": "node laptop-runner.js",
+    "sync": "node sync-drive-d.js",
+    "test:bot": "node tools/simulate_bot.js",
+    "vision": "python tools/capture_app.py",
+    "vision:browser": "python tools/capture_app.py Brave",
+    "vision:tg": "python tools/capture_app.py Telegram"
+  },
+  "engines": {
+    "node": ">=20.16.0"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "ai",
+    "gemini"
+  ],
+  "author": "Din Sopheakyuth",
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "^2.28.0",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.32.0",
+    "pdf-parse": "^2.4.5",
+    "puppeteer-core": "^25.16.0",
+    "ws": "^8.18.0"
+  }
+}
